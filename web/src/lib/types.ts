@@ -388,8 +388,10 @@ export type AppMode = 'read' | 'edit';
 export type ThemeName = 'light' | 'dark';
 /** The stored user choice; `system` follows the OS appearance live. */
 export type ThemePreference = ThemeName | 'system';
-/** Curated typography presets — see web/src/lib/typeset.ts. */
-export type TypesetName = 'editorial' | 'modern' | 'compact';
+/** Curated typography presets — see web/src/lib/typeset.ts. Any change here
+ *  must be mirrored in the `TYPESETS` allowlist in src/prefs.rs, which
+ *  normalizes the persisted value before stamping it into the page. */
+export type TypesetName = 'editorial' | 'modern' | 'compact' | 'manuscript' | 'terminal';
 export type DiagMode = 'full' | 'editor_only' | 'minimal';
 
 export interface InitPayload {

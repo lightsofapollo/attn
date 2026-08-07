@@ -11,10 +11,23 @@
     box-sizing: border-box;
 }
 
-/* Global font scaling (Cmd/Ctrl + / - / 0) */
+/* Global font scaling (Cmd/Ctrl + / - / 0).
+
+   `--attn-base-font-size` is the rem baseline for the WHOLE app — chrome
+   included — so it is deliberately typeset-invariant. A typeset preset that
+   changes it rescales every header, dialog, and control on the page; that is
+   the bug the doc-scoped tokens below exist to prevent. See typeset.css. */
 :root {
     --attn-base-font-size: 15.5px;
     --attn-font-scale: 1;
+
+    /* Document-scoped type tokens — the only surface a typeset preset owns.
+       Defaults here ARE the editorial preset, so an unstamped document (a
+       test harness, a bare embed) renders exactly as the default. */
+    --doc-font: var(--serif);
+    --attn-doc-scale: 1;
+    --doc-leading: 1.72;
+    --doc-tracking: 0.003em;
 }
 
 html {
@@ -87,23 +100,39 @@ nav,
 /* Reading surface: left-set sheet, one shared content column — prose and
    wide blocks (tables, mermaid, code) all cap at the same edge; oversized
    tables scroll within it (Shared-Column Rule, 2026-07-13). */
+/* The document's own type context. Everything inside sizes off THIS element
+   (em), not the root (rem), so a typeset can rescale the reading column
+   without moving a single pixel of app chrome. At `--attn-doc-scale: 1`,
+   1em === 1rem and the rendering is identical to the pre-token layout. */
+.attn-doc {
+    font-family: var(--doc-font);
+    font-size: calc(1rem * var(--attn-doc-scale));
+    line-height: var(--doc-leading);
+    letter-spacing: var(--doc-tracking);
+}
+
 article.attn-doc {
     max-width: none;
     margin: 0;
     padding: 2.5rem clamp(1rem, 2.8vw, 2rem) 6rem;
 }
 
-article.attn-doc > :is(p, h1, h2, h3, h4, h5, h6, ul, ol, dl, blockquote, pre, table, .mermaid-container, .prose-scroll-x) {
+/* Keep this list in step with `.ProseMirror > :is(…)` in prosemirror.css — a
+   block that renders in one surface and not the other still belongs in both,
+   so the two lists can be diffed rather than reasoned about. */
+article.attn-doc > :is(p, h1, h2, h3, h4, h5, h6, ul, ol, dl, blockquote, pre, table, .mermaid-container, .math-container, .frontmatter-card, .prose-scroll-x) {
     max-width: var(--content-measure);
     margin-inline: auto;
 }
 
-/* Typography scale */
-.attn-doc h1 { font-size: 2rem; line-height: 1.18; margin-top: 2.5rem; margin-bottom: 0.75rem; font-weight: 700; letter-spacing: -0.02em; }
-.attn-doc h2 { font-size: 1.5rem; line-height: 1.24; margin-top: 2.25rem; margin-bottom: 0.5rem; font-weight: 600; letter-spacing: -0.015em; }
-.attn-doc h3 { font-size: 1.25rem; line-height: 1.3; margin-top: 2rem; margin-bottom: 0.4rem; font-weight: 600; letter-spacing: -0.01em; }
-.attn-doc h4 { font-size: 1.1rem; line-height: 1.4; margin-top: 1.75rem; margin-bottom: 0.4rem; font-weight: 600; letter-spacing: -0.005em; }
-.attn-doc h5, .attn-doc h6 { font-size: 1rem; line-height: 1.5; margin-top: 1.5rem; margin-bottom: 0.4rem; font-weight: 600; }
+/* Typography scale. Sizes are `em` (relative to the document's own scale);
+   margins stay `rem` so vertical rhythm is anchored to the app baseline and a
+   preset's margin overrides mean the same thing at every doc scale. */
+.attn-doc h1 { font-size: 2em; line-height: 1.18; margin-top: 2.5rem; margin-bottom: 0.75rem; font-weight: 700; letter-spacing: -0.02em; }
+.attn-doc h2 { font-size: 1.5em; line-height: 1.24; margin-top: 2.25rem; margin-bottom: 0.5rem; font-weight: 600; letter-spacing: -0.015em; }
+.attn-doc h3 { font-size: 1.25em; line-height: 1.3; margin-top: 2rem; margin-bottom: 0.4rem; font-weight: 600; letter-spacing: -0.01em; }
+.attn-doc h4 { font-size: 1.1em; line-height: 1.4; margin-top: 1.75rem; margin-bottom: 0.4rem; font-weight: 600; letter-spacing: -0.005em; }
+.attn-doc h5, .attn-doc h6 { font-size: 1em; line-height: 1.5; margin-top: 1.5rem; margin-bottom: 0.4rem; font-weight: 600; }
 .attn-doc h6 { font-style: italic; font-weight: 400; }
 
 .attn-doc h1:first-child { margin-top: 0; }
@@ -161,7 +190,7 @@ a:focus-visible {
     border: 0;
     border-radius: 0;
     padding: 0;
-    font-size: 0.85rem;
+    font-size: 0.85em;
 }
 
 /* Lists — markers restored over the Tailwind preflight reset: a small rust
@@ -244,12 +273,31 @@ a:focus-visible {
     background-size: 100% 100%;
 }
 
-/* Tables */
+/* Tables — the same panel a code block sits on (attn-11g4.3). A table and a
+   fenced block carry the same structural weight, so they get the same
+   surface: --code-block fill, 1px border, 6px radius, the same inset lip.
+
+   `border-collapse: separate` + `border-spacing: 0` is what makes the radius
+   real: a collapsed table merges its cell borders into the table box and
+   squares the corners off. Spacing stays 0 so the row rules read as one
+   continuous line, exactly as they did under `collapse`.
+
+   No cell carries a fill, so nothing paints past the rounded corners and no
+   clipping wrapper is required — which matters, because the read-only viewer
+   renders a bare <table> straight out of comrak with nothing to wrap it in.
+   The editor's twin lives in prosemirror.css (`@layer components` beats this
+   layer, so it must repeat the surface — keep the two in step). */
 .attn-doc table {
     width: 100%;
-    border-collapse: collapse;
-    margin-bottom: 1rem;
-    font-size: 1rem;
+    border-collapse: separate;
+    border-spacing: 0;
+    /* Matches `pre` — a panel needs more tail than running prose. */
+    margin-bottom: 1.25rem;
+    font-size: 1em;
+    background: var(--code-block);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: inset 0 1px 3px oklch(0 0 0 / 4%);
 }
 
 .attn-doc th, .attn-doc td {
@@ -258,14 +306,32 @@ a:focus-visible {
     border-bottom: 1px solid var(--border);
 }
 
+/* The panel's own border closes the table, so the last row's rule would
+   double it — and a straight line running across a rounded corner reads as a
+   rendering defect. `> :last-child` is the last row section (tbody in both the
+   comrak thead/tbody shape and ProseMirror's colgroup/tbody one). */
+.attn-doc table > :last-child > tr:last-child > :is(th, td) {
+    border-bottom: 0;
+}
+
 .attn-doc th {
     font-family: var(--sans);
     font-weight: 600;
-    font-size: 0.7rem;
+    font-size: 0.7em;
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--muted-foreground);
-    border-bottom-width: 2px;
+    /* Rebalanced against the filled surface: 2px of --border was tuned to
+       separate the header from open page, and reads as a bar once the table
+       is a bordered panel. One rule at twice the ink of --border separates
+       just as clearly without competing with the frame. */
+    border-bottom-color: color-mix(in oklch, var(--foreground) 32%, transparent);
+}
+
+/* Inline code inside a cell would otherwise be --code-block on --code-block.
+   Drop it to the page surface so it still reads as a recessed chip. */
+.attn-doc :is(th, td) code {
+    background: var(--background);
 }
 
 /* Blockquotes */

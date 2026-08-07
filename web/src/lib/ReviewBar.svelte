@@ -102,6 +102,12 @@
      * bar, so its chips sit in flex flow rather than floating over paper.
      */
     inline?: boolean;
+    /**
+     * Collapse the share control to a glyph. Opt-in per surface rather than
+     * derived from `inline`: the hosted owner header is also inline but has a
+     * full-width bar to spend, whereas the native 44px header does not.
+     */
+    compactShare?: boolean;
   }
 
   let {
@@ -116,6 +122,7 @@
     onJumpTo,
     railToggle = false,
     inline = false,
+    compactShare = false,
     onDockWidth,
   }: Props = $props();
 
@@ -242,6 +249,7 @@
         <ShareChip
           {isOwner}
           {shareOpen}
+          compact={compactShare}
           onManageShare={isOwner ? handleShareClick : undefined}
           {onReconnect}
         />

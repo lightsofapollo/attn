@@ -108,6 +108,8 @@
   import { reviewStore } from './lib/review/store.svelte';
   import { consumePendingRoomFocus } from './lib/review/pending-room-focus';
   import ReviewMargin from './lib/ReviewMargin.svelte';
+  import BrandMark from './lib/BrandMark.svelte';
+  import OpenLocalFiles from './lib/OpenLocalFiles.svelte';
   import ReviewFileNav from './lib/ReviewFileNav.svelte';
   import ReviewFileTree from './lib/ReviewFileTree.svelte';
   import {
@@ -292,6 +294,13 @@
   });
 
   let autoSelectedRoomId = $state<string | null>(null);
+  // The room an exit-review is currently walking out of. `confirmReviewExit`
+  // clears the selection and then awaits a flush so the rail/margin unmount
+  // BEFORE the document swaps — which means that during that flush `activePath`
+  // is still the reviewed file. Both room-focus effects below resolve the room
+  // from the path, so without a latch they immediately re-select the room the
+  // user just left. Released as soon as focus resolves to anything else.
+  let reviewExitSuppressedRoomId = $state<string | null>(null);
   $effect(() => {
     const roomId = shouldAutoSelectOnlyRoom({
       hasActiveTab,
@@ -418,6 +427,17 @@
     const roomId = ownerRoomIdForActivePath;
     const activeRoom = reviewStore.activeRoom;
     if (activeRoom?.role === 'reviewer') return;
+
+    // An exit-review that hasn't landed yet: the user has confirmed, the room
+    // is cleared, but the navigation runs a flush later — so `activePath` is
+    // still the reviewed file and resolving it here would re-select the room
+    // inside the very flush the exit is waiting on. That undoes the exit
+    // (the rail never finishes collapsing) and re-arms the room's live
+    // connection under a half-torn-down collab session. Hold until focus moves.
+    if (reviewExitSuppressedRoomId !== null) {
+      if (roomId === reviewExitSuppressedRoomId) return;
+      reviewExitSuppressedRoomId = null;
+    }
 
     if (roomId !== null) {
       // `ownerRoomForPath` resolves through the share ROOT, which for a
@@ -1829,16 +1849,32 @@
     const navigate = pendingReviewExitNavigation;
     pendingReviewExitNavigation = null;
     reviewExitConfirmOpen = false;
+    // Nothing parked means the dialog is stale (a cancel already consumed the
+    // closure, or this is a second confirm). Tearing the review down with
+    // nowhere to go would strand the user, so just close.
+    if (navigate === null) return;
     const exitingRoomId = reviewStore.currentRoomId;
     // Claim the auto-select latch for the room being left: a reviewer with a
     // single room and no local tab would otherwise be pulled straight back in
     // by the only-room effect before the navigation lands.
     if (exitingRoomId !== null) autoSelectedRoomId = exitingRoomId;
+    // Same job for the owner's path→room focus effect, which reads `activePath`
+    // — still the reviewed file until `navigate()` below runs.
+    reviewExitSuppressedRoomId = exitingRoomId;
     reviewStore.clearRoomSelection();
-    // Let the rail and margin cards actually unmount before the document
-    // swaps — the ordering IS the fix for the glitchy switch.
-    await tick();
-    navigate?.();
+    try {
+      // Let the rail and margin cards actually unmount before the document
+      // swaps — the ordering IS the fix for the glitchy switch.
+      await tick();
+    } catch (error) {
+      // Svelte aborts an entire flush on the first effect that throws, and
+      // `tick()` re-throws it here. A failed teardown must never cancel the
+      // user's navigation: this handler's promise is not awaited by the click,
+      // so the rejection would be silent and the file they asked for would
+      // simply never open — the review-exit-does-nothing bug (attn-11g4.5).
+      console.error('[attn] review-exit teardown failed', error);
+    }
+    navigate();
   }
 
   function cancelReviewExit(): void {
@@ -3030,14 +3066,19 @@
         suggestionAuthor={userProfile.effectiveName}
       />
     {:else if !hasActiveTab}
-      <div class="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-muted-foreground">
-        <p class="text-sm font-medium text-foreground">No file selected</p>
-        {#if hasSidebar}
+      {#if hasSidebar}
+        <div class="flex h-full flex-col items-center justify-center gap-2 px-6 text-center text-muted-foreground">
+          <p class="text-sm font-medium text-foreground">No file selected</p>
           <p class="text-sm opacity-75">Choose a file from the sidebar to begin.</p>
-        {:else}
-          <p class="text-sm opacity-75">Launch with a file or directory path, or open this app from a project folder.</p>
-        {/if}
-      </div>
+        </div>
+      {:else}
+        <!-- Nothing open and nowhere to click: the one place the app has to
+             offer a way IN. In a browser that is the file picker / drop
+             target; in the native window it stays the launch hint. -->
+        <OpenLocalFiles
+          nativeHint="Launch with a file or directory path, or open this app from a project folder."
+        />
+      {/if}
     {:else if activeFileType === 'markdown'}
       <Editor
         bind:this={editorRef}
@@ -3119,19 +3160,28 @@
 {#snippet nativeHeader()}
   <!-- One header grammar on native, hosted desktop, and mobile: identity +
        document on the left; local state, sharing, people, and comments on the
-       right. The whole quiet surface remains a native window drag target. -->
+       right. The whole quiet surface remains a native window drag target.
+
+       The bar is CHROME, so it sits on the chrome plane (`--panel-surface`
+       behind a `--panel-border` hairline) alongside the sidebar and the
+       right rail — not on `bg-background`. It used to paint the paper, which
+       made the top of the window one undifferentiated field of colour broken
+       only by a hairline (user-reported). tokens.css picked the panel value
+       so that "with both edges recessed equally the document reads as a lit
+       sheet between two rails"; a header on the paper was the last gap in
+       that story. Same change in HostedDesktopWorkspaceFrame (owner-header)
+       and BrowserReviewApp (browser-review-header) — one grammar, one plane. -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <header
-    class={`relative z-40 flex h-11 shrink-0 items-center gap-2 border-b border-border bg-background pr-3 ${hasSidebar ? 'pl-3' : 'pl-[6.5rem]'}`}
+    class={`relative z-40 flex h-11 shrink-0 items-center gap-2 border-b border-[var(--panel-border)] bg-[var(--panel-surface)] pr-3 ${hasSidebar ? 'pl-3' : 'pl-[6.5rem]'}`}
     data-slot="native-header"
     onmousedown={dragWindow}
     ondblclick={zoomWindow}
   >
-    <span
-      class="select-none font-serif text-sm font-bold leading-none text-foreground"
-      data-slot="native-brand"
-      aria-label="attn"
-    >attn</span>
+    <span class="flex shrink-0 items-center gap-1.5" data-slot="native-brand" aria-label="attn">
+      <BrandMark size={18} />
+      <span class="select-none font-serif text-sm font-bold leading-none text-foreground">attn</span>
+    </span>
     <span class="h-3 w-px shrink-0 bg-border" aria-hidden="true"></span>
     <span
       class="min-w-0 truncate font-sans text-[13px] font-medium text-foreground"
@@ -3140,24 +3190,67 @@
     >{headerDocumentName}</span>
     <div class="ml-auto flex h-full min-w-0 shrink-0 items-center gap-1.5">
       {#if !isReviewerViewingSnapshot && mode === 'edit' && activeFileType === 'markdown'}
+        <!-- Icon, not the sentence — the same move the mobile edit bar made in
+             attn-n01r.5, now applied to the header. Two full sentences ("Saved
+             on this device", "Sharing · <file>") were eating most of the
+             right-hand cluster for status that is unchanged 99% of the time.
+             The glyph differs per state, not just the colour (PRODUCT.md:
+             never rely on colour alone), and the whole sentence is on `title`
+             for hover.
+
+             The sentence is REAL (sr-only) text inside the live region, not an
+             `aria-label`: a `role="status"` announces the content that
+             changed, and the only thing changing here is an `aria-hidden`
+             glyph — a label on the region is not a content change, so an
+             aria-label-only chip would flip from saved to dirty in total
+             silence. Same "never dropped, only hidden" rule ShareChip uses. -->
         <span
-          class="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full border border-border/50 bg-background/55 px-2.5 font-sans text-xs text-muted-foreground"
+          class="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground"
           data-slot="native-save-chip"
           data-state={editorDirty ? 'dirty' : 'saved'}
           role="status"
+          title={editorDirty ? 'Unsaved changes' : 'Saved on this device'}
         >
-          <span
-            class="size-1.5 rounded-full"
-            style={`background: ${editorDirty ? 'var(--amber-deep)' : 'var(--review-card-suggestion-accent)'};`}
-            aria-hidden="true"
-          ></span>
-          {editorDirty ? 'Unsaved changes' : 'Saved on this device'}
+          <!-- `save-check` / `save-pen`, vendored from Lucide (ISC) rather
+               than imported: this repo pins @lucide/svelte 0.561, which
+               predates both icons — they arrive in 1.x, and a major bump of
+               the icon library for one glyph is not worth the regression
+               surface across the ~100 icons the app imports. Paths are
+               verbatim from lucide 1.29.0; see lucide.dev/icons/save-check.
+               Keeping BOTH states in the save family (disk + check / disk +
+               pen) means they differ by glyph, not just tint. -->
+          {#if editorDirty}
+            <svg
+              class="size-3.5 text-amber-deep" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2" stroke-linecap="round"
+              stroke-linejoin="round" aria-hidden="true"
+            >
+              <path d="M13.33 13H8a1 1 0 0 0-1 1v7" />
+              <path d="M14.363 17.634a2 2 0 0 0-.506.854l-.837 2.87a.5.5 0 0 0 .62.62l2.87-.837a2 2 0 0 0 .854-.506l4.013-4.009a1 1 0 1 0-3.004-3.004z" />
+              <path d="M7 3v4a1 1 0 0 0 1 1h7" />
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h10.2a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4v.3" />
+            </svg>
+          {:else}
+            <svg
+              class="size-3.5" viewBox="0 0 24 24" fill="none"
+              stroke="currentColor" stroke-width="2" stroke-linecap="round"
+              stroke-linejoin="round" aria-hidden="true"
+            >
+              <path d="M12.5 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h10.2a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4v4.35" />
+              <path d="m16 19 2 2 4-4" />
+              <path d="M17 15.13V14a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7" />
+              <path d="M7 3v4a1 1 0 0 0 1 1h7" />
+            </svg>
+          {/if}
+          <span class="sr-only" data-slot="native-save-chip-label"
+            >{editorDirty ? 'Unsaved changes' : 'Saved on this device'}</span
+          >
         </span>
       {/if}
       {#if showBreadcrumbShare}
         <button
           type="button"
-          class="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+          class="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
           data-slot="native-header-share"
           aria-label="Share for review"
           title="Share for review"
@@ -3169,7 +3262,7 @@
       {#if !isReviewerViewingSnapshot && activeFileType === 'html'}
         <button
           type="button"
-          class="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+          class="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
           aria-label="Open in browser"
           title="Open in browser"
           onclick={() => openExternal(activePath)}
@@ -3188,12 +3281,32 @@
         onJumpTo={handleJumpToPeer}
         railToggle={true}
         inline={true}
+        compactShare={true}
       />
+      <!-- Active/pressed convention for header icons (attn-11g4.6): while the
+           surface an icon owns is open it promotes from a borderless muted
+           ghost to a filled, outlined pill in the accent. Fill + outline
+           arrive WITH the tint, so the state is never colour-only
+           (PRODUCT.md), and `aria-pressed` reports it to assistive tech.
+           SnapshotBadge's chips carry the same treatment (reporting through
+           `aria-expanded`, which is what a popover trigger owes AT).
+
+           The REST-state hover is `bg-accent`, not `bg-muted`: `--muted` is
+           tuned against the paper, and on the recessed bar it collapses —
+           in Ink it lands 0.003 off `--panel-surface`, so hovering would do
+           nothing visible. `--accent` is an alpha overlay (ink in Paper,
+           white in Ink), so it steps the right way off whatever plane it is
+           painted on, and it is already what the neighbouring ReviewBar
+           buttons use. -->
       <button
         type="button"
-        class="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+        class="inline-flex size-7 shrink-0 items-center justify-center rounded-md border text-muted-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 {settingsOpen
+          ? 'border-primary/35 bg-primary/10 text-primary hover:bg-primary/15'
+          : 'border-transparent hover:bg-accent hover:text-foreground'}"
         data-slot="native-header-settings"
+        data-active={settingsOpen ? 'true' : 'false'}
         aria-label="Settings"
+        aria-pressed={settingsOpen}
         title="Settings — appearance, typeset, background"
         onclick={() => (settingsOpen = true)}
       >

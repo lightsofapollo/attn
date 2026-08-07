@@ -1326,7 +1326,8 @@
   .review-margin-tray {
     position: relative;
     z-index: 2;
-    background: var(--background);
+    /* A card, on whatever the rail is — not a patch of paper. */
+    background: var(--review-card-surface, var(--background));
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 6px;
@@ -1410,7 +1411,9 @@
     height: 28px;
     max-width: calc(100% - 24px);
     padding: 0 10px;
-    background: var(--muted);
+    /* Backdrop-aware, not `--muted`: the docked rail paints `--panel-surface`,
+       which in ink sits 0.003 off `--muted` and erased this chip's fill. */
+    background: var(--rail-chip-surface, var(--muted));
     border: 1px solid var(--border);
     border-radius: 9999px;
     color: var(--muted-foreground);
@@ -1475,7 +1478,9 @@
     box-sizing: border-box;
     width: 28px;
     height: 28px;
-    border: 2px solid var(--background);
+    /* Ringed against the surface it actually sits on: the docked panel in the
+       native rail, the paper in the hosted floating margin. */
+    border: 2px solid var(--rail-backdrop, var(--background));
     border-radius: 9999px;
     color: var(--monogram);
     font-size: 0.85rem;
@@ -1500,7 +1505,8 @@
     width: auto;
     box-sizing: border-box;
     padding: 6px 12px;
-    background: var(--muted);
+    /* Same backdrop-aware fill as the resolved chips it summarizes. */
+    background: var(--rail-chip-surface, var(--muted));
     border: 1px solid var(--border);
     border-radius: 9999px;
     font-size: 0.7rem;
@@ -1531,7 +1537,7 @@
     left: 12px;
     right: 12px;
     padding: 10px 12px;
-    background: var(--popover, var(--background));
+    background: var(--review-card-surface, var(--popover, var(--background)));
     border: 1px solid var(--destructive);
     border-radius: 6px;
     box-shadow: 0 6px 18px rgba(0, 0, 0, 0.15);

@@ -648,14 +648,30 @@
 </div>
 
 <style>
-  /* The accent strip is an INSET SHADOW, not a thick border-left: a 3px
-     border against the 6px corner radius rendered pointy color overshoot
-     past the rounded corners (user-reported offset). The inset shadow is
-     clipped to the rounded padding box, so the strip's ends follow the
-     curve cleanly. `--rmc-accent` is set inline (author color) or by the
-     kind/state rules below. */
+  /* The accent strip is an absolutely positioned `::before`, not an inset
+     shadow and not a border-left. It has been all three:
+       - `border-left: 3px` mitres into the 6px corner radius and wedges a
+         pointy diagonal of color past the card outline (user-reported);
+       - `inset 3px 0 0 0` is clipped to the rounded padding box, so the
+         strip tapers into a curved sliver at both ends (also
+         user-reported: "do not make the colored edge curved").
+     A positioned pseudo-element is the only one of the three that is
+     immune to the radius: it is a plain rectangle painted over the card
+     background, so it stays a straight full-height edge, square at both
+     ends, while the CARD keeps its rounded corners. The card must NOT
+     gain `overflow: hidden`/`clip` — that would re-clip the strip to the
+     radius and bring the curve straight back.
+     `--rmc-accent` is set inline (author color) or by the kind/state
+     rules below; the pseudo reads the same custom property, so all of
+     those overrides keep working unchanged. */
   .review-margin-card {
     display: block;
+    /* Containing block + stacking context for the ::before accent strip.
+       (`backdrop-filter`/`opacity` below establish both as a side effect;
+       stating them keeps the strip's `z-index: -1` from ever escaping the
+       card if either of those changes.) */
+    position: relative;
+    isolation: isolate;
     /* Fluid: the margin slot (or orphan-tray list item) defines the
        width, inset 12px from the rail edges (attn-42y). */
     width: 100%;
@@ -672,14 +688,33 @@
     cursor: pointer;
     text-align: left;
     opacity: 0.94;
-    box-shadow:
-      inset 3px 0 0 0 var(--rmc-accent, transparent),
-      var(--review-card-shadow, 0 10px 28px rgba(0, 0, 0, 0.14));
+    box-shadow: var(--review-card-shadow, 0 10px 28px rgba(0, 0, 0, 0.14));
     backdrop-filter: blur(10px) saturate(1.1);
     transition:
       opacity 120ms ease-out,
       box-shadow 120ms ease-out,
       border-color 120ms ease-out;
+  }
+
+  /* The straight accent edge. Pinned to the padding box (`left/top/bottom:
+     0`), which is exactly where the old inset shadow sat, so content x and
+     card height are unchanged. `z-index: -1` paints it above the card's own
+     background but below every in-flow child, and `border-radius: 0` is
+     stated to make the squareness deliberate rather than incidental. */
+  .review-margin-card::before {
+    content: '';
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: 3px;
+    border-radius: 0;
+    background: var(--rmc-accent, transparent);
+    pointer-events: none;
+    z-index: -1;
+    /* Matches the card's own 120ms box-shadow transition, which is what
+       used to ease the accent color when a card changed state. */
+    transition: background-color 120ms ease-out;
   }
 
   .review-margin-card:hover,
@@ -690,7 +725,6 @@
   .review-margin-card[data-active='true'] {
     opacity: 1;
     box-shadow:
-      inset 3px 0 0 0 var(--rmc-accent, transparent),
       var(--review-card-shadow, 0 10px 28px rgba(0, 0, 0, 0.14)),
       0 0 0 1px color-mix(in oklch, var(--primary) 46%, transparent);
     border-color: var(--accent-foreground, var(--primary));
@@ -849,9 +883,7 @@
   }
 
   .review-margin-card[data-awaiting-reanchor='true'] {
-    box-shadow:
-      inset 3px 0 0 0 var(--rmc-accent, transparent),
-      0 0 0 2px var(--destructive);
+    box-shadow: 0 0 0 2px var(--destructive);
   }
 
   .rmc-body {

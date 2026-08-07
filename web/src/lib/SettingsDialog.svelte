@@ -92,9 +92,9 @@
       <Dialog.Description>Appearance and typography for this device.</Dialog.Description>
     </Dialog.Header>
 
-    <section class="flex flex-col gap-2" aria-labelledby="settings-appearance-heading">
+    <section class="flex flex-col gap-2" aria-labelledby="settings-theme-heading">
       <div>
-        <h3 id="settings-appearance-heading" class="text-sm font-semibold text-foreground">Appearance</h3>
+        <h3 id="settings-theme-heading" class="text-sm font-semibold text-foreground">Theme</h3>
         <p class="mt-0.5 text-xs text-muted-foreground">
           {#if themePreference === 'system'}
             Following your system appearance — currently {effective === 'dark' ? 'Ink' : 'Paper'}.
@@ -106,7 +106,7 @@
       <div
         class="grid grid-cols-3 gap-1 rounded-lg border border-border bg-muted/30 p-1"
         role="radiogroup"
-        aria-label="Appearance"
+        aria-label="Theme"
         data-slot="settings-appearance"
       >
         {#each APPEARANCES as option (option.id)}
@@ -135,28 +135,41 @@
           The reading system for documents. Zoom (⌘ +/−) still applies on top.
         </p>
       </div>
-      <div class="grid gap-1.5" role="radiogroup" aria-label="Typeset" data-slot="settings-typeset">
+      <!-- Every row is a fixed height regardless of which preset is active:
+           the specimen scales inside a locked line box, so picking a typeset
+           never re-flows this list and never re-centers the dialog. -->
+      <div class="grid gap-1" role="radiogroup" aria-label="Typeset" data-slot="settings-typeset">
         {#each TYPESETS as preset (preset.id)}
           <button
             type="button"
             role="radio"
             aria-checked={typeset === preset.id}
             data-slot={`settings-typeset-${preset.id}`}
-            class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md border px-3 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 {typeset === preset.id
+            class="grid grid-cols-[minmax(0,1fr)_auto] items-center gap-3 rounded-md border px-3 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 {typeset === preset.id
               ? 'border-primary/60 bg-primary/[0.04]'
               : 'border-border hover:border-primary/40 hover:bg-muted/40'}"
             onclick={() => chooseTypeset(preset.id)}
           >
             <span class="min-w-0">
-              <span class="block text-sm font-medium text-foreground">{preset.label}</span>
-              <span class="block text-[11px] leading-4 text-muted-foreground">{preset.description}</span>
-              <!-- Live specimen: rendered under the preset's own tokens so the
-                   choice is legible before committing to it. -->
-              <span
-                class="mt-1 block truncate text-sm text-foreground/80"
-                data-typeset={preset.id}
-                style="font-family: var(--serif)"
-              >{preset.specimen}</span>
+              <!-- Fixed line box: the specimen renders at its preset's own
+                   scale, and baseline-aligning a 17px specimen against a 14px
+                   label would make that row taller than the others. -->
+              <span class="flex h-5 items-baseline gap-2.5 overflow-hidden">
+                <span class="shrink-0 text-sm font-medium leading-5 text-foreground">{preset.label}</span>
+                <!-- Live specimen: rendered under the preset's own document
+                     tokens — its face, its scale, its tracking — so the choice
+                     is legible before committing to it. `data-typeset` on this
+                     span is what makes that work, and it is only honest
+                     because every preset declares its full token set
+                     (including the default) in typeset.css. -->
+                <span
+                  class="min-w-0 flex-1 truncate text-foreground/70"
+                  data-typeset={preset.id}
+                  data-slot="settings-typeset-specimen"
+                  style="font-family: var(--doc-font); font-size: calc(0.9rem * var(--attn-doc-scale)); letter-spacing: var(--doc-tracking); line-height: 1.25rem;"
+                >{preset.specimen}</span>
+              </span>
+              <span class="block truncate text-[11px] leading-4 text-muted-foreground">{preset.description}</span>
             </span>
             <span
               class="flex size-5 shrink-0 items-center justify-center rounded-full border {typeset === preset.id

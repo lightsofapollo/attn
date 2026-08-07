@@ -3,61 +3,159 @@
 
    Each preset is a complete reading system — font pairing plus type scale —
    selected in Settings and stamped on <html> as `data-typeset` (seeded by
-   Rust before first paint, see src/prefs.rs). Presets only ever REDEFINE
-   tokens that already exist in tokens.css; no component reads a preset name.
+   Rust before first paint, see src/prefs.rs).
 
-   `editorial` is the default and deliberately declares nothing: the tokens in
-   tokens.css ARE the editorial preset, so the default path has zero override
-   and cannot drift from the app's historical rendering.
+   ---- Chrome invariance (the rule that makes switching feel free) ----
+   A preset may ONLY set document-scoped tokens:
+
+     --doc-font        font family for the reading column
+     --attn-doc-scale  multiplier on the document's own font-size
+     --doc-leading     document line-height
+     --doc-tracking    document letter-spacing
+     --content-measure the shared prose/wide-block column
+
+   ---- When a preset may move the column ----
+   Only when the column IS the preset's identity. Changing `--content-measure`
+   re-wraps every line and moves the document's right edge, which is the most
+   disruptive thing a preset can do — and the 960px default is a REVIEWED
+   decision (attn-vt4: narrower "strangled the mermaid, tables, and code this
+   tool exists to review"), not a neutral starting point. So `manuscript` sets
+   it, because a short measure is the entire point of a book column, and
+   `compact` keeps its long-standing 880px. Everything else inherits 960px.
+   Modern and Terminal briefly carried 920px/900px — arbitrary nudges that
+   re-litigated a settled decision and made switching typeset shuffle the
+   layout for no reader-visible benefit. Terminal's was actively backwards:
+   monospace fits FEWER characters per pixel, so a narrower column shortens
+   the line twice over.
+
+   Note the measure is px, so it does not hold characters-per-line constant
+   across scales — `manuscript` at 17px gets a shorter line than its 660px
+   suggests. That is deliberate here (both push the same direction, toward a
+   book measure), but it is the thing to revisit if presets ever need to hit a
+   target line length; `ch` units would be the tool.
+
+   It must NEVER touch `--attn-base-font-size` (the rem baseline for ALL app
+   chrome) or `--serif`/`--sans`/`--mono` (the global family tokens). Presets
+   used to do both, which is why changing one resized the header, the dialogs,
+   and every control in the app: `html { font-size }` is derived from
+   `--attn-base-font-size`, so a preset was silently rescaling every rem on the
+   page. Chrome now holds still and only the document reflows.
+
+   ---- Why every preset declares, including the default ----
+   `editorial` used to declare nothing (the tokens in tokens.css WERE the
+   preset). That made nested overrides lie: the Settings specimens carry their
+   own `data-typeset`, so an `editorial` specimen inherited whatever the
+   ACTIVE preset had set on <html> and rendered in the wrong face. Each preset
+   now states its full hand, so `[data-typeset]` is authoritative wherever it
+   appears. `editorial`'s values are the tokens.css values verbatim —
+   changing them is a visual regression, not a preset tweak.
 
    Composition: presets are orthogonal to light/dark (which owns color) and to
-   the Cmd +/- font scale (which multiplies --attn-base-font-size).
+   the Cmd +/- font scale (which multiplies --attn-base-font-size, and so
+   still zooms chrome and document together).
    ============================================================ */
+
+/* --- Editorial: the attn default — Source Serif on a wide review column -- */
+[data-typeset='editorial'] {
+  --doc-font: var(--serif);
+  --attn-doc-scale: 1;
+  --doc-leading: 1.72;
+  --doc-tracking: 0.003em;
+  --content-measure: 960px;
+}
 
 /* --- Modern: sans-serif throughout ------------------------------------ */
 [data-typeset='modern'] {
-  --serif: 'Source Sans 3 Variable', 'Source Sans 3', -apple-system, system-ui, sans-serif;
-  --attn-base-font-size: 15px;
-}
-
-[data-typeset='modern'] body {
-  line-height: 1.68;
-  letter-spacing: 0;
+  --doc-font: var(--sans);
+  --attn-doc-scale: 0.97;
+  --doc-leading: 1.68;
+  --doc-tracking: 0;
 }
 
 /* Sans headings carry weight rather than size, so pull the display sizes in
    and tighten tracking — serif display scale reads oversized in sans. */
-[data-typeset='modern'] .attn-doc h1,
-[data-typeset='modern'] .ProseMirror h1 { font-size: 1.8rem; letter-spacing: -0.025em; }
-[data-typeset='modern'] .attn-doc h2,
-[data-typeset='modern'] .ProseMirror h2 { font-size: 1.4rem; letter-spacing: -0.02em; }
-[data-typeset='modern'] .attn-doc h3,
-[data-typeset='modern'] .ProseMirror h3 { font-size: 1.18rem; }
-[data-typeset='modern'] .attn-doc h6,
-[data-typeset='modern'] .ProseMirror h6 { font-style: normal; font-weight: 600; }
+[data-typeset='modern'] .attn-doc h1 { font-size: 1.8em; letter-spacing: -0.025em; }
+[data-typeset='modern'] .attn-doc h2 { font-size: 1.4em; letter-spacing: -0.02em; }
+[data-typeset='modern'] .attn-doc h3 { font-size: 1.18em; }
+[data-typeset='modern'] .attn-doc h6 { font-style: normal; font-weight: 600; }
 
 /* --- Compact: denser scale, more document per screen ------------------ */
 [data-typeset='compact'] {
-  --attn-base-font-size: 14.5px;
+  --doc-font: var(--serif);
+  --attn-doc-scale: 0.935;
+  --doc-leading: 1.58;
+  --doc-tracking: 0.003em;
   --content-measure: 880px;
 }
 
-[data-typeset='compact'] body {
-  line-height: 1.58;
-}
-
-[data-typeset='compact'] .attn-doc :is(p, ul, ol, blockquote, table),
-[data-typeset='compact'] .ProseMirror :is(p, ul, ol, blockquote, table) {
+[data-typeset='compact'] .attn-doc :is(p, ul, ol, blockquote, table) {
   margin-bottom: 0.7rem;
 }
 
-[data-typeset='compact'] .attn-doc h1,
-[data-typeset='compact'] .ProseMirror h1 { font-size: 1.7rem; margin-top: 1.8rem; margin-bottom: 0.5rem; }
-[data-typeset='compact'] .attn-doc h2,
-[data-typeset='compact'] .ProseMirror h2 { font-size: 1.32rem; margin-top: 1.6rem; margin-bottom: 0.35rem; }
-[data-typeset='compact'] .attn-doc h3,
-[data-typeset='compact'] .ProseMirror h3 { font-size: 1.14rem; margin-top: 1.35rem; }
-[data-typeset='compact'] .attn-doc h4,
-[data-typeset='compact'] .ProseMirror h4 { font-size: 1.04rem; margin-top: 1.2rem; }
-[data-typeset='compact'] .attn-doc li,
-[data-typeset='compact'] .ProseMirror li { margin-bottom: 0.12rem; }
+[data-typeset='compact'] .attn-doc h1 { font-size: 1.7em; margin-top: 1.8rem; margin-bottom: 0.5rem; }
+[data-typeset='compact'] .attn-doc h2 { font-size: 1.32em; margin-top: 1.6rem; margin-bottom: 0.35rem; }
+[data-typeset='compact'] .attn-doc h3 { font-size: 1.14em; margin-top: 1.35rem; }
+[data-typeset='compact'] .attn-doc h4 { font-size: 1.04em; margin-top: 1.2rem; }
+[data-typeset='compact'] .attn-doc li { margin-bottom: 0.12rem; }
+
+/* --- Manuscript: long-form reading — big serif on a narrow column ------
+   The opposite pole from Compact. A short measure and open leading is what a
+   book page does, and it is the right shape for reading a spec end-to-end
+   rather than scanning it. Wide blocks (code, tables, mermaid) share the same
+   narrow edge under the Shared-Column Rule, so this preset deliberately trades
+   technical width for reading comfort. */
+[data-typeset='manuscript'] {
+  --doc-font: var(--serif);
+  --attn-doc-scale: 1.1;
+  --doc-leading: 1.9;
+  --doc-tracking: 0.006em;
+  --content-measure: 660px;
+}
+
+[data-typeset='manuscript'] .attn-doc :is(p, ul, ol, blockquote, table) {
+  margin-bottom: 1.15rem;
+}
+
+[data-typeset='manuscript'] .attn-doc h1 {
+  font-size: 2.1em;
+  font-weight: 600;
+  letter-spacing: -0.012em;
+  margin-top: 3.25rem;
+  margin-bottom: 1rem;
+}
+[data-typeset='manuscript'] .attn-doc h2 { font-size: 1.45em; font-weight: 600; margin-top: 2.9rem; margin-bottom: 0.7rem; }
+[data-typeset='manuscript'] .attn-doc h3 { font-size: 1.18em; margin-top: 2.4rem; margin-bottom: 0.55rem; }
+[data-typeset='manuscript'] .attn-doc h4 { font-size: 1.05em; margin-top: 2rem; }
+[data-typeset='manuscript'] .attn-doc li { margin-bottom: 0.35rem; }
+[data-typeset='manuscript'] .attn-doc blockquote { font-style: italic; }
+
+/* --- Terminal: monospace throughout -----------------------------------
+   For specs where column alignment is the content: diffs, config, tables,
+   ASCII structure. Mono runs wide at a given size, so the scale drops and the
+   display sizes compress — a 2em mono h1 reads as shouting. Headings keep
+   their natural tracking; negative letter-spacing fights a monospaced face. */
+[data-typeset='terminal'] {
+  --doc-font: var(--mono);
+  --attn-doc-scale: 0.9;
+  --doc-leading: 1.7;
+  --doc-tracking: 0;
+}
+
+[data-typeset='terminal'] .attn-doc h1 { font-size: 1.55em; font-weight: 700; letter-spacing: 0; margin-top: 2.25rem; }
+[data-typeset='terminal'] .attn-doc h2 { font-size: 1.28em; font-weight: 600; letter-spacing: 0; margin-top: 2rem; }
+[data-typeset='terminal'] .attn-doc h3 { font-size: 1.1em; font-weight: 600; letter-spacing: 0; }
+[data-typeset='terminal'] .attn-doc h4 { font-size: 1em; font-weight: 600; letter-spacing: 0; }
+[data-typeset='terminal'] .attn-doc h6 { font-style: normal; font-weight: 600; }
+
+/* Inline code is already mono here — the tinted chip would stripe every
+   technical noun in the document. Keep the border-free flush treatment. */
+[data-typeset='terminal'] .attn-doc :not(pre) > code {
+  background: none;
+  /* `border: 0`, not `border-color: transparent` — the base rule's 1px border
+     keeps occupying box space when only its colour is cleared, padding every
+     inline code span with 2px of invisible width. */
+  border: 0;
+  padding: 0;
+  font-size: 1em;
+  color: var(--primary);
+}

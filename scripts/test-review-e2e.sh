@@ -386,8 +386,16 @@ echo "--- Collapsed gutter (resolved-only margin, default) ---"
 result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.getAttribute('data-mode') ?? 'missing'" '"collapsed"')
 assert_eq "Rail data-mode is collapsed (no unresolved threads)" "$result" '"collapsed"'
 
+# The collapsed gutter is NOT user-resizable (attn-11g4.2): it is sized to a
+# 28px chip plus clearance, the resize handle only renders at `expanded`, and
+# the persisted width only ever means "the expanded width". So this stays an
+# exact literal — if a stored width ever leaks into the gutter, that is the bug
+# this assertion should catch.
 result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.offsetWidth" '48')
 assert_eq "Rail width is exactly the 48px gutter" "$result" "48"
+
+result=$("$ATTN" --eval "document.querySelector('[data-slot=\\\"rail-resize-handle\\\"]') === null")
+assert_eq "Collapsed gutter offers no resize handle" "$result" "true"
 
 result=$("$ATTN" --query '[data-testid="review-margin-resolved-chip"]' | jq -r '.count' 2>/dev/null || echo "0")
 assert_eq "One resolved chip rendered" "$result" "1"
@@ -410,8 +418,20 @@ echo "--- Expand ✓ chip → rail expands with read-only card ---"
 result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.getAttribute('data-mode') ?? 'missing'" '"expanded"')
 assert_eq "Rail expands on chip click" "$result" '"expanded"'
 
+# The expanded width is now a persisted preference (attn-11g4.2), so it is
+# whatever this ATTN_HOME's prefs.json last stored — a bare `=== 320` would
+# pass or fail depending on what a previous run dragged. Reset to the default
+# first (double-click on the handle is the product's own reset path, so this
+# exercises it rather than reaching around it), then assert the exact literal.
+"$ATTN" --eval "document.querySelector('[data-slot=\\\"rail-resize-handle\\\"]')?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))" >/dev/null 2>&1 || true
+
 result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.offsetWidth" '320')
-assert_eq "Rail width is exactly 320px when expanded" "$result" "320"
+assert_eq "Rail width is exactly 320px when expanded (after reset)" "$result" "320"
+
+# ...and that the 320 above is the frame's own declared default, not a number
+# this script and the component happen to agree on by coincidence.
+result=$("$ATTN" --eval "(() => { const r = document.querySelector('[data-slot=\\\"right-rail\\\"]'); if (!r) return 'missing'; return r.offsetWidth === Number(r.dataset.defaultWidth); })()")
+assert_eq "Reset width matches the frame's declared default width" "$result" "true"
 
 result=$(poll_eval "document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"resolved\\\"]') !== null" 'true')
 assert_eq "Resolved card rendered" "$result" "true"
@@ -424,6 +444,137 @@ assert_eq "Card is read-only (no action buttons) with an author avatar" "$result
 
 result=$("$ATTN" --eval "document.querySelector('[data-testid=\\\"review-margin-card\\\"][data-state=\\\"resolved\\\"]')?.textContent.includes('Consider tightening this wording.')")
 assert_eq "Card shows the resolved comment body" "$result" "true"
+
+echo ""
+echo "--- Rail resize handle (attn-11g4.2) ---"
+
+# ARIA window-splitter shape. A focusable separator that never reports its
+# value is worse than no separator: it takes a tab stop and tells the user
+# nothing about what moving it does.
+handle_aria_js=$(cat <<'EOF'
+(() => {
+  const h = document.querySelector('[data-slot="rail-resize-handle"]');
+  if (!h) return 'missing';
+  const rail = document.querySelector('[data-slot="right-rail"]');
+  return [
+    h.getAttribute('role'),
+    h.getAttribute('aria-orientation'),
+    h.tabIndex,
+    Number(h.getAttribute('aria-valuenow')) === rail.offsetWidth,
+    Number(h.getAttribute('aria-valuemin')) < Number(h.getAttribute('aria-valuemax')),
+  ].join(',');
+})()
+EOF
+)
+result=$("$ATTN" --eval "$handle_aria_js")
+assert_eq "Handle is a focusable vertical separator reporting the live width" "$result" '"separator,vertical,0,true,true"'
+
+# The handle must sit on the rail's LEFT edge — that is the edge the user
+# drags, and the one the docked panel does not own.
+result=$("$ATTN" --eval "(() => { const h = document.querySelector('[data-slot=\\\"rail-resize-handle\\\"]'); const r = document.querySelector('[data-slot=\\\"right-rail\\\"]'); if (!h || !r) return 'missing'; return Math.abs(h.getBoundingClientRect().left - r.getBoundingClientRect().left) <= 2; })()")
+assert_eq "Handle sits on the rail's left edge" "$result" "true"
+
+# Keyboard resize. Every assertion below is deliberately phrased against a
+# width the rail can reach at ANY window size: the growth ceiling is a fraction
+# of the content row, so hard-coding "320 + 16" would pass on a wide display
+# and fail on the 960px window attn actually opens at. Narrowing and the floor
+# are unconditional, so those stay exact literals.
+#
+# Home is the legibility floor — the rail must refuse to go below it however
+# hard the key is leaned on.
+"$ATTN" --eval "document.querySelector('[data-slot=\\\"rail-resize-handle\\\"]')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Home', bubbles: true }))" >/dev/null 2>&1 || true
+result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.offsetWidth" '260')
+assert_eq "Home pins the rail to the 260px legibility floor" "$result" "260"
+
+"$ATTN" --eval "document.querySelector('[data-slot=\\\"rail-resize-handle\\\"]')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', bubbles: true }))" >/dev/null 2>&1 || true
+result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.offsetWidth" '260')
+assert_eq "Narrowing past the floor is a no-op, not a broken card" "$result" "260"
+
+# Two fine steps up from the floor. 260 + 16 + 16 lands under the default, and
+# the ceiling can never be below the default, so 292 is reachable everywhere.
+"$ATTN" --eval "document.querySelector('[data-slot=\\\"rail-resize-handle\\\"]')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }))" >/dev/null 2>&1 || true
+"$ATTN" --eval "document.querySelector('[data-slot=\\\"rail-resize-handle\\\"]')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowLeft', bubbles: true }))" >/dev/null 2>&1 || true
+result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.offsetWidth" '292')
+assert_eq "ArrowLeft widens the rail 16px at a time" "$result" "292"
+
+# The coarse step reads Shift: a plain ArrowRight from 292 would land on 276,
+# the 64px step overshoots the floor and clamps to 260. Distinguishing those
+# two outcomes is the point.
+"$ATTN" --eval "document.querySelector('[data-slot=\\\"rail-resize-handle\\\"]')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowRight', shiftKey: true, bubbles: true }))" >/dev/null 2>&1 || true
+result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.offsetWidth" '260')
+assert_eq "Shift takes the coarse 64px step (and clamps at the floor)" "$result" "260"
+
+# End is the ceiling: at most 640px, at most 40% of the content row once there
+# is room for that, and never below the default. Recomputed from the live row
+# width rather than hard-coded, because the ceiling legitimately differs
+# between a 960px window and a 1440px one.
+end_js=$(cat <<'EOF'
+(() => {
+  const rail = document.querySelector('[data-slot="right-rail"]');
+  const row = rail?.parentElement;
+  if (!rail || !row) return 'missing';
+  const w = rail.offsetWidth;
+  const fraction = Math.round(row.clientWidth * 0.4);
+  return [
+    w <= 640,
+    w === Math.max(320, Math.min(640, fraction)),
+    w >= 320,
+  ].join(',');
+})()
+EOF
+)
+"$ATTN" --eval "document.querySelector('[data-slot=\\\"rail-resize-handle\\\"]')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'End', bubbles: true }))" >/dev/null 2>&1 || true
+result=$("$ATTN" --eval "$end_js")
+assert_eq "End caps at 640px / 40% of the row and never below the default" "$result" '"true,true,true"'
+
+# Enter is the keyboard twin of the double-click reset.
+"$ATTN" --eval "document.querySelector('[data-slot=\\\"rail-resize-handle\\\"]')?.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))" >/dev/null 2>&1 || true
+result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.offsetWidth" '320')
+assert_eq "Enter restores the default width" "$result" "320"
+
+# The width must persist. The keyboard path debounces its write by 200ms, so
+# give it a beat before reading prefs.json back off disk.
+sleep 0.5
+if [ -f "$ATTN_HOME/prefs.json" ]; then
+    result=$(jq -r '.rail_width // "absent"' "$ATTN_HOME/prefs.json" 2>/dev/null || echo "unreadable")
+    assert_eq "Reset width reached prefs.json" "$result" "320"
+else
+    echo "  FAIL: prefs.json was never written to $ATTN_HOME"
+    FAIL=$((FAIL + 1))
+fi
+
+# Cards reflow with the rail rather than overflowing it — the point of a
+# resizable rail is more room for the comment, not a wider empty panel.
+reflow_js=$(cat <<'EOF'
+(() => {
+  const h = document.querySelector('[data-slot="rail-resize-handle"]');
+  const rail = document.querySelector('[data-slot="right-rail"]');
+  if (!h || !rail) return 'missing';
+  const card = () => document.querySelector('[data-testid="review-margin-card"]');
+  const key = (k) => h.dispatchEvent(new KeyboardEvent('keydown', { key: k, bubbles: true }));
+  // Floor to ceiling. Those two are always different — the ceiling can never
+  // be below the 320px default and the floor is 260 — so this measures a real
+  // reflow at every window size.
+  key('Home');
+  const narrow = card()?.getBoundingClientRect().width ?? 0;
+  key('End');
+  const wide = card()?.getBoundingClientRect().width ?? 0;
+  return [
+    wide > narrow,
+    wide <= rail.clientWidth,
+    rail.scrollWidth <= rail.clientWidth,
+  ].join(',');
+})()
+EOF
+)
+result=$("$ATTN" --eval "$reflow_js")
+assert_eq "Cards grow with the rail and never overflow it" "$result" '"true,true,true"'
+
+# Leave the rail at its default so the screenshot below and every later
+# assertion see the same geometry they always have.
+"$ATTN" --eval "document.querySelector('[data-slot=\\\"rail-resize-handle\\\"]')?.dispatchEvent(new MouseEvent('dblclick', { bubbles: true }))" >/dev/null 2>&1 || true
+result=$(poll_eval "document.querySelector('[data-slot=\\\"right-rail\\\"]')?.offsetWidth" '320')
+assert_eq "Double-click resets the rail to its default width" "$result" "320"
 
 screenshot "05-resolved-expanded-card"
 

@@ -43,9 +43,27 @@
     onManageShare?: () => void;
     /** Attempts to upgrade to a direct peer-to-peer link (parent-owned). */
     onReconnect?: () => void;
+    /**
+     * Collapse the chip to a single glyph sized like its neighbouring header
+     * buttons. The native header is a 44px strip that also has to hold the
+     * document name, the snapshot badge, the comments toggle and settings —
+     * "Sharing · some-long-file.md" was taking a third of it to say something
+     * that rarely changes. The connection glyph still distinguishes the three
+     * states without colour, and the full label, the status word and the file
+     * count all stay in the accessible name / `title` / sr-only slots, so the
+     * standing disclosure survives the collapse. Text surfaces (hosted owner
+     * header) leave this off.
+     */
+    compact?: boolean;
   }
 
-  let { isOwner = true, shareOpen = false, onManageShare, onReconnect }: Props = $props();
+  let {
+    isOwner = true,
+    shareOpen = false,
+    onManageShare,
+    onReconnect,
+    compact = false,
+  }: Props = $props();
 
   let popoverOpen = $state(false);
 
@@ -56,6 +74,8 @@
   const peers: ReviewStatusPeer[] = $derived(reviewStore.peersResolved);
   const outboxPending = $derived(reviewStore.status?.outboxPending ?? 0);
   const label = $derived(shareChipLabel(isOwner, descriptor, files, hasActiveRoom));
+  /** Named separately from the prop so the markup reads as a layout mode. */
+  const iconOnly = $derived(compact);
 
   function toggle(): void {
     // Pre-mint (sheet open, no room yet) the chip is a spatial anchor that
@@ -95,31 +115,48 @@
   <div class="share-chip relative inline-flex shrink-0" data-slot="share-chip-root">
     <button
       type="button"
-      class="chip inline-flex h-7 max-w-[15rem] shrink-0 items-center gap-1.5 rounded-full border px-2.5 font-sans text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50
+      class="chip inline-flex h-7 shrink-0 items-center rounded-full border font-sans text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50
+        {iconOnly ? 'w-7 justify-center' : 'max-w-[15rem] gap-1.5 px-2.5'}
         {connection === 'offline' && hasActiveRoom
           ? 'border-border/60 bg-muted/20 text-muted-foreground/80 hover:bg-muted/40'
           : 'border-primary/30 bg-primary/5 text-primary hover:bg-primary/10'}"
       data-slot="share-chip"
       data-state={connection}
       data-active={hasActiveRoom}
+      data-compact={iconOnly}
       data-file-count={files.length}
       aria-haspopup="dialog"
       aria-expanded={popoverOpen}
       aria-label={hasActiveRoom ? `${label} — ${descriptor.label}` : 'Share for review'}
-      title={hasActiveRoom ? descriptor.detail : 'Share for review'}
+      title={hasActiveRoom ? `${label} — ${descriptor.detail}` : 'Share for review'}
       onclick={toggle}
     >
-      {#if hasActiveRoom}
+      {#if !hasActiveRoom}
+        <!-- 14px collapsed, matching both the state glyphs below and the
+             header's own share button; 12px stays the inline-with-text size. -->
+        <Share2 class={`shrink-0 ${iconOnly ? 'size-3.5' : 'size-3'}`} aria-hidden="true" />
+      {:else if iconOnly}
+        <!-- The glyph carries the state that the dot + word used to split
+             between colour and text, and matches the popover header so the
+             chip and the panel it opens agree at a glance. -->
+        {#if descriptor.icon === 'live'}
+          <Zap class="size-3.5 shrink-0" aria-hidden="true" />
+        {:else if descriptor.icon === 'connected'}
+          <Wifi class="size-3.5 shrink-0" aria-hidden="true" />
+        {:else}
+          <CloudOff class="size-3.5 shrink-0" aria-hidden="true" />
+        {/if}
+      {:else}
         <span
           class="size-1.5 shrink-0 rounded-full
             {descriptor.tone === 'offline' ? 'bg-muted-foreground/70' : 'bg-primary'}
             {descriptor.tone === 'live' ? 'share-chip-dot-live' : ''}"
           aria-hidden="true"
         ></span>
-      {:else}
-        <Share2 class="size-3 shrink-0" aria-hidden="true" />
       {/if}
-      <span class="truncate" data-slot="share-chip-label">{label}</span>
+      <!-- Never dropped, only hidden: automation and assistive tech read the
+           label from the same node on every surface. -->
+      <span class={iconOnly ? 'sr-only' : 'truncate'} data-slot="share-chip-label">{label}</span>
       {#if hasActiveRoom && files.length > 0}
         <span class="sr-only" data-slot="share-chip-files">{files.length}</span>
       {/if}

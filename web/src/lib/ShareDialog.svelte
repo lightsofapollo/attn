@@ -33,6 +33,7 @@
   import { ScrollArea } from './components/ui/scroll-area';
   import { reviewShare } from './ipc';
   import { ownerKeyFingerprint } from './review/fingerprint';
+  import { resolveSharePresentation, type SharePhase } from './share-dialog-state';
   import type { RoomId, SearchResultItem } from './types';
 
   // ---------------------------------------------------------------------------
@@ -114,13 +115,23 @@
   let copiedCli = $state(false);
   let copiedFingerprint = $state(false);
   let advancedOpen = $state(false);
-  let phase = $state<'configure' | 'minting' | 'ready' | 'error'>('configure');
+  let phase = $state<SharePhase>('configure');
   let selectedPaths = $state<string[]>([]);
   let fileQuery = $state('');
   let fingerprint = $state('—— —— ——');
   /** Guards the minting phase: if ShareReady never lands, surface an error. */
   let mintTimeout: ReturnType<typeof setTimeout> | null = null;
   const MINT_TIMEOUT_MS = 15000;
+  /**
+   * Same guarantee for the file scan (attn-vlmz.1.1): no spinner in this
+   * dialog may outlive a timeout. `filesLoading` is cleared by the daemon's
+   * `shareableFiles` reply, and the browser build has no handler for
+   * `review_list_shareable_files` at all — so an uploaded folder pins the
+   * picker on "Finding reviewable files…" and the owner can never proceed.
+   * Bound it and explain it instead.
+   */
+  let fileScanTimedOut = $state(false);
+  const FILE_SCAN_TIMEOUT_MS = 8000;
 
   const inviteUrl = $derived(existingBrowserInviteUrl || existingInviteUrl);
   const tierLinks = $derived([
@@ -179,7 +190,14 @@
     copiedTier = null;
     copiedCli = false;
     copiedFingerprint = false;
-    if (existingRoomId !== null && existingInviteUrl.length > 0) {
+    // `inviteUrl`, not `existingInviteUrl`: a hosted mint returns an HTTPS
+    // invite and NO `attn://` URL, and gating on the native form alone made
+    // this effect fall through to `phase = 'configure'` the moment the room
+    // landed — throwing the owner back to the file picker on a share that had
+    // just succeeded. Reading the same resolved URL the rest of the dialog
+    // uses also makes the effect depend on the hosted prop, so it re-runs when
+    // that is what arrives (attn-vlmz.1.2).
+    if (existingRoomId !== null && inviteUrl.length > 0) {
       if (existingFilePaths.length > 0) {
         selectedPaths = [...new Set(existingFilePaths)];
       }
@@ -241,6 +259,18 @@
     phase = 'error';
   });
 
+  // Bound the file scan. Cleared automatically the moment `filesLoading`
+  // flips false, so a slow-but-successful scan lands normally.
+  $effect(() => {
+    if (!open || !filesLoading) {
+      fileScanTimedOut = false;
+      return;
+    }
+    fileScanTimedOut = false;
+    const timer = setTimeout(() => (fileScanTimedOut = true), FILE_SCAN_TIMEOUT_MS);
+    return () => clearTimeout(timer);
+  });
+
   // Recompute the fingerprint whenever the owner key changes.
   $effect(() => {
     let cancelled = false;
@@ -278,7 +308,24 @@
   }
 
   function retryMint(): void {
+    // Retrying with nothing selected would post an empty share and land back
+    // in the same error, so send the owner to the step that can fix it.
+    if (selectedPaths.length === 0) {
+      onClearError?.();
+      phase = 'configure';
+      return;
+    }
     void startMint();
+  }
+
+  /**
+   * Escape hatch for a file scan that never answered. The owner opened Share
+   * on a concrete file, so that file is shareable whether or not the rest of
+   * the project could be enumerated.
+   */
+  function shareTargetOnly(): void {
+    if (!canShareTargetOnly) return;
+    selectedPaths = [filePath];
   }
 
   function togglePath(path: string, checked: boolean): void {
@@ -347,8 +394,8 @@
     }
   }
 
-  async function handleCopyCli(): Promise<void> {
-    const ok = await copyToClipboard(cliCommand);
+  async function handleCopyPrimary(): Promise<void> {
+    const ok = await copyToClipboard(primaryShare.text);
     if (ok) {
       copiedCli = true;
       setTimeout(() => (copiedCli = false), 1500);
@@ -367,19 +414,43 @@
     open = false;
   }
 
-  const isMinting = $derived(phase === 'minting');
-  const isConfiguring = $derived(phase === 'configure');
-  const isReady = $derived(phase === 'ready');
-  const isError = $derived(phase === 'error');
+  /**
+   * The template renders THIS phase, never `phase` directly (attn-vlmz.1.2).
+   * `resolveSharePresentation` collapses "ready but nothing to send" into an
+   * explicit error with the retry affordance, so no branch below can put a
+   * skeleton on screen that outlives the mint timeout.
+   */
+  const presentation = $derived(
+    resolveSharePresentation({
+      phase,
+      inviteUrl,
+      cliCommand,
+      daemonErrorMessage: shareErrorMessage,
+    }),
+  );
+  const isMinting = $derived(presentation.phase === 'minting');
+  const isConfiguring = $derived(presentation.phase === 'configure');
+  const isReady = $derived(presentation.phase === 'ready');
+  const isError = $derived(presentation.phase === 'error');
+  /** The one thing the primary card copies: CLI one-liner, else the link. */
+  const primaryShare = $derived(presentation.primary);
+  const canShareTargetOnly = $derived(!targetIsDirectory && filePath.length > 0);
 </script>
 
 <Dialog.Root bind:open>
   <Dialog.Content class="w-[min(36rem,calc(100%-2rem))] max-w-[36rem] overflow-x-hidden" data-slot="share-dialog">
     <Dialog.Header>
       <Dialog.Title>Share for review</Dialog.Title>
+      <!-- One line, always: configure explains the step, minting explains the
+           wait (attn-11g4.1.2), ready/error state the selection. Same slot and
+           same single line in every phase, so the header never resizes. -->
       <Dialog.Description>
         {#if isConfiguring}
           Choose the exact files reviewers will receive.
+        {:else if isMinting}
+          <span class="font-medium text-foreground" data-slot="share-minting-description">
+            Creating the encrypted room and minting invite links…
+          </span>
         {:else}
           <span class="font-medium text-foreground">{selectionSummary}</span>
         {/if}
@@ -417,10 +488,34 @@
           class="rounded-md border border-border bg-background"
           data-slot="share-file-picker"
         >
-          {#if filesLoading}
+          {#if filesLoading && !fileScanTimedOut}
             <div class="flex items-center gap-2 px-3 py-8 text-sm text-muted-foreground" role="status">
               <span class="inline-block size-3 animate-pulse rounded-full bg-primary/60" aria-hidden="true"></span>
               Finding reviewable files…
+            </div>
+          {:else if filesLoading}
+            <!-- The scan never answered. Say so, and keep a way forward:
+                 refusing to show anything here is what left the owner with
+                 "can't proceed from there" (attn-vlmz.1.1). -->
+            <div class="flex flex-col items-start gap-2 px-3 py-6 text-sm" role="status" data-slot="share-files-unavailable">
+              <p class="text-foreground">Couldn’t list the files in this project.</p>
+              <p class="text-xs text-muted-foreground">
+                {#if canShareTargetOnly}
+                  The file scan didn’t come back. You can still share the file you have open, or close this and try again.
+                {:else}
+                  The file scan didn’t come back, so there is nothing to choose from. Open a file and share that instead.
+                {/if}
+              </p>
+              {#if canShareTargetOnly}
+                <button
+                  type="button"
+                  class="rounded-md border border-border px-3 py-1.5 text-xs text-foreground hover:border-primary/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                  data-slot="share-files-fallback"
+                  onclick={shareTargetOnly}
+                >
+                  {selectedPaths.includes(filePath) ? 'Sharing just this file' : 'Share just this file'}
+                </button>
+              {/if}
             </div>
           {:else if files.length === 0}
             <p class="px-3 py-8 text-center text-sm text-muted-foreground">No Markdown or HTML files found in this project.</p>
@@ -450,18 +545,30 @@
         </div>
       </section>
     {:else}
-    {#if isReady && selectedPaths.length > 0}
-      <section class="flex min-w-0 flex-col gap-1.5 border-b border-border/60 pb-3" aria-labelledby="native-shared-files-heading" data-slot="share-ready-files">
-        <div class="flex items-center justify-between gap-3 text-xs">
-          <strong id="native-shared-files-heading" class="font-medium text-foreground">Reviewers receive</strong>
-          <span class="text-muted-foreground">{selectionSummary}</span>
-        </div>
-        <ScrollArea viewportClasses="max-h-24" class="font-mono text-xs leading-5 text-muted-foreground">
-          {#each selectedPaths as path (path)}
-            <div class="truncate" title={relativePath(path)}>{relativePath(path)}</div>
-          {/each}
-        </ScrollArea>
-      </section>
+    <!-- Rendered from the moment minting starts, not from ready: the selection
+         is already known, and gating it on `isReady` grew the dialog by a whole
+         section the instant ShareReady landed (attn-11g4.1.2 — the dialog must
+         not resize when the loading state clears). Never silently collapses on
+         an empty selection either; it says what it doesn't know. Hidden only on
+         error, where "reviewers receive" would be a false claim — nothing was
+         published, and that branch drops the links card anyway. -->
+    {#if !isError}
+    <section class="flex min-w-0 flex-col gap-1.5 border-b border-border/60 pb-3" aria-labelledby="native-shared-files-heading" data-slot="share-ready-files">
+      <div class="flex items-center justify-between gap-3 text-xs">
+        <strong id="native-shared-files-heading" class="font-medium text-foreground">Reviewers receive</strong>
+        <span class="text-muted-foreground">{selectionSummary}</span>
+      </div>
+      <ScrollArea viewportClasses="max-h-24" class="font-mono text-xs leading-5 text-muted-foreground">
+        {#each selectedPaths as path (path)}
+          <div class="truncate" title={relativePath(path)}>{relativePath(path)}</div>
+        {/each}
+        {#if selectedPaths.length === 0}
+          <div class="font-sans" data-slot="share-files-unknown">
+            This window doesn’t have the file list for this share.
+          </div>
+        {/if}
+      </ScrollArea>
+    </section>
     {/if}
     <!-- ============================================================
          Primary card: the one-liner command. This works for ANYONE —
@@ -473,21 +580,24 @@
       data-slot="share-command-card"
     >
       <div class="flex items-center gap-2 text-xs font-medium uppercase tracking-wide text-muted-foreground">
-        <Terminal class="size-3.5" aria-hidden="true" />
-        Send this command
+        {#if primaryShare.kind === 'link'}
+          <Link class="size-3.5" aria-hidden="true" />
+          Send this link
+        {:else}
+          <Terminal class="size-3.5" aria-hidden="true" />
+          Send this command
+        {/if}
       </div>
       {#if isError}
         <div class="flex flex-col gap-2 py-1.5 text-sm" data-slot="share-error">
-          <span class="text-destructive">
-            {shareErrorMessage || "Couldn't reach the review relay — the share didn't complete. Nothing left this machine."}
-          </span>
+          <span class="text-destructive">{presentation.errorMessage}</span>
           <button
             type="button"
             class="self-start rounded-md border border-border px-3 py-1 text-xs hover:border-primary/60"
             data-slot="share-retry"
             onclick={retryMint}
           >
-            Try again
+            {selectedPaths.length === 0 ? 'Choose files' : 'Try again'}
           </button>
         </div>
       {:else}
@@ -495,30 +605,36 @@
              SAME rows — only the command row's content changes — so the
              ShareReady IPC landing never resizes the dialog. The minting
              row copies the command row's box metrics exactly. -->
-        {#if isReady && cliCommand.length > 0}
+        {#if primaryShare.kind !== 'pending'}
           <button
             type="button"
             class="block w-full overflow-hidden rounded-md border border-border bg-background px-3 py-2 text-left font-mono text-xs text-foreground hover:border-primary/60"
-            data-slot="share-cli-command"
-            onclick={handleCopyCli}
+            data-slot={primaryShare.kind === 'command' ? 'share-cli-command' : 'share-invite-link'}
+            onclick={handleCopyPrimary}
             title="Click to copy"
           >
-            <span class="block truncate">{cliCommand}</span>
+            <span class="block truncate">{primaryShare.text}</span>
           </button>
         {:else}
+          <!-- Minting. The dot is decoration — under prefers-reduced-motion the
+               global rule in styles/base.css stops it, so the sentence, the
+               role="status" announcement and the footer label carry the state
+               on their own. -->
           <div
             class="flex w-full items-center gap-2 overflow-hidden rounded-md border border-border bg-background px-3 py-2 font-mono text-xs text-muted-foreground"
             data-slot="share-minting"
+            role="status"
+            aria-live="polite"
           >
             <span class="inline-block size-3 shrink-0 animate-pulse rounded-full bg-primary/60" aria-hidden="true"></span>
-            <span class="block truncate">Minting room…</span>
+            <span class="block truncate">Creating the room and minting invite links…</span>
           </div>
         {/if}
         <Button
           type="button"
           variant="default"
           size="default"
-          onclick={handleCopyCli}
+          onclick={handleCopyPrimary}
           data-slot="share-copy-cli"
           class="w-full"
           disabled={!isReady}
@@ -528,13 +644,21 @@
             <span>Copied to clipboard</span>
           {:else}
             <Copy class="size-4" aria-hidden="true" />
-            <span>Copy invite command</span>
+            <span>{primaryShare.kind === 'link' ? 'Copy invite link' : 'Copy invite command'}</span>
           {/if}
         </Button>
         <p class="text-xs text-muted-foreground">
-          Send this to anyone. <code>npx</code> uses their installed attn if they have
-          one, otherwise downloads it on first run — no account, no signup. They join
-          over an end-to-end encrypted channel.
+          {#if primaryShare.kind === 'link'}
+            <!-- Kept to roughly the same line count as the command copy below:
+                 the two swap in place and the dialog must not resize. -->
+            Send this to anyone. It opens in their browser — no account, no signup,
+            nothing to install. The room secret never leaves the link fragment, and
+            they join over an end-to-end encrypted channel.
+          {:else}
+            Send this to anyone. <code>npx</code> uses their installed attn if they have
+            one, otherwise downloads it on first run — no account, no signup. They join
+            over an end-to-end encrypted channel.
+          {/if}
         </p>
       {/if}
     </div>
@@ -552,7 +676,11 @@
           <Link class="size-3.5" aria-hidden="true" />
           Choose what the link allows
         </div>
-        {#if isReady && inviteUrl.length > 0}
+        <!-- `isReady` already implies a usable invite URL — resolveSharePhase
+             demotes ready-without-one to 'error', which this card doesn't
+             render at all. So the placeholder below is reachable only from
+             'minting', which the mint timeout bounds (attn-vlmz.1.2). -->
+        {#if isReady}
           <div class="grid gap-2" data-slot="share-tier-links">
             {#each tierLinks as link (link.tier)}
               <button
@@ -589,11 +717,17 @@
             data-slot="share-invite-url"
           />
         {:else}
-          <div class="grid gap-2" aria-label="Generating permission links">
+          <!-- 3.625rem is the real row's measured height, not a guess: py-2.5
+               (20px) + a text-sm line (20px) + a leading-4 detail line (16px) +
+               two 1px borders = 58px. The old 3.75rem placeholder was 2px
+               taller each, which shrank the dialog by 6px the moment the links
+               arrived. Labelled "Preparing …" rather than named like a finished
+               control: while minting these are not links yet. -->
+          <div class="grid gap-2" role="status" aria-live="polite" data-slot="share-tier-pending">
             {#each ['View', 'Comment', 'Suggest'] as label}
-              <div class="flex h-[3.75rem] items-center rounded-md border border-border bg-background px-3 text-sm text-muted-foreground">
+              <div class="flex h-[3.625rem] items-center rounded-md border border-border bg-background px-3 text-sm text-muted-foreground">
                 <span class="mr-2 inline-block size-2 animate-pulse rounded-full bg-primary/50" aria-hidden="true"></span>
-                {label} link
+                Preparing {label.toLocaleLowerCase()} link…
               </div>
             {/each}
           </div>
@@ -677,7 +811,8 @@
       <Button
         type="button"
         onclick={isConfiguring ? startMint : handleDone}
-        disabled={isMinting || (isConfiguring && (filesLoading || selectedCount === 0))}
+        disabled={isMinting
+          || (isConfiguring && ((filesLoading && !fileScanTimedOut) || selectedCount === 0))}
         data-slot="share-start"
       >
         {#if isConfiguring}

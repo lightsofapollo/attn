@@ -9,7 +9,10 @@ colors:
   muted-ink: "oklch(0.32 0.012 65)"
   card: "oklch(0.89 0.012 76)"
   sidebar: "oklch(0.855 0.012 75)"
-  code-block: "oklch(0.885 0.012 73)"
+  panel-surface: "oklch(0.855 0.012 75)"
+  panel-border: "oklch(0.14 0.008 55 / 16%)"
+  rail-chip-surface: "oklch(0.88 0.012 75)"
+  code-block: "oklch(0.972 0.008 78)"
   border: "oklch(0.14 0.008 55 / 18%)"
   link: "oklch(0.38 0.04 55)"
   destructive: "oklch(0.55 0.20 27)"
@@ -58,6 +61,24 @@ typography:
     fontWeight: 600
     lineHeight: 1.2
     letterSpacing: "0.06em"
+  meta:
+    fontFamily: "Source Sans 3 Variable, Source Sans 3, -apple-system, system-ui, sans-serif"
+    fontSize: "0.78rem"
+    fontWeight: 500
+    lineHeight: 1.4
+    letterSpacing: "normal"
+  control:
+    fontFamily: "Source Sans 3 Variable, Source Sans 3, -apple-system, system-ui, sans-serif"
+    fontSize: "0.95rem"
+    fontWeight: 500
+    lineHeight: 1.4
+    letterSpacing: "normal"
+  control-lg:
+    fontFamily: "Source Sans 3 Variable, Source Sans 3, -apple-system, system-ui, sans-serif"
+    fontSize: "1.15rem"
+    fontWeight: 600
+    lineHeight: 1.35
+    letterSpacing: "normal"
   mono:
     fontFamily: "Source Code Pro Variable, Source Code Pro, SF Mono, Consolas, monospace"
     fontSize: "0.85rem"
@@ -103,13 +124,13 @@ components:
   review-card:
     backgroundColor: "oklch(0.94 0.010 76 / 96%)"
     textColor: "{colors.ink}"
-    rounded: "{rounded.lg}"
-    padding: "16px"
+    rounded: "{rounded.sm}"
+    padding: "10px 12px 10px 13px"
 ---
 
 # Design System: attn
 
-## 1. Overview
+## Overview
 
 **Creative North Star: "The Lit Reading Room"**
 
@@ -125,8 +146,10 @@ This system explicitly rejects three neighbors. It is **not a cloud-SaaS review 
 - A real paper grain overlay unifies every surface, including the browser build.
 - Fixed rem type scale (product register): headings don't fluidly resize in a sidebar.
 - A dedicated review vocabulary: inline tracked-change marks, margin cards, role-colored peer avatars.
+- Five typeset presets change the reading column only — app chrome never moves when you switch one.
+- Three planes: chrome rails (sidebar + comments rail) recede equally, the document is the lit sheet between them, and review cards float above the rail.
 
-## 2. Colors
+## Colors
 
 A warm parchment field carrying near-black ink and a single terracotta accent; cool review hues (green, amber, blue, violet) are quarantined to the collaboration layer so they never dilute the editorial ground. All values are canonical **OKLCH** — attn is OKLCH-native and the frontmatter carries OKLCH directly.
 
@@ -155,7 +178,9 @@ Role is no longer a color channel for humans — shape carries it (round = human
 - **Ink** (`oklch(0.14 0.008 55)`): body text, strong rules, the native side panel.
 - **Muted Ink** (`oklch(0.32 0.012 65)`): secondary text, labels, table headers. Sits at ~4.5:1 on paper — the floor for body, never lighter.
 - **Card / Sidebar** (`oklch(0.89 0.012 76)` / `oklch(0.855 0.012 75)`): the second neutral layer for chrome, a hair darker than the content surface so panels recede.
-- **Code Block** (`oklch(0.885 0.012 73)`): inline code and `pre` ground.
+- **Panel Surface** (`oklch(0.855 0.012 75)`, INK `oklch(0.172 0.014 257)`): the chrome plane — the comments rail and the app header sit on it, deliberately the *same* value as the sidebar. Both edges of the workspace recede equally so the document reads as a lit sheet between two rails. In INK the move inverts (the rails lift off a darker ground rather than sinking into it).
+- **Rail Chip Surface** (`oklch(0.88 0.012 75)`, INK `oklch(0.205 0.013 257)`): fills for chips sitting *on* the panel plane. It exists because `--muted` lands 0.003 from `--panel-surface` in INK, so a `muted` chip on the rail is invisible there — a trap that has now been hit twice.
+- **Code Block** (`oklch(0.972 0.008 78)`, INK `oklch(0.19 0.014 256)`): the raised surface shared by `pre`, inline code, **and tables** — a table and a code block are the same class of object and must not read as different materials.
 - **Border** (`oklch(0.14 0.008 55 / 18%)`): hairline dividers — ink at low alpha, never a solid gray line.
 
 ### Named Rules
@@ -165,7 +190,7 @@ Role is no longer a color channel for humans — shape carries it (round = human
 
 **The Warm-Paper, Not-Cream Rule.** The ground holds chroma ≤ 0.012. The moment it drifts warmer it becomes the saturated AI cream default. Warmth is carried by the accent and the serif, not by the background.
 
-## 3. Typography
+## Typography
 
 **Reading Font:** Source Serif 4 Variable (with Georgia, serif)
 **Chrome Font:** Source Sans 3 Variable (with system-ui)
@@ -182,13 +207,19 @@ Role is no longer a color channel for humans — shape carries it (round = human
 - **Mono** (400, `0.85rem`, 1.55): code blocks and inline code.
 
 ### Typeset presets
-The three cuts above are the **Editorial** preset — the default, and the shape every rule in this section describes. Settings offers two alternates (shadcn's typeset model: a preset is a complete reading system, never a pile of independent font knobs):
+The three cuts above are the **Editorial** preset — the default, and the shape every rule in this section describes. Settings offers four alternates (shadcn's typeset model: a preset is a complete reading system, never a pile of independent font knobs):
 
-- **Editorial** — the default described above. Declares no overrides, so it cannot drift from the canonical tokens.
+- **Editorial** — the default described above. Its values are the canonical tokens restated verbatim.
 - **Modern** — sans for reading as well as chrome, with display sizes pulled in and tracking tightened (serif display scale reads oversized in sans). For readers who want a code-review tool rather than a manuscript.
 - **Compact** — Editorial's fonts at a denser scale and leading, on a narrower measure. For dense ops docs.
+- **Manuscript** (added 2026-08-06) — large serif on a short column (`660px`), 1.9 leading. The opposite pole from Compact: for reading a spec end to end rather than scanning it. It deliberately trades technical width for reading comfort, since wide blocks share the same narrow edge under the Wide-Sheet Rule.
+- **Terminal** (added 2026-08-06) — monospace throughout, for diffs and config where column alignment *is* the content. Display sizes compress (a 2em mono h1 reads as shouting) and headings keep natural tracking, because negative letter-spacing fights a monospaced face.
 
-Presets live in `web/styles/typeset.css`, keyed off `data-typeset` on `<html>`, and only ever redefine existing tokens. They are orthogonal to light/dark (which owns color) and to the ⌘+/⌘- font scale (which multiplies `--attn-base-font-size`) — all three compose.
+Presets live in `web/styles/typeset.css`, keyed off `data-typeset` on `<html>`. They are orthogonal to light/dark (which owns color) and to the ⌘+/⌘- font scale — all three compose.
+
+**The Chrome-Invariance Rule** (added 2026-08-06). A preset may set only *document-scoped* tokens: `--doc-font`, `--attn-doc-scale`, `--doc-leading`, `--doc-tracking`, and `--content-measure`. It may never touch `--attn-base-font-size` (the rem baseline for all app chrome) or the global `--serif`/`--sans`/`--mono` families. Presets originally did both, which meant choosing a typeset silently rescaled every header, dialog and control in the app — the rem baseline drives `html { font-size }`. Chrome now holds still and only the reading column reflows. Document type sizes are therefore `em` (relative to the doc's own scale) while margins stay `rem` (anchored to the app baseline), so a preset's margin override means the same thing at every scale.
+
+Because every preset states its full hand — including Editorial — `[data-typeset]` is authoritative wherever it appears, including on a nested specimen in Settings. Declaring nothing was how the default preset's own specimen ended up rendering in whichever face happened to be active.
 
 ### Named Rules
 **The Read/Do Rule.** If the user is reading it, it's serif. If the user is operating it, it's sans. There is no third case; a button never uses the serif, a heading in the document never uses the sans. (A preset may change *which* face reads as the serif — Modern makes it a sans — but never which role gets the reading face.)
@@ -199,15 +230,21 @@ Presets live in `web/styles/typeset.css`, keyed off `data-typeset` on `<html>`, 
 
 Nine steps, and nothing between them. This is an *extension* of the ramp, not an exemption from it: a size outside this list is still a defect, and the hosted app shell now uses exactly these nine.
 
+(Corrected 2026-08-06: `meta`, `control` and `control-lg` existed only in this prose for two weeks, while the frontmatter carried the six document roles. Tokens are the normative layer — prose only contextualises them — so every chrome-ramp size read as off-ramp to any tool consuming this file, and `0.95rem` alone accounted for most of the drift reported against `app-shell.css`. All nine steps are now declared as frontmatter typography roles. **A ramp step that is not in the frontmatter does not exist.**)
+
 **The Scoped-Document Rule** (2026-08-04). Document typography is scoped to `.attn-doc` — the class the editor mount and the viewer article carry. Bare `p` / `h1` / `ul` / `li` selectors are never global: chrome rendered in the same tree used to inherit 2rem heading gaps and absolutely-positioned list bullets that escaped their card, and each leak got patched individually until an opt-out class existed purely to undo the defaults. Type the document, not the page.
 
 **The Fixed-Scale Rule.** Product register: headings are fixed rem, not `clamp()`. Users view at consistent DPI inside panes and windows; a fluid h1 that shrinks in a sidebar looks worse, not better.
 
 *Marketing carve-out* (added 2026-08-05, attn-n01r.18). The rule's rationale is panes and sidebars, which the hosted **landing** does not have — it is a full-bleed Persuade surface viewed at whatever width the visitor brings. Display headings there may `clamp()`, in two tiers only: the hero `h1` at `clamp(3.2rem, 5.2vw, 6rem)` and every section head at `clamp(2.6rem, 4.4vw, 4.6rem)`. Two tiers, not per-section values — a third coefficient is how the `h1` ended up rendering *smaller* than two `h2`s at 1440px. Everything else, including the desk and the app shell, stays on the fixed ramp. The landing had already forked this by 3x with nothing written down; this records the fork rather than pretending it isn't there.
 
-**The Wide-Sheet Rule** (decided 2026-07-12). The reading surface is full-width and left-set, never a centered narrow column: all content — running prose *and* wide blocks (mermaid diagrams, tables, code) — shares one column capped at the `--content-measure` token (1100px); oversized tables/code scroll inside it. (Revised 2026-07-13 from the original split layout — 72ch prose beside full-pane blocks — which read as ragged whenever a wide block was on screen.) The `micro` (2px) radius is the mark family for inline review marks, focus rings, and accent bars.
+**The Wide-Sheet Rule** (decided 2026-07-12). The reading surface is full-width and left-set, never a centered narrow column: all content — running prose *and* wide blocks (mermaid diagrams, tables, code) — shares one column capped at the `--content-measure` token (**960px**); oversized tables/code scroll inside it. (Revised 2026-07-13 from the original split layout — 72ch prose beside full-pane blocks — which read as ragged whenever a wide block was on screen. Retuned 1100px → 960px, and corrected here 2026-08-06 where the doc still said 1100.) The `micro` (2px) radius is the mark family for inline review marks, focus rings, and accent bars.
 
-## 4. Elevation
+*Measure is a preset's to move, but only when the column IS the preset's identity* (2026-08-06). Changing `--content-measure` re-wraps every line and moves the document's right edge — the most disruptive thing a preset can do — and 960px is a reviewed decision, not a neutral default. So Manuscript sets it (660px; a short measure is the entire point of a book column) and Compact keeps its long-standing 880px. Everything else inherits 960px. Modern and Terminal briefly carried 920/900px: arbitrary nudges that re-litigated a settled decision, and Terminal's was backwards, since monospace fits *fewer* characters per pixel and a narrower column shortens the line twice over.
+
+**The Measure-Is-Opt-Out Rule** (open, 2026-08-06). The shared column is currently applied by a hand-maintained *allowlist* of element selectors, so anything not named in it silently escapes the measure. Two blocks were found escaping in one sweep (the frontmatter card and the math container), and on the viewer side the list can never be complete, because comrak passes raw HTML through — an author writing `<div>` or `<details>` in markdown lands an arbitrary element outside the column. The durable shape is `article.attn-doc > *` with explicit opt-outs for the wrappers that need a `min()` clamp. Recorded as the intent; not yet implemented.
+
+## Elevation & Depth
 
 A hybrid: mostly flat tonal layering (chrome recedes by being a step darker than content, not by floating), with a small, restrained shadow vocabulary reserved for genuinely-lifted surfaces — review cards, dialogs, dropdowns — and soft *inset* shadows that make code blocks and inputs read as pressed into the paper. The paper-grain overlay (a fixed fractal-noise SVG at `--grain-opacity`) sits above everything as the unifying texture; it is not elevation but it is why nothing looks like flat plastic.
 
@@ -223,7 +260,7 @@ A hybrid: mostly flat tonal layering (chrome recedes by being a step darker than
 
 **The Topmost-Escape Rule.** Escape closes exactly one layer — the topmost (palette → composer → dialog → popover → drawer) — and never destroys a draft. Every overlay stores focus on open and restores it on close.
 
-## 5. Components
+## Components
 
 ### Buttons
 - **Shape:** gently rounded (`8px`, `{rounded.md}`), `min-height: 46px`, sans-serif 700.
@@ -238,8 +275,10 @@ A hybrid: mostly flat tonal layering (chrome recedes by being a step darker than
 - **Moved badge:** a muted neutral pill (`--moved-badge-bg`) marking a re-anchored suggestion.
 
 ### Cards / Containers
-- **Review margin card** (signature): the primary container. Near-opaque raised paper (`oklch(0.94 0.010 76 / 96%)`), `10px` radius, `16px` padding, the review-card lift shadow, and a top hairline border. A left color accent identifies comment (amber) vs. suggestion (green) — carried as a small accent element, **not** a thick side-stripe border.
+- **Review margin card** (signature): the primary container. Near-opaque raised paper (`oklch(0.94 0.010 76 / 96%)`), `6px` radius, `10px 12px 10px 13px` padding (the asymmetric left leaves room for the accent), the review-card lift shadow, and a top hairline border.
+- **The accent strip** (corrected 2026-08-06): a `3px` full-height strip on the card's left edge, **square at both ends** even though the card's corners are round. It carries `--rmc-accent` — the comment author's personal color, with kind (comment amber / suggestion green) and state (stale / low-confidence) overrides layered after. Implemented as an absolutely-positioned `::before` at `border-radius: 0`, with `isolation: isolate` on the card so its negative `z-index` cannot escape. It was previously an `inset` box-shadow, which the card's radius necessarily clipped into a tapered curve at both ends; the strip is information (who, and what kind), so it must not read as a decorative flourish. The card must never gain `overflow: hidden` — that would re-clip the strip and bring the curve back.
 - **General panels:** flat, one tonal step off the content surface, hairline `18%`-ink borders. No nested cards.
+- **Tables** are code blocks: same `--code-block` fill, 1px border, `6px` radius and inset lip. Achieved with `border-collapse: separate` + `border-spacing: 0` (a collapsed table merges cell borders into the table box and squares off the radius) and **no cell backgrounds** — a filled header row would re-square the top corners and cover the inset lip, so header distinction is carried by ink weight instead.
 
 ### Inputs / Fields
 - **Style:** `84%` paper fill, `10px` radius, hairline `12%`-ink border, `32px` high, sans-serif `0.82–0.95rem`, a top inset highlight.
@@ -257,7 +296,7 @@ The editorial heart of the product. Reviewer edits render as attributed inline m
 - **Comment anchor:** amber highlight tint behind the running text, `box-decoration-break: clone` so it wraps cleanly across lines.
 - **Confidence ramp & stale:** anchored suggestions carry a descending-presence background (high → low) in the accent hue; a stale anchor desaturates and switches to a dotted underline.
 
-## 6. Do's and Don'ts
+## Do's and Don'ts
 
 ### Do:
 - **Do** keep the terracotta/steel accent to action, selection, and focus only — the One Pencil Rule. Everything else is ink, paper, and the second neutral layer.
@@ -273,7 +312,7 @@ The editorial heart of the product. Reviewer edits render as attributed inline m
 - **Don't** let it read like an **IDE** (VS Code): no activity bars, no panels-in-panels, no everything-is-a-toolbar. The reading column is the hero.
 - **Don't** let it drift toward **Notion rounded-pastel**: no candy-colored blocks, no emoji-forward headers, no soft-everything. Warmth is paper and type.
 - **Don't** borrow the Linear-clone **saturated-purple glassy gradient-glow** dark theme; INK mode is a cool blue-black study, not neon.
-- **Don't** use a `border-left`/`border-right` colored stripe > 1px on cards or callouts (the review card identifies comment vs. suggestion with a small accent element, not a side-stripe).
+- **Don't** use a colored side-stripe on a card or callout as *decoration* — the AI-UI tell is a thick tinted border that means nothing. The **one** sanctioned exception is the review margin card's `3px` accent strip, which is load-bearing: it encodes the comment's author and its kind/state, and removing it deletes an information channel. (Amended 2026-08-06: this previously read as a flat ">1px" prohibition, which the shipped card had never satisfied — the rule described an intent the product had already outgrown. If a new stripe cannot say what it *means*, it is decoration and the prohibition stands.)
 - **Don't** use gradient text, glassmorphism as a default, or the drift toward a warm-cream background — all are prohibited.
 - **Don't** let muted body text go lighter than ~`oklch(0.32 0.012 65)` on paper; light-gray-for-elegance is the fastest way to fail the 4.5:1 floor.
 - **Don't** fluidly `clamp()` UI headings; the product type scale is fixed rem.

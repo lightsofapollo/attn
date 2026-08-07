@@ -39,7 +39,10 @@
 
 <script lang="ts">
   import AlertTriangle from '@lucide/svelte/icons/alert-triangle';
-  import Camera from '@lucide/svelte/icons/camera';
+  // `file-clock`, not `camera`: a snapshot is a point-in-time copy of a FILE,
+  // and a camera reads as "take a screenshot" — something attn genuinely does
+  // elsewhere, so the glyph was actively misleading (attn-11g4.6).
+  import FileClock from '@lucide/svelte/icons/file-clock';
   import History from '@lucide/svelte/icons/history';
   import {
     formatSnapshotAge,
@@ -217,6 +220,30 @@
     reviewStore.setCurrentSnapshot(id);
     closePopover();
   }
+
+  // -------------------------------------------------------------------------
+  // Active/pressed treatment (attn-11g4.6)
+  //
+  // One convention across the interactive header icons: while the surface an
+  // icon owns is open, it promotes from a borderless muted ghost to a FILLED,
+  // OUTLINED pill in the accent (`--primary`). The fill and the outline arrive
+  // with the tint, so the state never rides on colour alone (PRODUCT.md), and
+  // `aria-expanded` reports it to assistive tech. `data-active` gives E2E a
+  // stable hook.
+  //
+  // The two semantically-coloured chips below (grey "superseded", amber
+  // "reviewer on older") keep their own palette — that colour is information,
+  // not decoration — and take only the outline half of the treatment.
+  // -------------------------------------------------------------------------
+  const CHIP_BASE =
+    'snapshot-chip inline-flex size-7 shrink-0 items-center justify-center rounded-full border text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50';
+  const CHIP_REST =
+    'border-transparent text-muted-foreground hover:bg-muted hover:text-foreground';
+  const CHIP_ACTIVE = 'border-primary/35 bg-primary/10 text-primary hover:bg-primary/15';
+  const neutralChipClass = $derived(
+    `${CHIP_BASE} ${popoverOpen ? CHIP_ACTIVE : CHIP_REST}`,
+  );
+  const semanticChipActive = $derived(popoverOpen ? 'ring-2 ring-primary/40' : '');
 </script>
 
 <svelte:window onkeydown={handleKeyDown} />
@@ -235,16 +262,17 @@
       {#if ownerLabel === 'current'}
         <button
           type="button"
-          class="snapshot-chip inline-flex size-7 shrink-0 items-center justify-center rounded-full border border-primary/35 bg-primary/10 text-[11px] font-medium text-primary transition-colors hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+          class={neutralChipClass}
           data-slot="snapshot-badge-chip"
           data-state="current"
+          data-active={popoverOpen ? 'true' : 'false'}
           aria-label="Snapshot current"
           aria-haspopup="dialog"
           aria-expanded={popoverOpen}
           title="On the file's latest snapshot"
           onclick={togglePopover}
         >
-          <Camera class="size-3 text-primary" aria-hidden="true" />
+          <FileClock class="size-3" aria-hidden="true" />
           <span class="sr-only">Snapshot current</span>
         </button>
       {:else if ownerLabel === 'superseded'}
@@ -254,9 +282,10 @@
           is invalid HTML. The chip toggles the popover; the link jumps.
         -->
         <span
-          class="snapshot-chip inline-flex h-7 shrink-0 items-center rounded-full border border-border bg-muted/40 text-[11px] font-medium text-muted-foreground"
+          class="snapshot-chip inline-flex h-7 shrink-0 items-center rounded-full border border-border bg-muted/40 text-[11px] font-medium text-muted-foreground {semanticChipActive}"
           data-slot="snapshot-badge-chip"
           data-state="superseded"
+          data-active={popoverOpen ? 'true' : 'false'}
         >
           <button
             type="button"
@@ -268,7 +297,7 @@
             title="This snapshot has been superseded — click to view current"
             onclick={togglePopover}
           >
-            <Camera class="size-3 text-muted-foreground" aria-hidden="true" />
+            <FileClock class="size-3 text-muted-foreground" aria-hidden="true" />
             <span class="line-through" data-slot="snapshot-badge-strike">
               Old
             </span>
@@ -294,9 +323,10 @@
         -->
         <button
           type="button"
-          class="snapshot-chip inline-flex h-7 shrink-0 items-center gap-1 rounded-full border border-amber-500/60 bg-amber-500/10 px-2 text-[11px] font-medium text-amber-700 transition-colors hover:bg-amber-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 dark:text-amber-300"
+          class="snapshot-chip inline-flex h-7 shrink-0 items-center gap-1 rounded-full border border-amber-500/60 bg-amber-500/10 px-2 text-[11px] font-medium text-amber-700 transition-colors hover:bg-amber-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 dark:text-amber-300 {semanticChipActive}"
           data-slot="snapshot-badge-chip"
           data-state="reviewer_on_older"
+          data-active={popoverOpen ? 'true' : 'false'}
           aria-label="Reviewer on older snapshot"
           aria-haspopup="dialog"
           aria-expanded={popoverOpen}
@@ -321,16 +351,17 @@
       -->
       <button
         type="button"
-        class="snapshot-chip inline-flex size-7 shrink-0 items-center justify-center rounded-full border border-primary/35 bg-primary/10 text-[11px] font-medium text-primary transition-colors hover:bg-primary/15 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+        class={neutralChipClass}
         data-slot="snapshot-badge-chip"
         data-state="reviewer_current"
+        data-active={popoverOpen ? 'true' : 'false'}
         aria-label="Snapshot @ {formatSnapshotClock(activeSnapshot.createdAt)}"
         aria-haspopup="dialog"
         aria-expanded={popoverOpen}
         title="Reviewing snapshot · {formatSnapshotAge(activeSnapshot.createdAt, now())}"
         onclick={togglePopover}
       >
-        <Camera class="size-3 text-primary" aria-hidden="true" />
+        <FileClock class="size-3" aria-hidden="true" />
         <span class="sr-only">Snapshot @ {formatSnapshotClock(activeSnapshot.createdAt)}</span>
       </button>
       {#if ownerOnNewerSnapshot}

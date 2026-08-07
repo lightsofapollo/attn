@@ -374,6 +374,11 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
         stored_prefs.theme.clone()
     };
     let typeset = stored_prefs.typeset.clone();
+    // Already range-gated by `prefs::load` (attn-11g4.2), so the page receives
+    // a width it is allowed to render. Unlike theme/typeset this is NOT
+    // stamped into the page HTML pre-paint: the rail only exists inside a
+    // review room, so there is no first frame for a wrong width to flash on.
+    let rail_width = stored_prefs.rail_width;
     let diag_mode = diag_mode_from_env();
 
     // Review profile (onboarding): the user's chosen display name (if any), the
@@ -420,6 +425,7 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
         "activeProjectPath": project_registry.active_project,
         "theme": theme,
         "typeset": typeset,
+        "railWidth": rail_width,
         "diagMode": diag_mode,
         "version": env!("CARGO_PKG_VERSION"),
         "contentMtimeMs": initial_mtime_ms,
@@ -2090,9 +2096,18 @@ fn build_page_html(init_payload_json: &str, theme: &str, typeset: &str) -> Strin
         .replace("<!-- INIT_SCRIPT -->", &init_script)
         .replace("data-theme=\"system\"", &format!("data-theme=\"{theme}\""))
         .replace("data-theme=\"light\"", &format!("data-theme=\"{theme}\""))
-        .replace(
+        // `replacen(.., 1)`, not `replace`: since typeset.css gained an
+        // explicit `[data-typeset='editorial']` rule, this needle is no longer
+        // unique to the <html> tag in principle. It is in practice only
+        // because the CSS minifier emits selectors unquoted
+        // (`[data-typeset=editorial]`) — one minifier-config change away from
+        // this rewriting the default preset's own selector and stripping its
+        // tokens. The <html> tag is the first occurrence in the document, so
+        // bounding the replacement removes the dependency on that accident.
+        .replacen(
             "data-typeset=\"editorial\"",
             &format!("data-typeset=\"{typeset}\""),
+            1,
         )
 }
 

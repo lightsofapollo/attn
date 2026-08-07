@@ -20,6 +20,7 @@ import type {
   SuggestionDraft,
   UpdatePayload,
 } from './types';
+import { deliverLocalPath, localShareableFiles } from './local-file-source';
 
 const SAMPLE_MARKDOWN = `# Project Plan
 
@@ -216,6 +217,14 @@ declare global {
     __attn_init__?: InitPayload;
     __attn_native_shortcuts__?: boolean;
     /**
+     * True only when this page is running WITHOUT a wry host — i.e. the mock
+     * shim below is standing in for the daemon. Surfaces that can only work
+     * one way or the other read it to choose: `OpenLocalFiles.svelte` offers
+     * the browser file picker on the strength of this flag, because in the
+     * native window a picked File carries no path the daemon could open.
+     */
+    __attnMockIpc?: boolean;
+    /**
      * E2E helper: dispatch a synthetic review callback through the bridge.
      * Exposed only when the mock IPC is installed (i.e. dev builds without a
      * wry host). Wired up in `installMockIpc`. See attn-nnj.12.6.
@@ -405,6 +414,39 @@ function suggestionAcceptedBody(suggestionId: EventId): SuggestionAcceptedBody {
   };
 }
 
+/**
+ * Browser stand-in for the daemon's shareable-file scan. Keep it in step with
+ * the Rust side: `IpcMessage::ReviewListShareableFiles` (src/ipc.rs) →
+ * `files::list_shareable_files` → the `shareableFiles` payload pushed through
+ * `updateContent` (src/main.rs). Same message, same reply shape, same channel.
+ *
+ * Without this the share picker never finishes loading. `App.svelte` sets
+ * `shareableFilesLoading = true` and clears it only on this reply, so an
+ * uploaded folder left the file list spinning forever and nothing could be
+ * selected or shared (attn-vlmz.1.1).
+ *
+ * The daemon walks the filesystem below `rootPath`; the session store is all
+ * the filesystem there is here, so we filter it to the requested root the way
+ * a scan rooted there would have.
+ */
+function handleReviewListShareableFiles(
+  msg: Extract<IpcMessage, { type: 'review_list_shareable_files' }>,
+): void {
+  const items = localShareableFiles().filter((item) => pathWithinRoot(item.path, msg.rootPath));
+  // Answer asynchronously like every other mock reply: the app must round-trip
+  // through its loading state, not skip it.
+  setTimeout(() => {
+    window.__attn__?.updateContent({ shareableFiles: { rootPath: msg.rootPath, items } });
+  }, 50);
+}
+
+/** Mirrors the containment test the Rust scan gets for free from walking. */
+function pathWithinRoot(path: string, root: string): boolean {
+  const normalizedRoot = root.replace(/\/+$/u, '');
+  if (normalizedRoot.length === 0) return true;
+  return path === normalizedRoot || path.startsWith(`${normalizedRoot}/`);
+}
+
 function handleReviewCreateComment(
   msg: Extract<IpcMessage, { type: 'review_create_comment' }>,
 ): void {
@@ -462,6 +504,9 @@ function dispatchReviewCommand(msg: IpcMessage): void {
       return;
     case 'review_stop':
       handleReviewStop(msg);
+      return;
+    case 'review_list_shareable_files':
+      handleReviewListShareableFiles(msg);
       return;
     case 'review_create_comment':
       handleReviewCreateComment(msg);
@@ -746,6 +791,7 @@ export function installMockIpc(): void {
   if (window.ipc) return;
 
   console.log('[attn] Dev mode: installing mock IPC');
+  window.__attnMockIpc = true;
 
   // Set up mock init payload — now sends raw markdown, ProseMirror renders it
   window.__attn_init__ = {
@@ -775,6 +821,13 @@ export function installMockIpc(): void {
       console.log('[attn] IPC out:', parsed);
       if (isReviewMessage(parsed)) {
         dispatchReviewCommand(parsed);
+        return;
+      }
+      // Sidebar clicks and tab switches send `navigate`; with no daemon to
+      // answer, the app would swap the tab and then sit on stale content.
+      // Serve it out of whatever the user picked or dropped this session.
+      if (parsed.type === 'navigate') {
+        void deliverLocalPath(parsed.path);
       }
     },
   };

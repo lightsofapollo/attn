@@ -35,6 +35,7 @@
   import Editor from './lib/Editor.svelte';
   import HtmlViewer from './lib/HtmlViewer.svelte';
   import ReviewMargin from './lib/ReviewMargin.svelte';
+  import BrandMark from './lib/BrandMark.svelte';
   import BottomSheet from './hosted/app/BottomSheet.svelte';
   import ReviewFileNav from './lib/ReviewFileNav.svelte';
   import NamePrompt from './lib/NamePrompt.svelte';
@@ -1244,11 +1245,19 @@
              lives in the status chip's popover. -->
         <!-- No overflow-hidden here: the status chip's popover overhangs the
              header; the doc-name span truncates itself via min-w-0. -->
+        <!-- Chrome plane, matching App.svelte's native-header and the hosted
+             owner-header: `--panel-surface` behind a `--panel-border`
+             hairline. This bar previously painted NOTHING and inherited
+             whatever was behind it, so it was the least differentiated of
+             the three. See the longer note in App.svelte. -->
         <header
-          class="relative z-40 flex h-11 shrink-0 items-center gap-2 border-b border-border px-3"
+          class="relative z-40 flex h-11 shrink-0 items-center gap-2 border-b border-[var(--panel-border)] bg-[var(--panel-surface)] px-3"
           data-slot="browser-review-header"
         >
-          <span class="select-none font-serif text-sm font-bold leading-none text-foreground" data-slot="browser-brand" aria-label="attn review">attn</span>
+          <span class="flex shrink-0 items-center gap-1.5" data-slot="browser-brand" aria-label="attn review">
+            <BrandMark size={18} />
+            <span class="select-none font-serif text-sm font-bold leading-none text-foreground">attn</span>
+          </span>
           <span class="h-3 w-px shrink-0 bg-border" aria-hidden="true"></span>
           <span class="min-w-0 truncate font-sans text-[13px] font-medium text-foreground" data-slot="browser-review-doc-name">
             {currentFileName}
@@ -1271,7 +1280,7 @@
             {#if desktopLayout && displayedDocType !== 'html'}
               <button
                 type="button"
-                class="inline-flex h-7 items-center gap-1 rounded-md px-1.5 text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                class="inline-flex h-7 items-center gap-1 rounded-md px-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
                 data-slot="browser-review-rail-toggle"
                 aria-pressed={reviewStore.panelOpen}
                 aria-label={reviewStore.panelOpen ? 'Reading mode' : 'Review mode'}

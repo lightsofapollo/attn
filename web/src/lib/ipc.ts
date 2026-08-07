@@ -38,7 +38,15 @@ export function setIpcToken(token: string | undefined): void {
   if (token) ipcToken = token;
 }
 
-function send(message: IpcMessage): void {
+/**
+ * Outbound messages whose Rust `IpcMessage` variant exists but which have no
+ * mirror in `types.ts` yet. `rail_width_change` (attn-11g4.2) belongs in the
+ * `IpcMessage` union there; it lives here until that file is next touched, so
+ * the wire shape is still checked rather than cast away at the call site.
+ */
+type PendingIpcMessage = { type: 'rail_width_change'; width: number };
+
+function send(message: IpcMessage | PendingIpcMessage): void {
   if (typeof window !== 'undefined' && window.ipc) {
     const payload = ipcToken ? { ...message, token: ipcToken } : message;
     window.ipc.postMessage(JSON.stringify(payload));
@@ -79,6 +87,22 @@ export function themeChange(theme: string): void {
 
 export function typesetChange(typeset: string): void {
   send({ type: 'typeset_change', typeset });
+}
+
+/**
+ * Persist the expanded review rail's width (attn-11g4.2).
+ *
+ * Sent on drag end / reset / after a keyboard nudge settles, not on every
+ * pointermove — this writes prefs.json, and a drag is hundreds of frames.
+ * The daemon re-clamps via `prefs::normalize_rail_width`; the rounding here is
+ * for the log line and the JSON, not a trust boundary.
+ *
+ * No-ops without `window.ipc`, which is exactly the hosted browser build: the
+ * rail still resizes for the session, it just forgets — same degradation as
+ * `themeChange`/`typesetChange`.
+ */
+export function railWidthChange(width: number): void {
+  send({ type: 'rail_width_change', width: Math.round(width) });
 }
 
 export function openExternal(path: string): void {

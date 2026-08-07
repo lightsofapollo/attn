@@ -15,6 +15,7 @@ import {
   deletion,
   modification,
 } from '@handlewithcare/prosemirror-suggest-changes';
+import { renderEmbeddedSvg } from './embedded-svg-view';
 
 // -- Nodes --
 
@@ -63,6 +64,39 @@ const frontmatterNode: NodeSpec = {
   ],
   toDOM(node): DOMOutputSpec {
     return ['div', { 'data-frontmatter': node.attrs.value, class: 'frontmatter-block' }];
+  },
+};
+
+// Embedded SVG (attn-vlmz.4). An atom carrying the RAW source so the file
+// round-trips byte-exact; `toDOM` renders the *sanitised* form built by
+// `renderEmbeddedSvg`, which allowlists tags/attributes and constructs real
+// nodes with createElementNS rather than parsing a string.
+//
+// Read planning/embedded-svg-threat-model.md before touching this or the
+// `attn_svg_block` rule below. Documents are agent-authored and arrive from
+// peers over shares; the parser stays in `html: false` mode and this ONE
+// construct is recognised, so there is no general raw-HTML path to audit.
+const embeddedSvgNode: NodeSpec = {
+  group: 'block',
+  atom: true,
+  selectable: true,
+  attrs: { source: { default: '' } },
+  parseDOM: [
+    {
+      tag: 'div[data-embedded-svg]',
+      getAttrs: (dom) => ({
+        source: (dom as HTMLElement).getAttribute('data-embedded-svg') || '',
+      }),
+    },
+  ],
+  toDOM(node): DOMOutputSpec {
+    const source = String(node.attrs.source ?? '');
+    // No document during tsx-run unit tests; the spec form is enough there and
+    // never reaches a browser.
+    if (typeof document === 'undefined') {
+      return ['div', { 'data-embedded-svg': source, class: 'embedded-svg' }];
+    }
+    return renderEmbeddedSvg(source);
   },
 };
 
@@ -134,43 +168,96 @@ const tableRowNode: NodeSpec = {
   },
 };
 
+/**
+ * Cell attributes.
+ *
+ * `align` is ours (markdown column alignment). The other three are a hard
+ * requirement of prosemirror-tables, which reads them off every cell without
+ * checking they exist: `findWidth()` does `rowWidth += cell.attrs.colspan`, so
+ * a cell missing `colspan` makes the table's width `NaN`, `computeMap()` then
+ * returns a zero-length TableMap, and every consumer of it fails —
+ * `CellSelection.create` throws `RangeError: No cell with offset N found`, and
+ * hovering within 5px of a cell's right edge throws the same from the column-
+ * resize plugin's `decorations` prop. That was attn-11g4.8; declaring these is
+ * the fix. Mirrors the shape of the library's own `tableNodes()` helper, whose
+ * `getCellAttrs`/`setCellAttrs` are not exported for reuse.
+ *
+ * Markdown has no concept of spans or pixel widths, so these never reach the
+ * file: the markdown serializer reads `align` and cell content and nothing
+ * else. `colwidth` is written by a live column drag and is deliberately
+ * session-local — it round-trips through collab and snapshots, not through the
+ * document on disk.
+ */
+const cellAttrs: NodeSpec['attrs'] = {
+  align: { default: null },
+  colspan: { default: 1, validate: 'number' },
+  rowspan: { default: 1, validate: 'number' },
+  colwidth: { default: null, validate: validateColwidth },
+};
+
+function validateColwidth(value: unknown): void {
+  if (value === null) return;
+  if (!Array.isArray(value)) throw new TypeError('colwidth must be null or an array');
+  for (const item of value) {
+    if (typeof item !== 'number') throw new TypeError('colwidth must be null or an array of numbers');
+  }
+}
+
+/** Read cell attributes off a pasted/parsed `<th>`/`<td>`. */
+function readCellAttrs(dom: HTMLElement): Record<string, unknown> {
+  const widthAttr = dom.getAttribute('data-colwidth');
+  const widths =
+    widthAttr && /^\d+(,\d+)*$/.test(widthAttr) ? widthAttr.split(',').map(Number) : null;
+  const colspan = Number(dom.getAttribute('colspan') || 1);
+  return {
+    align: dom.style.textAlign || null,
+    colspan,
+    rowspan: Number(dom.getAttribute('rowspan') || 1),
+    // A width list that doesn't describe this cell's columns is not this
+    // cell's width list — drop it rather than let TableView size off garbage.
+    colwidth: widths && widths.length === colspan ? widths : null,
+  };
+}
+
+/** Write cell attributes back out, omitting every default. */
+function writeCellAttrs(attrs: Record<string, unknown>): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (attrs.align) out.style = `text-align: ${String(attrs.align)}`;
+  if (attrs.colspan !== 1) out.colspan = String(attrs.colspan);
+  if (attrs.rowspan !== 1) out.rowspan = String(attrs.rowspan);
+  if (Array.isArray(attrs.colwidth)) out['data-colwidth'] = attrs.colwidth.join(',');
+  return out;
+}
+
 const tableHeaderNode: NodeSpec = {
   content: 'inline*',
   tableRole: 'header_cell',
-  attrs: { align: { default: null } },
+  attrs: cellAttrs,
   isolating: true,
   parseDOM: [
     {
       tag: 'th',
-      getAttrs: (dom) => ({
-        align: (dom as HTMLElement).style.textAlign || null,
-      }),
+      getAttrs: (dom) => readCellAttrs(dom as HTMLElement),
     },
   ],
   toDOM(node): DOMOutputSpec {
-    const attrs: Record<string, string> = {};
-    if (node.attrs.align) attrs.style = `text-align: ${node.attrs.align}`;
-    return ['th', attrs, 0];
+    return ['th', writeCellAttrs(node.attrs), 0];
   },
 };
 
 const tableCellNode: NodeSpec = {
   content: 'inline*',
   tableRole: 'cell',
-  attrs: { align: { default: null } },
+  attrs: cellAttrs,
   isolating: true,
   parseDOM: [
     {
       tag: 'td',
-      getAttrs: (dom) => ({
-        align: (dom as HTMLElement).style.textAlign || null,
-      }),
+      getAttrs: (dom) => readCellAttrs(dom as HTMLElement),
     },
   ],
   toDOM(node): DOMOutputSpec {
-    const attrs: Record<string, string> = {};
-    if (node.attrs.align) attrs.style = `text-align: ${node.attrs.align}`;
-    return ['td', attrs, 0];
+    return ['td', writeCellAttrs(node.attrs), 0];
   },
 };
 
@@ -198,6 +285,7 @@ export const schema = new Schema({
         let nodes = baseNodes;
         nodes = nodes.update('code_block', codeBlockNode);
         nodes = nodes.addBefore('text', 'frontmatter', frontmatterNode);
+        nodes = nodes.addBefore('text', 'embedded_svg', embeddedSvgNode);
         nodes = nodes.addBefore('text', 'task_list', taskListNode);
         nodes = nodes.addBefore('text', 'task_list_item', taskListItemNode);
         nodes = nodes.addBefore('text', 'table', tableNode);
@@ -384,8 +472,102 @@ function frontmatterPlugin(md: MarkdownIt): void {
   );
 }
 
+/**
+ * Locate the end of the root `<svg>` element within `text`, returning the
+ * offset just past its closing tag, or -1.
+ *
+ * Nested `<svg>` elements are legal, so this counts depth rather than taking
+ * the first `</svg>`. An attribute value containing `>` truncates a match early
+ * but still yields exactly one open, so the depth count stays correct.
+ */
+function findSvgElementEnd(text: string): number {
+  const tagRe = /<svg\b[^>]*>|<\/svg\s*>/g;
+  let depth = 0;
+  let match: RegExpExecArray | null;
+  while ((match = tagRe.exec(text)) !== null) {
+    const tag = match[0];
+    if (tag.startsWith('</')) {
+      depth -= 1;
+      if (depth === 0) return match.index + tag.length;
+      if (depth < 0) return -1;
+    } else if (tag.endsWith('/>')) {
+      if (depth === 0) return match.index + tag.length; // self-closing root
+    } else {
+      depth += 1;
+    }
+  }
+  return -1;
+}
+
+/**
+ * Recognise a top-level block that is exactly one raw `<svg>…</svg>` element
+ * (attn-vlmz.4.2). The parser stays in `html: false` mode — every other raw
+ * HTML run keeps escaping as it does today — so this rule is the entire
+ * embedded-markup surface. See planning/embedded-svg-threat-model.md §D1.
+ *
+ * Every condition below is also a round-trip guarantee. Because the block must
+ * start its own line, close on its own line, and be followed by a blank line or
+ * EOF, the boundary in the file always coincides with the block boundary the
+ * serializer re-emits — so `serialize(parse(md)) === md` holds unconditionally
+ * whenever this rule fires. Anything that does not qualify is simply not
+ * recognised and passes through the unchanged paragraph path, which is also
+ * byte-exact (just escaped rather than rendered).
+ */
+function svgBlockPlugin(md: MarkdownIt): void {
+  md.block.ruler.before(
+    'paragraph',
+    'attn_svg_block',
+    (state, startLine, endLine, silent) => {
+      // Top level only: keeps the node out of list items and blockquotes, where
+      // the serializer's per-line block delimiters would rewrite the source.
+      if (state.blkIndent !== 0) return false;
+      // 4+ spaces is an indented code block, which owns the line.
+      if (state.tShift[startLine] >= 4) return false;
+
+      const lineStart = state.bMarks[startLine] + state.tShift[startLine];
+      const head = state.src.slice(lineStart, state.eMarks[startLine]);
+      if (!/^<svg[\s>/]/.test(head)) return false;
+
+      const searchEnd = state.eMarks[Math.min(endLine, state.lineMax) - 1];
+      const relativeEnd = findSvgElementEnd(state.src.slice(lineStart, searchEnd));
+      if (relativeEnd < 0) return false;
+      const endOffset = lineStart + relativeEnd;
+
+      // Which line does the closing tag land on?
+      let closeLine = -1;
+      for (let line = startLine; line < endLine; line++) {
+        if (endOffset <= state.eMarks[line]) {
+          closeLine = line;
+          break;
+        }
+      }
+      if (closeLine < 0) return false;
+
+      // Nothing may follow `</svg>` on its line…
+      if (state.src.slice(endOffset, state.eMarks[closeLine]).trim() !== '') return false;
+      // …and the next line must be blank or the end of the document.
+      if (closeLine + 1 < endLine) {
+        const nextStart = state.bMarks[closeLine + 1] + state.tShift[closeLine + 1];
+        if (nextStart < state.eMarks[closeLine + 1]) return false;
+      }
+
+      if (silent) return true;
+
+      // From bMarks (not bMarks+tShift) so any leading indent round-trips too.
+      const token = state.push('attn_svg', 'div', 0);
+      token.meta = state.src.slice(state.bMarks[startLine], state.eMarks[closeLine]);
+      token.map = [startLine, closeLine + 1];
+      token.block = true;
+      state.line = closeLine + 1;
+      return true;
+    },
+    { alt: [] },
+  );
+}
+
 const markdownItInstance = MarkdownIt('default', { html: false });
 markdownItInstance.use(frontmatterPlugin);
+markdownItInstance.use(svgBlockPlugin);
 markdownItInstance.use(taskListPlugin);
 
 export const markdownParser = new MarkdownParser(schema, markdownItInstance, {
@@ -412,6 +594,10 @@ export const markdownParser = new MarkdownParser(schema, markdownItInstance, {
   front_matter: {
     node: 'frontmatter',
     getAttrs: (tok: Token) => ({ value: (tok.meta as string) || '' }),
+  },
+  attn_svg: {
+    node: 'embedded_svg',
+    getAttrs: (tok: Token) => ({ source: (tok.meta as string) || '' }),
   },
   code_block: { block: 'code_block', noCloseToken: true },
   fence: {
@@ -493,6 +679,16 @@ export const markdownSerializer = new MarkdownSerializer(
       state.closeBlock(node);
     },
 
+    // Emits the ORIGINAL source and nothing else. The sanitised DOM is never
+    // consulted here — the sanitiser takes a string and returns a data tree,
+    // with no reference to the document — so sanitising can never rewrite the
+    // user's file. `state.text(…, escape=false)` rather than a single `write`
+    // so interior blank lines survive and block delimiters apply per line.
+    embedded_svg(state: MarkdownSerializerState, node: PmNode) {
+      state.text(String(node.attrs.source ?? ''), false);
+      state.closeBlock(node);
+    },
+
     task_list(state: MarkdownSerializerState, node: PmNode) {
       state.renderList(node, '  ', () => '');
     },
@@ -568,16 +764,58 @@ export const markdownSerializer = new MarkdownSerializer(
   },
 );
 
+/**
+ * Escape every `|` in a rendered cell so it can't be read as a column
+ * delimiter.
+ *
+ * A pipe is only special inside a table, so the generic escaper can't do this:
+ * `state.esc()` escaps ``` ` * \ ~ [ ] _ ``` and knows nothing about table
+ * context. GFM resolves cell-level `\|` escapes BEFORE inline parsing, which
+ * is why this is safe to apply to the fully-rendered cell — it reaches pipes
+ * inside code spans and link destinations, both of which bypass `esc()`
+ * entirely (code marks carry `escape: false`; hrefs are escaped only for
+ * `( ) "`).
+ *
+ * Left unescaped, a bare pipe destroyed content in two saves (attn-11g4.10):
+ * the first save widened the row past the header's column count, and the
+ * second — markdown-it truncates rows to that count — dropped the overflowing
+ * cell for good.
+ *
+ * Known limit: a literal backslash immediately before a pipe INSIDE a code
+ * span emerges as `\\|`, which reads as an escaped backslash followed by a
+ * live delimiter. Backslashes are only doubled on the `esc()` path, and code
+ * spans skip it. Reaching that state requires source no ordinary document
+ * contains, and repairing it would mean rewriting code-span content.
+ */
+function escapeCellPipes(text: string): string {
+  return text.replace(/\|/g, '\\|');
+}
+
+/**
+ * Render one cell's INLINE content to markdown.
+ *
+ * The wrapping paragraph is load-bearing. `MarkdownSerializer.serialize()`
+ * runs `renderContent`, which walks a node's children as BLOCKS and hands each
+ * to its own node serializer — and mark delimiters are emitted only by
+ * `renderInline`. Serializing the cell node directly therefore dropped every
+ * mark in it: `**bold**` saved as `bold`, and a link lost its target entirely
+ * (attn-11g4.10). Wrapping the content in a paragraph inside a doc routes it
+ * through the paragraph serializer, whose whole body is `renderInline`.
+ *
+ * The marks were always in the document — the parser produced them correctly.
+ * This was pure loss on the way out, on every save of the whole file.
+ */
+function serializeCellContent(cell: PmNode): string {
+  const paragraph = schema.nodes.paragraph.create(null, cell.content);
+  const rendered = markdownSerializer.serialize(schema.nodes.doc.create(null, paragraph));
+  // A cell is a single line: fold any hard break into a space, as before.
+  return escapeCellPipes(rendered.trim().replace(/\n/g, ' '));
+}
+
 function renderTableRow(state: MarkdownSerializerState, row: PmNode): void {
   const cells: string[] = [];
   row.forEach((cell) => {
-    // Serialize each cell's inline content
-    const cellSerializer = new MarkdownSerializer(
-      markdownSerializer.nodes,
-      markdownSerializer.marks,
-    );
-    const text = cellSerializer.serialize(cell).trim().replace(/\n/g, ' ');
-    cells.push(text);
+    cells.push(serializeCellContent(cell));
   });
   state.write('| ' + cells.join(' | ') + ' |');
 }

@@ -51,7 +51,14 @@
 	>
 		<!-- Overflow scrolls through the shared ScrollArea (thin themed thumb),
 		     never a native gutter; the close affordance stays pinned to the
-		     dialog frame, outside the scrolling body. -->
+		     dialog frame, outside the scrolling body.
+
+		     `min-h-0 flex-1` hands this dialog's `max-h-[85vh]` ceiling to the
+		     scroll area as its height. That only works because the ScrollArea
+		     sizes its viewport by flex — a percentage height cannot resolve
+		     against a max-height-bounded ancestor, which is what left this
+		     modal clipped and unscrollable (attn-11g4.1.1). See the sizing note
+		     in `components/ui/scroll-area/scroll-area.svelte`. -->
 		<ScrollArea class="min-h-0 flex-1">
 			<div data-slot="dialog-content-body" class="grid gap-4 p-6">
 				{@render children?.()}

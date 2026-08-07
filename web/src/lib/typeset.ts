@@ -10,6 +10,12 @@ import { typesetChange } from './ipc';
  *
  * `editorial` is the default and is pixel-identical to the app's historical
  * rendering — changing it is a visual regression, not a preset tweak.
+ *
+ * A preset only ever redefines DOCUMENT tokens (`--doc-font`,
+ * `--attn-doc-scale`, `--doc-leading`, `--doc-tracking`, `--content-measure`).
+ * The app's rem baseline (`--attn-base-font-size`) is off limits, so switching
+ * a typeset reflows the reading column and leaves the header, the dialogs, and
+ * every control exactly where they were. See the contract in typeset.css.
  */
 export interface TypesetPreset {
   id: TypesetName;
@@ -23,20 +29,32 @@ export const TYPESETS: readonly TypesetPreset[] = [
   {
     id: 'editorial',
     label: 'Editorial',
-    description: 'Source Serif for reading, Source Sans for chrome. The attn default.',
-    specimen: 'Serif reading column',
+    description: 'Source Serif on a wide column. The attn default.',
+    specimen: 'The quick brown fox',
   },
   {
     id: 'modern',
     label: 'Modern',
-    description: 'Sans-serif throughout — closer to a code review tool than a manuscript.',
-    specimen: 'Sans reading column',
+    description: 'Sans-serif throughout. Reads like a code review tool.',
+    specimen: 'The quick brown fox',
   },
   {
     id: 'compact',
     label: 'Compact',
-    description: 'Tighter scale and leading. More document on screen for dense ops docs.',
-    specimen: 'Dense reading column',
+    description: 'Tighter scale and leading. More document per screen.',
+    specimen: 'The quick brown fox',
+  },
+  {
+    id: 'manuscript',
+    label: 'Manuscript',
+    description: 'Large serif, short column. For reading end to end.',
+    specimen: 'The quick brown fox',
+  },
+  {
+    id: 'terminal',
+    label: 'Terminal',
+    description: 'Monospace throughout. For diffs and config.',
+    specimen: 'The quick brown fox',
   },
 ] as const;
 
@@ -51,9 +69,10 @@ export function getTypeset(): TypesetName {
 export function setTypeset(typeset: TypesetName): void {
   const root = document.documentElement;
   if (root.dataset.typeset === typeset) return;
-  // Same atomic-flip discipline as the theme: font metrics change layout, and
-  // a transition mid-swap reads as a stutter rather than a setting taking
-  // effect.
+  // Same atomic-flip discipline as the theme: a half-swapped face mid-
+  // transition reads as a stutter, not as a setting taking effect. This is
+  // now scoped to what actually changes — the reading column — because the
+  // chrome no longer resizes with the preset at all.
   root.style.setProperty('--t', '0ms');
   root.style.setProperty('transition', 'none');
   root.dataset.typeset = typeset;

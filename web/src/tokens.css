@@ -108,9 +108,26 @@
   --moved-badge-bg: oklch(0.78 0.04 65);
   --moved-badge-fg: oklch(0.22 0.012 55);
 
-  /* Right-rail review panel chrome. */
-  --panel-surface: oklch(0.92 0.010 76);
-  --panel-border: oklch(0.14 0.008 55 / 14%);
+  /* Right-rail review panel chrome, on the sidebar's plane (0.855) rather
+     than a third tier of its own: with both edges recessed equally the
+     document reads as a lit sheet between two rails, which is what actually
+     communicates "the comments panel is open". The old value (0.92) sat 0.015
+     off the paper — invisible in practice — and left the 0.94 cards nothing
+     to float above. */
+  --panel-surface: oklch(0.855 0.012 75);
+  --panel-border: oklch(0.14 0.008 55 / 16%);
+  /* Whatever the margin's cards and chips are actually sitting ON. The native
+     rail is a docked panel and overrides this to `--panel-surface`; the hosted
+     margin floats over the document, so it keeps the paper. Chips that ring
+     themselves against their backdrop read this instead of guessing. */
+  --rail-backdrop: var(--background);
+  /* Quiet furniture in the rail — resolved chips, the "N resolved" pill. A
+     step off the backdrop, but well short of the cards. These used to read
+     `--muted` directly, which was tuned against the paper; that still works
+     here in light (0.88 on the 0.855 panel), so this is the same value. Dark
+     needs its own (see the .dark block) because `--muted` there landed 0.003
+     off the new panel surface. */
+  --rail-chip-surface: oklch(0.88 0.012 75);
   --review-card-surface: oklch(0.94 0.010 76 / 96%);
   --review-card-border: oklch(0.14 0.008 55 / 22%);
   --review-card-shadow: 0 16px 42px oklch(0.20 0.02 55 / 16%), 0 1px 0 oklch(1 0 0 / 45%) inset;
@@ -205,9 +222,16 @@
   --moved-badge-bg: oklch(0.30 0.012 250);
   --moved-badge-fg: oklch(0.88 0.008 250);
 
-  /* Right-rail review panel chrome. */
-  --panel-surface: oklch(0.185 0.012 257);
-  --panel-border: oklch(1 0 0 / 8%);
+  /* Right-rail review panel chrome. Ink inverts the move — the rails lift off
+     the 0.148 background instead of sinking into it — but keeps the pairing:
+     same plane as the sidebar, with the 0.22 cards clearly above it. */
+  --panel-surface: oklch(0.172 0.014 257);
+  --panel-border: oklch(1 0 0 / 10%);
+  /* Ink's `--muted` is 0.175 — it read as a fill against the 0.148 paper, but
+     against the 0.172 panel it is a 0.003 delta, i.e. no fill at all. Half a
+     step toward the 0.22 cards restores "quiet raised pill" without promoting
+     a resolved thread to card weight. */
+  --rail-chip-surface: oklch(0.205 0.013 257);
   --review-card-surface: oklch(0.22 0.014 256 / 97%);
   --review-card-border: oklch(0.78 0.025 250 / 20%);
   --review-card-shadow: 0 18px 52px oklch(0 0 0 / 34%), 0 1px 0 oklch(1 0 0 / 8%) inset;

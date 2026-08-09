@@ -32,6 +32,14 @@ let lastPayload: ContentPayload | null = null;
   },
 };
 
+/* Read through a function boundary, not directly: `lastPayload` is only ever
+   assigned inside the bridge callback above, which TypeScript's control-flow
+   analysis cannot see into — so after a literal `lastPayload = null` it
+   narrows the variable to `null` and every later `delivered()?.field`
+   collapses to `never`. A call expression resets the narrowing without
+   changing a single runtime behaviour. */
+const delivered = (): ContentPayload | null => lastPayload;
+
 const names = (nodes: TreeNode[]): string => nodes.map((n) => n.name).join(',');
 
 // --- buildTree -------------------------------------------------------------
@@ -67,17 +75,17 @@ const run = async (): Promise<void> => {
   resetLocalFiles();
   lastPayload = null;
   await openLocalFiles([pick('notes.md', '# hello')]);
-  assert(lastPayload?.filePath === 'notes.md', 'the single file becomes the active path');
-  assert(lastPayload?.markdown === '# hello', 'its text is delivered inline');
-  assert(lastPayload?.fileTree === undefined, 'a single file is delivered without a sidebar tree');
+  assert(delivered()?.filePath === 'notes.md', 'the single file becomes the active path');
+  assert(delivered()?.markdown === '# hello', 'its text is delivered inline');
+  assert(delivered()?.fileTree === undefined, 'a single file is delivered without a sidebar tree');
 
   // A folder pick does get a tree, and the root is recovered from the shared prefix.
   resetLocalFiles();
   lastPayload = null;
   await openLocalFiles([pick('proj/a.md'), pick('proj/docs/b.md')]);
-  assert(lastPayload?.rootPath === 'proj', 'the common directory prefix becomes rootPath');
-  assert(lastPayload?.fileTree !== undefined, 'a folder pick delivers a sidebar tree');
-  assert(lastPayload?.filePath === 'proj/a.md', 'the first path alphabetically opens');
+  assert(delivered()?.rootPath === 'proj', 'the common directory prefix becomes rootPath');
+  assert(delivered()?.fileTree !== undefined, 'a folder pick delivers a sidebar tree');
+  assert(delivered()?.filePath === 'proj/a.md', 'the first path alphabetically opens');
 
   // Skip lists mirror src/files.rs so a picked project folder is not swamped.
   resetLocalFiles();

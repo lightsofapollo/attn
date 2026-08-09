@@ -260,8 +260,13 @@ mod tests {
     /// would bounce the reset the double-click handler sends.
     #[test]
     fn rail_width_default_survives_its_own_gate() {
-        assert!(RAIL_WIDTH_MIN < RAIL_WIDTH_MAX);
-        assert!((RAIL_WIDTH_MIN..=RAIL_WIDTH_MAX).contains(&RAIL_WIDTH_DEFAULT));
+        // Const blocks, per clippy's `assertions_on_constants` (1.97): these
+        // two are invariants BETWEEN constants, so they can fail at compile
+        // time instead of at test time — strictly earlier, same intent.
+        const {
+            assert!(RAIL_WIDTH_MIN < RAIL_WIDTH_MAX);
+            assert!(RAIL_WIDTH_MIN <= RAIL_WIDTH_DEFAULT && RAIL_WIDTH_DEFAULT <= RAIL_WIDTH_MAX);
+        }
         assert_eq!(normalize_rail_width(RAIL_WIDTH_DEFAULT), RAIL_WIDTH_DEFAULT);
     }
 

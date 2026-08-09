@@ -248,7 +248,11 @@ mod tests {
     #[test]
     fn out_of_range_rail_width_falls_back_to_default() {
         for width in [0, 1, RAIL_WIDTH_MIN - 1, RAIL_WIDTH_MAX + 1, 4096, u32::MAX] {
-            assert_eq!(normalize_rail_width(width), RAIL_WIDTH_DEFAULT, "width {width}");
+            assert_eq!(
+                normalize_rail_width(width),
+                RAIL_WIDTH_DEFAULT,
+                "width {width}"
+            );
         }
     }
 

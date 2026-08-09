@@ -28,7 +28,8 @@
 <script lang="ts">
   import Check from '@lucide/svelte/icons/check';
   import ChevronsUpDown from '@lucide/svelte/icons/chevrons-up-down';
-  import MessageSquareText from '@lucide/svelte/icons/message-square-text';
+  import PanelRightClose from '@lucide/svelte/icons/panel-right-close';
+  import PanelRightOpen from '@lucide/svelte/icons/panel-right-open';
   import LogOut from '@lucide/svelte/icons/log-out';
   import OutboxIndicator from './OutboxIndicator.svelte';
   import PeerStrip from './PeerStrip.svelte';
@@ -158,6 +159,24 @@
   // create their own navigation surface.
   const visible = $derived(hasActiveRoom || (!isOwner && rooms.length > 0) || shareOpen);
 
+  /**
+   * Does the comments toggle (and the divider that introduces it) render?
+   *
+   * Matched to the DOCK's own mount rule (`visible`, above) rather than to
+   * `hasActiveRoom` alone. The dock appears as soon as a share is being
+   * initiated, but the toggle inside it used to wait for the room to mint —
+   * so it popped into a cluster the user was already looking at, shifting the
+   * layout mid-task. Present from the moment the dock is, live once there is
+   * a room (attn-64iy.4).
+   *
+   * Note the reported wording was "comments or in share mode", which reads as
+   * a second arm for "this file has threads but no room". That arm is
+   * unreachable: `threadsForFile` returns [] when `roomId` is null, and
+   * `forgetRoom` clears `currentRoomId` and `currentFileId` together, so
+   * threads cannot outlive their room in the current store model.
+   */
+  const showRailToggle = $derived(railToggle && (hasActiveRoom || shareOpen));
+
   function handleShareClick(): void {
     onShareClick?.();
   }
@@ -255,54 +274,85 @@
         />
       </div>
 
-      {#if hasActiveRoom}
+      <!-- Divider, gated on the same condition as the toggle (attn-64iy.3).
+           It separates the share control from the cluster that follows, so it
+           must not be drawn with nothing behind it. PeerStrip, SnapshotBadge
+           and OutboxIndicator each decide their own presence from store state
+           this component cannot cheaply re-derive, and duplicating those
+           predicates here is precisely the drift that caused the bug this
+           fixes. The rail toggle is the one following element ReviewBar
+           renders unconditionally, so "the toggle is showing" is the only
+           honest "something follows" signal available. -->
+      {#if showRailToggle}
         <span class="h-4 w-px shrink-0 bg-border/70" aria-hidden="true"></span>
+      {/if}
 
-        <div
-          class="review-bar-peers min-w-0 shrink"
-          data-slot="review-bar-peers"
+      {#if hasActiveRoom}
+        <!-- NO WRAPPER DIVS around these three (attn-64iy.3).
+             They used to sit in `review-bar-peers` / `-snapshot` / `-outbox`
+             divs that rendered unconditionally. A wrapper whose child renders
+             nothing is still a flex item of this `gap-1.5` row, so three empty
+             wrappers silently ate ~18px — all of it landing between the share
+             control and the comments toggle, which is the uneven spacing that
+             was reported.
+
+             Letting each component BE the flex item makes the collapse exact
+             and self-maintaining: SnapshotBadge and OutboxIndicator render no
+             element at all when idle, and PeerStrip's empty branch is
+             `sr-only` (position: absolute), which generates no flex item
+             either while still announcing "No peers" to assistive tech. The
+             layout classes the wrappers carried now live on the components'
+             own roots. -->
+        <PeerStrip {localParticipantId} {onJumpTo} />
+
+        <SnapshotBadge {localKind} />
+
+        <OutboxIndicator {isOwner} onRetry={onOutboxRetry} />
+      {/if}
+
+      {#if showRailToggle}
+        <!-- The rail's show/hide (attn-64iy.4).
+             GLYPH: panel-right-close/open, not a speech bubble. This control
+             does not create a comment — it opens and closes the rail that
+             holds them — and WorkspaceEditorFrame's own copy of this toggle
+             already uses exactly this pair for exactly this job. That copy is
+             suppressed on surfaces where the header owns the affordance
+             (`railToggleInHeader`), so the header inherits its vocabulary too;
+             the two must never disagree about which glyph means which state.
+
+             CHROME: the same resting-ghost convention as every other header
+             icon (attn-11g4.6). It used to be a permanently bordered pill,
+             which — once the ShareChip beside it was demoted to a ghost in
+             attn-64iy.6 — would have left it the only outlined control in a
+             row of ghosts, reproducing the inconsistency that was reported.
+             Its surface is the rail, so the active pill maps to `panelOpen`,
+             which `aria-pressed` already announces. -->
+        <button
+          type="button"
+          class="relative inline-flex h-7 shrink-0 items-center gap-1 rounded-md border px-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 {reviewStore.panelOpen
+            ? 'border-primary/35 bg-primary/10 text-primary hover:bg-primary/15'
+            : 'border-transparent text-muted-foreground hover:bg-accent hover:text-foreground'}"
+          data-slot="review-bar-rail-toggle"
+          data-active={reviewStore.panelOpen ? 'true' : 'false'}
+          aria-pressed={reviewStore.panelOpen}
+          aria-label={reviewStore.panelOpen ? 'Hide comments' : 'Show comments'}
+          title="{reviewStore.panelOpen ? 'Hide comments' : 'Show comments'} (⌘J)"
+          onclick={() => reviewStore.togglePanel()}
         >
-          <PeerStrip {localParticipantId} {onJumpTo} />
-        </div>
-
-        <div
-          class="review-bar-snapshot shrink-0"
-          data-slot="review-bar-snapshot"
-        >
-          <SnapshotBadge {localKind} />
-        </div>
-
-        <div
-          class="review-bar-outbox shrink-0"
-          data-slot="review-bar-outbox"
-        >
-          <OutboxIndicator {isOwner} onRetry={onOutboxRetry} />
-        </div>
-
-        {#if railToggle}
-          <!-- Same grammar as the reviewer header's show/hide: comment icon
-               + active-thread count. Replaces the floating panel icon that
-               used to sit inside the margin itself. -->
-          <button
-            type="button"
-            class="relative inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-border/50 bg-background/65 px-1.5 text-muted-foreground shadow-[0_1px_1px_rgba(0,0,0,0.03)] transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-            data-slot="review-bar-rail-toggle"
-            aria-pressed={reviewStore.panelOpen}
-            aria-label={reviewStore.panelOpen ? 'Hide comments' : 'Show comments'}
-            title="{reviewStore.panelOpen ? 'Hide comments' : 'Show comments'} (⌘J)"
-            onclick={() => reviewStore.togglePanel()}
-          >
-            <MessageSquareText class="size-3.5" aria-hidden="true" />
-            {#if reviewStore.roomActiveThreadCount > 0}
-              <span class="rail-toggle-count tabular-nums">{reviewStore.roomActiveThreadCount}</span>
-            {/if}
-            <UnreadBadge
-              count={reviewStore.currentRoomUnread}
-              label="unread review updates"
-              class="absolute -right-1.5 -top-1.5"
-            />
-          </button>
-        {/if}
+          {#if reviewStore.panelOpen}
+            <PanelRightClose class="size-3.5" aria-hidden="true" />
+          {:else}
+            <PanelRightOpen class="size-3.5" aria-hidden="true" />
+          {/if}
+          {#if reviewStore.roomActiveThreadCount > 0}
+            <span class="rail-toggle-count tabular-nums">{reviewStore.roomActiveThreadCount}</span>
+          {/if}
+          <UnreadBadge
+            count={reviewStore.currentRoomUnread}
+            label="unread review updates"
+            class="absolute -right-1.5 -top-1.5"
+          />
+        </button>
       {/if}
     </div>
   </div>

@@ -129,7 +129,8 @@ export interface AccordionItemSpec {
   /** The focusable header. Should be a real `<button>` so Enter/Space come
    *  for free; the core does not synthesize activation keys. */
   trigger: HTMLElement;
-  /** The animating panel (gets `data-state` / `inert`). */
+  /** The panel (gets `data-state` / `inert`). Its size follows `data-state`
+   *  directly — see accordion-styles.ts; nothing here waits on motion. */
   content: HTMLElement;
   /** Optional wrapper, for `data-state` styling hooks. */
   item?: HTMLElement | null;

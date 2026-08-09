@@ -6,6 +6,7 @@
 // from the static graph.
 
 import { publishDeskCount, readDeskCount } from '../desk-count';
+import { SAVE_STATE_AUTOSAVED } from '../../lib/save-state-copy';
 import type {
   EditingSession,
   ImportFileInput,
@@ -265,7 +266,7 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
         openPath: loaded.workspace.activePath ?? 'untitled.md',
       }),
       entries: loaded.entries.map(toViewEntry),
-      saveState: 'Saved on this device',
+      saveState: SAVE_STATE_AUTOSAVED,
       reviewCards: [],
     };
   }

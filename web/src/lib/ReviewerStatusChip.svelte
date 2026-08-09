@@ -77,7 +77,7 @@
 <div class="reviewer-status relative inline-flex shrink-0" data-slot="reviewer-status-root">
   <button
     type="button"
-    class="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full border px-2.5 font-sans text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50
+    class="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full border px-2.5 font-sans text-micro font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50
       {attention
         ? 'border-destructive/40 bg-destructive/5 text-destructive hover:bg-destructive/10'
         : offline
@@ -133,10 +133,10 @@
             {presentation.detail}
           </p>
           {#each presentation.notes as note (note)}
-            <p class="pt-1 text-[11px] text-muted-foreground" data-slot="reviewer-status-note">{note}</p>
+            <p class="pt-1 text-micro text-muted-foreground" data-slot="reviewer-status-note">{note}</p>
           {/each}
           {#if collabError}
-            <p class="pt-1 text-[11px] text-destructive" role="status" data-slot="reviewer-status-collab-error">
+            <p class="pt-1 text-micro text-destructive" role="status" data-slot="reviewer-status-collab-error">
               {collabError}
             </p>
           {/if}
@@ -146,7 +146,7 @@
       <section class="border-t border-border/50 px-3 py-2.5" aria-label="Your access">
         {#if tier !== 'view'}
           <div class="flex items-center justify-between gap-2 pb-1" data-slot="reviewer-status-identity">
-            <p class="min-w-0 truncate text-[11px] text-muted-foreground">
+            <p class="min-w-0 truncate text-micro text-muted-foreground">
               Commenting as
               <span class="font-medium text-foreground" data-slot="reviewer-status-self-name">
                 {userProfile.displayName ?? 'Browser reviewer'}
@@ -154,7 +154,7 @@
             </p>
             <button
               type="button"
-              class="shrink-0 rounded-md px-2 py-0.5 text-[11px] font-medium text-muted-foreground hover:bg-muted"
+              class="shrink-0 rounded-md px-2 py-0.5 text-micro font-medium text-muted-foreground hover:bg-muted"
               data-slot="reviewer-status-edit-name"
               onclick={() => {
                 userProfile.requestEdit();
@@ -165,27 +165,27 @@
             </button>
           </div>
         {/if}
-        <p class="text-[11px] text-muted-foreground">
+        <p class="text-micro text-muted-foreground">
           Your access:
           <span class="font-medium text-foreground" data-slot="browser-grant-tier">{reviewerTierLabel(tier)}</span>
         </p>
-        <p class="pt-0.5 text-[11px] text-muted-foreground">End-to-end encrypted — the relay only sees ciphertext.</p>
+        <p class="pt-0.5 text-micro text-muted-foreground">End-to-end encrypted — the relay only sees ciphertext.</p>
       </section>
 
       {#if tier !== 'view'}
         <section class="border-t border-border/50 px-3 py-2.5" aria-label="This link">
           {#if !canRemember}
-            <p class="text-[11px] text-muted-foreground">
+            <p class="text-micro text-muted-foreground">
               {pushCapable && pushConsent.enabled
                 ? 'Remembered for notifications.'
                 : 'Keep this link to come back to the review.'}
             </p>
           {:else if persistence === 'ephemeral'}
             <div class="flex items-center justify-between gap-2">
-              <p class="min-w-0 text-[11px] text-muted-foreground">Temporary on this browser</p>
+              <p class="min-w-0 text-micro text-muted-foreground">Temporary on this browser</p>
               <button
                 type="button"
-                class="shrink-0 rounded-md border border-border bg-background px-2 py-0.5 text-[11px] font-medium text-foreground hover:bg-muted"
+                class="shrink-0 rounded-md border border-border bg-background px-2 py-0.5 text-micro font-medium text-foreground hover:bg-muted"
                 data-slot="browser-remember-room"
                 title="Store a non-extractable room key and encrypted recovery state in this browser profile"
                 onclick={() => onRememberRoom?.()}
@@ -194,17 +194,17 @@
               </button>
             </div>
           {:else if persistence === 'saving'}
-            <p class="text-[11px] text-muted-foreground" role="status">Securing local recovery…</p>
+            <p class="text-micro text-muted-foreground" role="status">Securing local recovery…</p>
           {:else}
             <div class="flex items-center justify-between gap-2">
-              <p class="min-w-0 text-[11px] text-muted-foreground">
+              <p class="min-w-0 text-micro text-muted-foreground">
                 {persistence === 'degraded'
                   ? 'Remembered; browser may evict local data'
                   : 'Remembered on this browser'}
               </p>
               <button
                 type="button"
-                class="shrink-0 rounded-md px-2 py-0.5 text-[11px] font-medium text-muted-foreground hover:bg-muted"
+                class="shrink-0 rounded-md px-2 py-0.5 text-micro font-medium text-muted-foreground hover:bg-muted"
                 data-slot="browser-forget-room"
                 onclick={() => onForgetRoom?.()}
               >
@@ -214,13 +214,13 @@
           {/if}
           {#if pushCapable}
             <div class="mt-1.5 flex items-center justify-between gap-2">
-              <p class="min-w-0 text-[11px] text-muted-foreground">Notify me about replies</p>
+              <p class="min-w-0 text-micro text-muted-foreground">Notify me about replies</p>
               <button
                 type="button"
                 role="switch"
                 aria-checked={pushConsent.enabled}
                 aria-describedby={pushConsent.message ? 'browser-push-message' : undefined}
-                class="shrink-0 rounded-md border border-border bg-background px-2 py-0.5 text-[11px] font-medium text-foreground hover:bg-muted disabled:cursor-wait disabled:opacity-60"
+                class="shrink-0 rounded-md border border-border bg-background px-2 py-0.5 text-micro font-medium text-foreground hover:bg-muted disabled:cursor-wait disabled:opacity-60"
                 data-slot="browser-push-toggle"
                 data-push-status={pushConsent.status}
                 disabled={pushConsent.status === 'checking' || pushConsent.status === 'enabling' || pushConsent.status === 'disabling'}
@@ -242,7 +242,7 @@
             {#if pushConsent.message}
               <p
                 id="browser-push-message"
-                class="pt-1 text-[11px] {pushConsent.status === 'error' || pushConsent.status === 'denied' ? 'text-destructive' : 'text-muted-foreground'}"
+                class="pt-1 text-micro {pushConsent.status === 'error' || pushConsent.status === 'denied' ? 'text-destructive' : 'text-muted-foreground'}"
                 role="status"
                 data-slot="browser-push-message"
               >{pushConsent.message}</p>
@@ -255,7 +255,7 @@
         <footer class="flex items-center justify-end border-t border-border/50 px-3 py-2">
           <button
             type="button"
-            class="rounded-md border border-border bg-background px-2.5 py-1 text-[11px] font-medium text-foreground hover:bg-muted"
+            class="rounded-md border border-border bg-background px-2.5 py-1 text-micro font-medium text-foreground hover:bg-muted"
             data-slot="reviewer-status-retry"
             onclick={() => {
               onRetryOutbox?.();

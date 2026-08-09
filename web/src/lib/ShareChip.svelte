@@ -67,6 +67,36 @@
 
   let popoverOpen = $state(false);
 
+  // --- Chip treatment (attn-64iy.6) ------------------------------------------
+  //
+  // The COMPACT chip is a member of the native header's icon cluster, so it
+  // owes that cluster's convention (attn-11g4.6, pinned by
+  // header-icon-states.test.ts): a borderless ghost at rest, promoting to a
+  // filled + outlined pill in the accent while the surface it owns is open.
+  // It used to carry `border-primary/30 bg-primary/5` permanently, which made
+  // it the one control in the row wearing an active treatment while idle —
+  // visibly wrong beside a save chip that is borderless by design, and it
+  // spent the active state before there was anything active to report.
+  //
+  // Shape stays `rounded-full`: SnapshotBadge's chips are round too, so this
+  // is the established silhouette for review-dock controls, not an outlier.
+  // Only the border and fill move.
+  //
+  // The rust tint survives the demotion. The chip still has to report a live
+  // room, and the connection state is already carried by a glyph swap (Zap /
+  // Wifi / CloudOff), so nothing here rests on colour alone (PRODUCT.md).
+  //
+  // The TEXT variant (hosted owner header) keeps its bordered treatment: it is
+  // a labelled chip in a wide bar, not an icon in a cluster, so the convention
+  // this fixes does not apply to it.
+  const CHIP_ACTIVE = 'border-primary/35 bg-primary/10 text-primary hover:bg-primary/15';
+  const CHIP_REST_LIVE = 'border-transparent text-primary hover:bg-primary/10';
+  // `--accent` rather than `--muted` for the offline hover: on the header's
+  // recessed `--panel-surface` plane `--muted` collapses to near-invisibility
+  // (App.svelte's header cluster makes the same choice for the same reason).
+  const CHIP_REST_OFFLINE =
+    'border-transparent text-muted-foreground/80 hover:bg-accent hover:text-foreground';
+
   const hasActiveRoom = $derived(reviewStore.currentRoomId !== null);
   const connection = $derived(resolveConnection(reviewStore.status, reviewStore.connection));
   const descriptor = $derived(SHARE_CHIP_DESCRIPTORS[connection]);
@@ -76,6 +106,21 @@
   const label = $derived(shareChipLabel(isOwner, descriptor, files, hasActiveRoom));
   /** Named separately from the prop so the markup reads as a layout mode. */
   const iconOnly = $derived(compact);
+  /**
+   * Is a surface this chip owns currently open? Its own popover, or — before a
+   * room exists — the share dialog, which is where `toggle()` routes instead.
+   * Pre-mint the chip exists ONLY because that dialog is open, so leaving it a
+   * quiet ghost in that state would under-report as badly as the permanent
+   * border over-reported.
+   */
+  const surfaceOpen = $derived(popoverOpen || shareOpen);
+  const compactTone = $derived(
+    surfaceOpen
+      ? CHIP_ACTIVE
+      : connection === 'offline' && hasActiveRoom
+        ? CHIP_REST_OFFLINE
+        : CHIP_REST_LIVE,
+  );
 
   function toggle(): void {
     // Pre-mint (sheet open, no room yet) the chip is a spatial anchor that
@@ -115,14 +160,17 @@
   <div class="share-chip relative inline-flex shrink-0" data-slot="share-chip-root">
     <button
       type="button"
-      class="chip inline-flex h-7 shrink-0 items-center rounded-full border font-sans text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50
+      class="chip inline-flex h-7 shrink-0 items-center rounded-full border font-sans text-micro font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50
         {iconOnly ? 'w-7 justify-center' : 'max-w-[15rem] gap-1.5 px-2.5'}
-        {connection === 'offline' && hasActiveRoom
-          ? 'border-border/60 bg-muted/20 text-muted-foreground/80 hover:bg-muted/40'
-          : 'border-primary/30 bg-primary/5 text-primary hover:bg-primary/10'}"
+        {iconOnly
+          ? compactTone
+          : connection === 'offline' && hasActiveRoom
+            ? 'border-border/60 bg-muted/20 text-muted-foreground/80 hover:bg-muted/40'
+            : 'border-primary/30 bg-primary/5 text-primary hover:bg-primary/10'}"
       data-slot="share-chip"
       data-state={connection}
       data-active={hasActiveRoom}
+      data-surface={surfaceOpen ? 'open' : 'closed'}
       data-compact={iconOnly}
       data-file-count={files.length}
       aria-haspopup="dialog"
@@ -194,7 +242,7 @@
               {descriptor.detail}
             </p>
             {#if outboxPending > 0}
-              <p class="pt-1 text-[11px] text-muted-foreground" data-slot="share-chip-outbox">
+              <p class="pt-1 text-micro text-muted-foreground" data-slot="share-chip-outbox">
                 {outboxPending} change{outboxPending === 1 ? '' : 's'} waiting to sync…
               </p>
             {/if}
@@ -203,7 +251,7 @@
 
         {#if files.length > 0}
           <section class="border-t border-border/50 px-3 py-2.5" aria-label="Shared files">
-            <h3 class="pb-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+            <h3 class="pb-1.5 text-badge uppercase tracking-wide text-muted-foreground">
               {isOwner
                 ? `Reviewers can see ${files.length === 1 ? 'this file' : `these ${files.length} files`}`
                 : `Shared with you · ${files.length === 1 ? '1 file' : `${files.length} files`}`}
@@ -216,7 +264,7 @@
                     <div class="truncate text-xs text-foreground" title={f.name}>{f.name}</div>
                     {#if f.relPath && f.relPath !== f.name}
                       <div
-                        class="truncate font-mono text-[10px] text-muted-foreground"
+                        class="truncate font-mono text-badge text-muted-foreground"
                         title={f.relPath}
                       >
                         {f.relPath}
@@ -231,7 +279,7 @@
 
         <section class="border-t border-border/50 px-3 py-2.5" aria-label="People">
           <div class="flex items-center justify-between gap-2" data-slot="share-chip-identity">
-            <span class="min-w-0 truncate text-[11px] text-muted-foreground">
+            <span class="min-w-0 truncate text-micro text-muted-foreground">
               You:
               <span class="font-medium text-foreground" data-slot="share-chip-self-name">
                 {userProfile.effectiveName}
@@ -239,7 +287,7 @@
             </span>
             <button
               type="button"
-              class="shrink-0 rounded-md px-2 py-0.5 text-[11px] font-medium text-muted-foreground hover:bg-muted"
+              class="shrink-0 rounded-md px-2 py-0.5 text-micro font-medium text-muted-foreground hover:bg-muted"
               data-slot="share-chip-edit-name"
               onclick={() => {
                 userProfile.requestEdit();
@@ -250,11 +298,11 @@
             </button>
           </div>
           {#if peers.length === 0}
-            <p class="pt-1.5 text-[11px] text-muted-foreground" data-slot="share-chip-no-peers">
+            <p class="pt-1.5 text-micro text-muted-foreground" data-slot="share-chip-no-peers">
               No one else is here right now.
             </p>
           {:else}
-            <ul class="m-0 flex list-none flex-col gap-1 p-0 pt-1.5 text-[11px]" data-slot="share-chip-peer-list">
+            <ul class="m-0 flex list-none flex-col gap-1 p-0 pt-1.5 text-micro" data-slot="share-chip-peer-list">
               {#each peers as peer (peer.deviceId)}
                 <li
                   class="flex items-center justify-between gap-2"
@@ -283,7 +331,7 @@
               {#if descriptor.canTryFaster && onReconnect}
                 <button
                   type="button"
-                  class="rounded-md px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-muted"
+                  class="rounded-md px-2 py-1 text-micro font-medium text-muted-foreground hover:bg-muted"
                   data-slot="share-chip-reconnect"
                   onclick={handleReconnect}
                 >
@@ -294,7 +342,7 @@
             {#if isOwner && onManageShare}
               <button
                 type="button"
-                class="rounded-md border border-border bg-background px-2.5 py-1 text-[11px] font-medium text-foreground hover:bg-muted"
+                class="rounded-md border border-border bg-background px-2.5 py-1 text-micro font-medium text-foreground hover:bg-muted"
                 data-slot="share-chip-manage"
                 onclick={handleManage}
               >

@@ -38,7 +38,7 @@
   >
     <header class="shrink-0 px-3 pb-2 pt-3">
       <p class="font-sans text-sm font-semibold text-foreground">Shared with you</p>
-      <p class="pt-0.5 text-[11px] text-muted-foreground">
+      <p class="pt-0.5 text-micro text-muted-foreground">
         {files.length} files · end-to-end encrypted
       </p>
     </header>
@@ -48,7 +48,7 @@
           <li>
             <button
               type="button"
-              class="review-file-row flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left font-sans text-[13px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+              class="review-file-row flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left font-sans text-meta text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
               class:active={f.fileId === reviewStore.currentFileId}
               data-file-id={f.fileId}
               aria-current={f.fileId === reviewStore.currentFileId ? 'true' : undefined}
@@ -67,7 +67,7 @@
                   {/if}{f.fileName ?? f.name}
                 </span>
                 {#if f.fileName && f.name !== f.fileName}
-                  <span class="min-w-0 truncate text-[11px] text-muted-foreground/70">{f.name}</span>
+                  <span class="min-w-0 truncate text-micro text-muted-foreground/70">{f.name}</span>
                 {/if}
               </span>
             </button>

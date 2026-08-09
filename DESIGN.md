@@ -12,9 +12,10 @@ colors:
   panel-surface: "oklch(0.855 0.012 75)"
   panel-border: "oklch(0.14 0.008 55 / 16%)"
   rail-chip-surface: "oklch(0.88 0.012 75)"
-  code-block: "oklch(0.972 0.008 78)"
+  code-block: "oklch(0.885 0.010 78)"
+  code-block-nested: "oklch(0.865 0.010 78)"
   border: "oklch(0.14 0.008 55 / 18%)"
-  link: "oklch(0.38 0.04 55)"
+  link: "oklch(0.48 0.14 28)"
   destructive: "oklch(0.55 0.20 27)"
   suggestion-green: "oklch(0.58 0.15 150)"
   comment-amber: "oklch(0.62 0.13 82)"
@@ -61,6 +62,30 @@ typography:
     fontWeight: 600
     lineHeight: 1.2
     letterSpacing: "0.06em"
+  micro:
+    fontFamily: "Source Sans 3 Variable, Source Sans 3, -apple-system, system-ui, sans-serif"
+    fontSize: "0.6875rem"
+    fontWeight: 500
+    lineHeight: 1.2
+    letterSpacing: "normal"
+  badge:
+    fontFamily: "Source Sans 3 Variable, Source Sans 3, -apple-system, system-ui, sans-serif"
+    fontSize: "0.625rem"
+    fontWeight: 600
+    lineHeight: 1.2
+    letterSpacing: "0.04em"
+  chrome-xs:
+    fontFamily: "Source Sans 3 Variable, Source Sans 3, -apple-system, system-ui, sans-serif"
+    fontSize: "0.75rem"
+    fontWeight: 400
+    lineHeight: 1.4
+    letterSpacing: "normal"
+  chrome-sm:
+    fontFamily: "Source Sans 3 Variable, Source Sans 3, -apple-system, system-ui, sans-serif"
+    fontSize: "0.875rem"
+    fontWeight: 500
+    lineHeight: 1.4
+    letterSpacing: "normal"
   meta:
     fontFamily: "Source Sans 3 Variable, Source Sans 3, -apple-system, system-ui, sans-serif"
     fontSize: "0.78rem"
@@ -91,7 +116,7 @@ rounded:
   md: "8px"
   lg: "10px"
   xl: "14px"
-  pill: "999px"
+  pill: "9999px"
 spacing:
   xs: "4px"
   sm: "8px"
@@ -153,6 +178,8 @@ This system explicitly rejects three neighbors. It is **not a cloud-SaaS review 
 
 A warm parchment field carrying near-black ink and a single terracotta accent; cool review hues (green, amber, blue, violet) are quarantined to the collaboration layer so they never dilute the editorial ground. All values are canonical **OKLCH** — attn is OKLCH-native and the frontmatter carries OKLCH directly.
 
+**Sources of truth** (consolidated 2026-08-08). `web/src/tokens.css` is canonical for every colour; the frontmatter above is a checked mirror of it — `design-doc-parity.test.ts` fails CI when they disagree, so a value quoted here is a value the code ships. Contrast **ratios** quoted anywhere in this document are measurements at the time of writing: the live measurement is `web/e2e/reading-palette.spec.ts`, which renders both themes and prints the full sweep on every run. When a quoted ratio and the probe disagree, the probe is right and the prose is due an update.
+
 **Paper / Ink / System.** Appearance is a three-state preference (Settings → Appearance), defaulting to **System** — the app follows the OS appearance and tracks changes to it live. The preference is durable (`prefs.json`, next to the project registry) and is stamped into the page before the bundle loads, so launching never shows a frame of the wrong theme. `light`/`dark` are explicit overrides that ignore the OS.
 
 ### Primary
@@ -180,11 +207,26 @@ Role is no longer a color channel for humans — shape carries it (round = human
 - **Card / Sidebar** (`oklch(0.89 0.012 76)` / `oklch(0.855 0.012 75)`): the second neutral layer for chrome, a hair darker than the content surface so panels recede.
 - **Panel Surface** (`oklch(0.855 0.012 75)`, INK `oklch(0.172 0.014 257)`): the chrome plane — the comments rail and the app header sit on it, deliberately the *same* value as the sidebar. Both edges of the workspace recede equally so the document reads as a lit sheet between two rails. In INK the move inverts (the rails lift off a darker ground rather than sinking into it).
 - **Rail Chip Surface** (`oklch(0.88 0.012 75)`, INK `oklch(0.205 0.013 257)`): fills for chips sitting *on* the panel plane. It exists because `--muted` lands 0.003 from `--panel-surface` in INK, so a `muted` chip on the rail is invisible there — a trap that has now been hit twice.
-- **Code Block** (`oklch(0.972 0.008 78)`, INK `oklch(0.19 0.014 256)`): the raised surface shared by `pre`, inline code, **and tables** — a table and a code block are the same class of object and must not read as different materials.
+- **Code Block** (`oklch(0.885 0.010 78)`, INK `oklch(0.176 0.014 256)`): the **embedded** surface shared by `pre`, inline code, **tables** and the frontmatter card — these are the same class of object and must not read as different materials. It is *recessed*: on Paper it sits **below** the page, not above it. (Corrected 2026-08-08, attn-evme.3. It read `oklch(0.972)` — lighter than the page — and this line called it "the raised surface", while the Flat-Until-Lifted Rule below listed the same object among things "genuinely pressed into" the page and gave it an inset shadow. It wore a recessed shadow over a raised tone, and the doc licensed it, which is why nobody caught that a reading surface had a panel on it brighter than the paper.)
+- **Code Block Nested** (`oklch(0.865 0.010 78)`, INK `oklch(0.204 0.014 256)`): the second step of the embedded tier, for a block inside a block — inline code in a table cell. It used to be `--background`, which was a step toward the ink only while the block was lighter than the page; it silently inverted when the block moved.
 - **Border** (`oklch(0.14 0.008 55 / 18%)`): hairline dividers — ink at low alpha, never a solid gray line.
 
 ### Named Rules
 **The One Pencil Rule.** The primary accent is a red pencil, not a highlighter. It appears on primary action, current selection, and focus — nowhere else. If two things on a screen are terracotta, one of them is wrong.
+
+*Links are action* (clarified 2026-08-08, attn-evme.1). A hyperlink in prose carries the accent, and this is the existing "action" clause rather than a third exception — stated explicitly because the previous muted-brown `--link` was 0.24 lighter than body ink in the same hue and read as faded prose, and because someone reading only the rule would otherwise "fix" a terracotta link back to it. A prose link also carries a **rest-state underline**, and that is not decoration: on this palette no lightness satisfies both AA 4.5:1 against the page *and* G183's 3:1 against surrounding body text at the same time (Paper `--primary` is 3.78:1 on the page; darkening it to pass drops it to 2.60:1 against the text; Ink is 1.54:1 against the text). Colour alone provably cannot carry a link here, so the underline is load-bearing and may not be removed for tidiness. Chrome anchors — nav rows, breadcrumbs, buttons-as-links — are a different treatment and take no rest underline; their affordance is position and shape.
+
+*The two labelling exceptions* (added 2026-08-07, attn-bw2h.7 / attn-bw2h.8). The pencil also annotates. Two surfaces carry the accent while being none of action, selection, or focus, and they are the **complete** list — this is a closed enumeration, not a new category anyone may extend by analogy:
+
+- **Frontmatter keys** (`.frontmatter-pairs dt`). In a two-column key/value grid the key *names* the content rather than being it. The tint does the job small caps do in print: it separates the columns by role so the pairs scan without a rule between them. Values stay `--foreground`. Measured on the card's own `--code-block` ground: **4.97:1** in Paper, **7.85:1** in Ink. (Re-measured 2026-08-08 after attn-evme.3 recessed that ground; it previously read 6.47:1 / 7.67:1. Paper now clears the 4.5:1 floor by less than half a step, so this pairing is the one to re-measure first if the embedded tier ever moves again — `reading-palette.spec.ts` prints it on every run.)
+- **The saved save-state glyph** (`[data-slot="native-save-chip"]`, saved state only). This chip is the one piece of chrome that reports *where the user's work lives* — the product's entire claim in one glyph. Dirty keeps `--amber-deep`. Because both states are tinted, tint is not the signal either way: the glyph is (disk+check vs disk+pen), which is what keeps this clear of colour-as-sole-signal. On `--panel-surface`: **4.51:1** in Paper, **7.91:1** in Ink.
+
+What the exceptions do **not** license, so the rule keeps its teeth:
+
+- **Not a control's rest state.** A tinted idle button lies about what is active. The header's active convention (attn-11g4.6) is tint **plus** `bg-primary/10` **plus** a `border-primary/35` hairline, arriving together. A bare tinted glyph is therefore only ever legible as *not a button* — which is exactly why the saved chip must never grow a fill or an outline.
+- **Not emphasis inside the document.** Body text, headings, strong, and callout titles stay ink. Links are not an exception either — they have their own `--link` token precisely so the accent is not spent on them.
+- **Not decoration.** A key is a label with a job; an icon beside a heading, a divider, or a stripe that means nothing is not, and the side-stripe prohibition below is unaffected.
+- **Not a budget increase.** Two accented things on one screen is still one too many. This adds *roles*, not headroom — and since the saved chip is lit ~99% of the time, the app header's single accent is already spent. Anything new that wants the pencil up there must take it from the chip, not sit beside it.
 
 **The Quarantine Rule.** Green, amber, and the peer hues belong to the collaboration layer only. They never appear as decoration on base chrome; their meaning (suggestion / comment / who) is the entire reason they exist.
 
@@ -204,7 +246,12 @@ Role is no longer a color channel for humans — shape carries it (round = human
 - **Title / h3** (600, `1.25rem`, 1.3, `-0.01em`): subsection.
 - **Body** (400, `1rem`, **1.72**, `0.003em`): the reading surface. Generous leading and a whisper of tracking make long-form markdown restful. Serif.
 - **Label** (600, `0.7rem`, `0.06em`, UPPERCASE): table headers, meta chips, sidebar section markers. Sans.
+- **Micro** (500, `0.6875rem` / 11px): the standard chrome chip step — dock counts, ShareChip labels, composer hints, review-dock text. Sans. (Ratified 2026-08-08, design-system consolidation: 11px was the single most-used size in the app — 58 arbitrary `text-[11px]` utilities — while officially not existing. Reality won.)
+- **Badge** (600, `0.625rem` / 10px, `0.04em`): popover eyebrows, badge counts, file-path metadata. Sans. **This is the floor: no visible text ships below 10px.** Anything that seems to need smaller text is a badge that should be a dot with its number in `title`/`aria-label`, or a chip that should grow.
+- **Chrome-xs / Chrome-sm** (`0.75rem` / `0.875rem`): the component library's `text-xs`/`text-sm` steps, recognized rather than fought — the shadcn-derived UI layer ships them pervasively (dialogs, buttons, menus) and the tree rows and wordmark sit on `0.875rem` beside them. Documented so the ramp describes the whole app, not just the parts written by hand.
 - **Mono** (400, `0.85rem`, 1.55): code blocks and inline code.
+
+Utilities `text-micro`, `text-badge` and `text-meta` exist in the Tailwind theme (size-only, no line-height payload, so they compose with `leading-*` exactly as the arbitrary values they replaced did). New chrome text picks a step from this list; the design hook flags anything else.
 
 ### Typeset presets
 The three cuts above are the **Editorial** preset — the default, and the shape every rule in this section describes. Settings offers four alternates (shadcn's typeset model: a preset is a complete reading system, never a pile of independent font knobs):
@@ -256,6 +303,19 @@ A hybrid: mostly flat tonal layering (chrome recedes by being a step darker than
 ### Named Rules
 **The Flat-Until-Lifted Rule.** Surfaces are flat and tonal at rest. A shadow appears only when something is genuinely floating above the page (a card, a dialog, a menu) or genuinely pressed into it (an input, a code block). Shadow is a statement about physical position, never a decorative gradient of depth.
 
+**The Two-Tier Surface Rule** (added 2026-08-08, attn-evme.3). Every surface belongs to one of two tiers, and the tier decides which way its tone moves:
+
+- **Embedded** — a surface *inside* the reading column: code blocks, tables, the frontmatter card, inputs. It steps **toward the foreground**: darker on Paper, lighter in Ink. Both directions mean the same thing — *more ink here*. It carries the pressed inset, never a lift.
+- **Floating** — a surface *above* the page: review cards, dialogs, popovers, menus. It may step away from the foreground, and earns a lift shadow when it does.
+
+And the line that makes the Paper half unambiguous: **nothing on Paper is lighter than the page.** Paper is the lightest thing a reading surface has; a panel brighter than it reads as backlit glass, which is the one material this system is not made of.
+
+This rule is descriptive, not aspirational — it predicts the values already in the system. Sidebar and Panel Surface recede on Paper and lift in Ink because they are a *chrome plane* rather than either tier. Review cards are lighter than the page on Paper because they genuinely float. Only the reading-column blocks were ever on the wrong side of it, and that was the "too stark" report of 2026-08-08.
+
+*Why it needed writing down:* the tier was previously implied by two separate statements that disagreed — the shadow vocabulary called code blocks recessed while the colour section called the same token "the raised surface". A surface with a recessed shadow and a raised tone is not a style choice anyone made; it is two rules failing to meet.
+
+**The Layer Order** (added 2026-08-08, design-system consolidation). One cascade order, declared in `app.css` before Tailwind can declare its own: `theme < base < chrome < doc < components < utilities`. `base` is the app ground (preflight, html/body, grain); `chrome` is the hosted shell's bare-tag resets — below `doc` by design, so a reset can never erase document grammar; `doc` is everything `.attn-doc`-scoped in base.css; `components` is editor mechanics, syntax highlighting and component chrome; `utilities` is Tailwind, so a margin utility on a doc element genuinely wins. The `doc` tier is why the table surface exists exactly once and why the prose-link rule no longer hides outside the layers. Rules still outside every layer are a closed, justified list: the Truth Rule (must beat tw-animate), the sidebar hard overrides (beat utility classes), and the scrollbar rules (native-widget override). `doc-surface-parity.test.ts` pins the order, the ownership split, and the mount's `attn-doc` hinge class.
+
 **The Truth Rule** (behavioral, attn-hg5). Pixels always equal state: no user-visible fact — a modal open, a comment arrived, a file saved — may depend on an animation completing or a debounce flushing. Closed overlays are `display: none` in plain CSS (`[data-state="closed"]`); theme flips are atomic (transitions suppressed for the flip frame); animation is enhancement, never the carrier of state. Occluded windows freeze the animation clock, so anything less soft-locks the app.
 
 **The Topmost-Escape Rule.** Escape closes exactly one layer — the topmost (palette → composer → dialog → popover → drawer) — and never destroys a draft. Every overlay stores focus on open and restores it on close.
@@ -299,7 +359,7 @@ The editorial heart of the product. Reviewer edits render as attributed inline m
 ## Do's and Don'ts
 
 ### Do:
-- **Do** keep the terracotta/steel accent to action, selection, and focus only — the One Pencil Rule. Everything else is ink, paper, and the second neutral layer.
+- **Do** keep the terracotta/steel accent to action, selection, and focus — the One Pencil Rule — plus its two enumerated labelling exceptions (frontmatter keys, the saved save-state glyph) and nothing else. Everything else is ink, paper, and the second neutral layer.
 - **Do** use serif for everything read and sans for everything operated — no exceptions (the Read/Do Rule).
 - **Do** hold the paper ground at chroma ≤ 0.012; carry warmth through the accent and the serif.
 - **Do** keep the review hues (green / amber / peer colors) quarantined to the collaboration layer, distinguished by meaning and attribution — never decoration.

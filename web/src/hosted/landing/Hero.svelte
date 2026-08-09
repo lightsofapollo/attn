@@ -1,5 +1,6 @@
 <script lang="ts">
   import { getTheme } from '../theme.svelte';
+  import { LOCAL_FIRST_CLAIM } from '../../lib/save-state-copy';
   import { readDeskCount } from '../desk-count';
 
   // Returning users lead with their desk (attn-cjn); first-timers keep the
@@ -91,8 +92,15 @@
         fetchpriority="high"
       />
     </div>
+    <!-- "Saved on this device" is the local-first claim, and this is one of the
+         two places that still own it (the other is the desk header's
+         persistence badge). It used to double as the save-state literal in the
+         SaveState union; attn-yzsa.2 split the two jobs and moved the save
+         state to "Changes autosaved", so this line is now the claim only. Do
+         not "unify" it with the chip copy — the product would quietly stop
+         saying the thing it is built on. -->
     <aside class="stage-label local">
-      <strong>Source · local</strong><small>Saved on this device</small>
+      <strong>Source · local</strong><small>{LOCAL_FIRST_CLAIM}</small>
     </aside>
     <aside class="stage-label share">
       <strong>Review room · live</strong><small>E2EE · direct connection</small>

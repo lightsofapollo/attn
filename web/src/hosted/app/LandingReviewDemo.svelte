@@ -591,7 +591,7 @@ Human notes and agent suggestions arrive in the same encrypted margin. The owner
   .demo-file { gap: 0.65rem; }
   .demo-file > span:last-child { align-items: flex-start; flex-direction: column; line-height: 1.1; }
   .demo-file strong { font-size: 1rem; }
-  .demo-file small { margin-top: 0.28rem; color: var(--muted-foreground); font-size: 0.72rem; }
+  .demo-file small { margin-top: 0.28rem; color: var(--muted-foreground); font-size: 0.7rem; }
 
   .demo-mark {
     width: 32px;
@@ -613,7 +613,7 @@ Human notes and agent suggestions arrive in the same encrypted margin. The owner
     border: 2px solid var(--background);
     border-radius: 50%;
     color: white;
-    font-size: 0.68rem;
+    font-size: 0.6875rem;
     font-weight: 750;
   }
   .demo-avatar.owner { background: var(--peer-avatar-bg-owner); }

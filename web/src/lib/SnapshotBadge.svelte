@@ -236,7 +236,7 @@
   // not decoration — and take only the outline half of the treatment.
   // -------------------------------------------------------------------------
   const CHIP_BASE =
-    'snapshot-chip inline-flex size-7 shrink-0 items-center justify-center rounded-full border text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50';
+    'snapshot-chip inline-flex size-7 shrink-0 items-center justify-center rounded-full border text-micro font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50';
   const CHIP_REST =
     'border-transparent text-muted-foreground hover:bg-muted hover:text-foreground';
   const CHIP_ACTIVE = 'border-primary/35 bg-primary/10 text-primary hover:bg-primary/15';
@@ -282,7 +282,7 @@
           is invalid HTML. The chip toggles the popover; the link jumps.
         -->
         <span
-          class="snapshot-chip inline-flex h-7 shrink-0 items-center rounded-full border border-border bg-muted/40 text-[11px] font-medium text-muted-foreground {semanticChipActive}"
+          class="snapshot-chip inline-flex h-7 shrink-0 items-center rounded-full border border-border bg-muted/40 text-micro font-medium text-muted-foreground {semanticChipActive}"
           data-slot="snapshot-badge-chip"
           data-state="superseded"
           data-active={popoverOpen ? 'true' : 'false'}
@@ -307,7 +307,7 @@
           </button>
           <button
             type="button"
-            class="snapshot-jump h-full rounded-r-full border-l border-border/60 bg-background/60 px-2 text-[10px] font-medium text-foreground transition-colors hover:bg-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+            class="snapshot-jump h-full rounded-r-full border-l border-border/60 bg-background/60 px-2 text-badge font-medium text-foreground transition-colors hover:bg-background focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
             data-slot="snapshot-badge-jump"
             aria-label="Jump to current snapshot"
             onclick={jumpToLatest}
@@ -323,7 +323,7 @@
         -->
         <button
           type="button"
-          class="snapshot-chip inline-flex h-7 shrink-0 items-center gap-1 rounded-full border border-amber-500/60 bg-amber-500/10 px-2 text-[11px] font-medium text-amber-700 transition-colors hover:bg-amber-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 dark:text-amber-300 {semanticChipActive}"
+          class="snapshot-chip inline-flex h-7 shrink-0 items-center gap-1 rounded-full border border-amber-500/60 bg-amber-500/10 px-2 text-micro font-medium text-amber-700 transition-colors hover:bg-amber-500/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 dark:text-amber-300 {semanticChipActive}"
           data-slot="snapshot-badge-chip"
           data-state="reviewer_on_older"
           data-active={popoverOpen ? 'true' : 'false'}
@@ -366,7 +366,7 @@
       </button>
       {#if ownerOnNewerSnapshot}
         <span
-          class="ml-1.5 inline-flex h-7 shrink-0 items-center gap-1 rounded-full border border-amber-500/60 bg-amber-500/10 px-2 text-[10px] font-medium text-amber-700 dark:text-amber-300"
+          class="ml-1.5 inline-flex h-7 shrink-0 items-center gap-1 rounded-full border border-amber-500/60 bg-amber-500/10 px-2 text-badge font-medium text-amber-700 dark:text-amber-300"
           data-slot="snapshot-badge-owner-newer"
           title="The owner is reviewing a newer snapshot than yours"
         >
@@ -404,12 +404,12 @@
         </header>
 
         {#if fileSnapshots.length === 0}
-          <p class="text-[11px] text-muted-foreground">
+          <p class="text-micro text-muted-foreground">
             No snapshots yet for this file.
           </p>
         {:else}
           <ul
-            class="flex flex-col gap-1 text-[11px]"
+            class="flex flex-col gap-1 text-micro"
             data-slot="snapshot-badge-history"
           >
             {#each fileSnapshots as snap (snap.snapshotId)}
@@ -431,7 +431,7 @@
                   onclick={() => selectSnapshot(snap.snapshotId)}
                 >
                   <span
-                    class="font-mono text-[10px] text-muted-foreground"
+                    class="font-mono text-badge text-muted-foreground"
                     data-slot="snapshot-badge-clock"
                   >
                     {formatSnapshotClock(snap.createdAt)}
@@ -445,7 +445,7 @@
                   </span>
                 </button>
                 <span
-                  class="shrink-0 text-[10px] text-muted-foreground"
+                  class="shrink-0 text-badge text-muted-foreground"
                   data-slot="snapshot-badge-flag"
                 >
                   {#if isLatest}
@@ -463,7 +463,7 @@
 
         {#if localKind === 'owner' && olderPeers.length > 0}
           <ul
-            class="mt-2 flex flex-col gap-1 border-t border-border/50 pt-2 text-[11px]"
+            class="mt-2 flex flex-col gap-1 border-t border-border/50 pt-2 text-micro"
             data-slot="snapshot-badge-older-peers"
           >
             {#each olderPeers as detail (detail.peer.deviceId)}
@@ -486,7 +486,7 @@
           {#if ownerLabel === 'superseded' && localKind === 'owner'}
             <button
               type="button"
-              class="rounded-md border border-border bg-background px-2 py-1 text-[11px] font-medium hover:bg-muted"
+              class="rounded-md border border-border bg-background px-2 py-1 text-micro font-medium hover:bg-muted"
               data-slot="snapshot-badge-jump-latest"
               onclick={jumpToLatest}
             >
@@ -495,7 +495,7 @@
           {/if}
           <button
             type="button"
-            class="rounded-md px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-muted"
+            class="rounded-md px-2 py-1 text-micro font-medium text-muted-foreground hover:bg-muted"
             data-slot="snapshot-badge-dismiss"
             onclick={closePopover}
           >

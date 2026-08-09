@@ -101,7 +101,7 @@
     padding-bottom: 0.25rem;
     padding-right: 0.5rem;
     border-radius: 0.375rem;
-    font-size: 0.8rem;
+    font-size: 0.78rem;
     line-height: 1.1;
     text-align: left;
     color: var(--muted-foreground);

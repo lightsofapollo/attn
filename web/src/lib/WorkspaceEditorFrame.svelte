@@ -421,7 +421,7 @@
     width: 2px;
     height: 22px;
     transform: translate(-50%, -50%);
-    border-radius: 999px;
+    border-radius: 9999px;
     background: var(--panel-border);
     /* Paint only — never size or position. A handle that moves under the
        cursor while you reach for it is worse than one you have to find. */

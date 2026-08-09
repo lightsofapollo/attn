@@ -6,6 +6,13 @@
 // shells. Workspaces are folder-shaped — nested Markdown plus arbitrary
 // binary assets with normalized relative paths (epic scope note 2026-07-10).
 
+import {
+  SAVE_STATE_AUTOSAVED,
+  SAVE_STATE_SAVING,
+  SAVE_STATE_STORAGE_ATTENTION,
+} from '../../lib/save-state-copy';
+import { BROWSER_OWNER_OFFLINE_STATUS } from '../../lib/review/browser-review-collab';
+
 /** How an entry may be presented. Safe raster types render inline; unknown or
  * active types are download-only. */
 export type EntryPresentation = 'editable' | 'preview' | 'download-only';
@@ -25,12 +32,29 @@ export interface WorkspaceEntry {
 
 /** Literal status language from planning/web-authoring/00-web-presence.md.
  *  Share status ("Shared · …") is no longer a save state — it lives in the
- *  ShareChip / masthead share control. */
+ *  ShareChip / masthead share control.
+ *
+ *  'Changes autosaved' replaced 'Saved on this device' in attn-yzsa.2. The old
+ *  string was carrying two jobs at once — the save state AND the local-first,
+ *  nothing-leaves-your-machine claim — which is why it could not simply be
+ *  renamed: the claim had to be re-homed first. It keeps its dedicated homes
+ *  (the desk header's persistence badge, the landing Hero's "Saved on this
+ *  device" source line) and this union now says only what it is for. The same
+ *  sentence is on the native save chip as of the same issue, which is only
+ *  honest because attn-yzsa.1 brought autosave to desktop — the copy change
+ *  followed the behaviour, not the other way round.
+ *
+ *  DERIVED from lib/save-state-copy.ts, not restated (issue 9, 2026-08-08):
+ *  the native chip reads the same constants, so the two surfaces cannot say
+ *  different sentences again without a type error. `typeof` keeps this a
+ *  type-only relationship — the imports erase unless a value is used. The
+ *  owner-offline member derives from the constant browser-review-collab.ts
+ *  already owned. */
 export type SaveState =
-  | 'Saved on this device'
-  | 'Saving…'
-  | 'Storage needs attention'
-  | 'Owner offline · Review still available';
+  | typeof SAVE_STATE_AUTOSAVED
+  | typeof SAVE_STATE_SAVING
+  | typeof SAVE_STATE_STORAGE_ATTENTION
+  | typeof BROWSER_OWNER_OFFLINE_STATUS;
 
 export type SharingState = 'local-only' | 'shared' | 'backed-up';
 

@@ -116,7 +116,7 @@
           type="button"
           role="radio"
           aria-checked={pickedColor === null}
-          class="name-prompt-swatch name-prompt-swatch-auto inline-flex size-7 items-center justify-center rounded-full border border-dashed border-muted-foreground/60 text-[10px] font-semibold text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+          class="name-prompt-swatch name-prompt-swatch-auto inline-flex size-7 items-center justify-center rounded-full border border-dashed border-muted-foreground/60 text-badge font-semibold text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
           class:name-prompt-swatch-selected={pickedColor === null}
           data-slot="name-prompt-swatch"
           data-color="auto"
@@ -131,7 +131,7 @@
             type="button"
             role="radio"
             aria-checked={pickedColor === swatch.color}
-            class="name-prompt-swatch inline-flex size-7 items-center justify-center rounded-full text-[10px] font-semibold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+            class="name-prompt-swatch inline-flex size-7 items-center justify-center rounded-full text-badge font-semibold text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
             class:name-prompt-swatch-selected={pickedColor === swatch.color}
             data-slot="name-prompt-swatch"
             data-color={swatch.id}

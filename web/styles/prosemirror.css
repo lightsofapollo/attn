@@ -105,7 +105,9 @@
    measure entirely (`.frontmatter-card`, `.math-container` — attn-vlmz.3.1).
    Wrapper blocks that also need `min()` clamping and scroll behaviour
    (`.prose-scroll-x`, `.code-block`, `.tableWrapper`) carry their own rules
-   below instead. Keep in step with `article.attn-doc > :is(…)` in base.css.
+   below instead. This is the ONLY copy of the measure discipline: the static
+   renderer's twin in base.css died with Viewer.svelte (2026-08-08), so there
+   is no other list to keep in step with.
 
    Note for anything added here whose own rule uses the `margin` shorthand:
    the shorthand's implicit `margin-inline: 0` beats this rule at equal
@@ -422,36 +424,20 @@
   margin-top: 0;
 }
 
-/* Tables inside ProseMirror.
+/* Tables inside ProseMirror — MECHANICS ONLY (cascade model, 2026-08-08).
 
-   `em`, not `rem`, for the same reason as base.css's `.attn-doc table`: this
-   file is `@layer components` and base.css is `@layer base`, so THIS rule is
-   the one that wins in the editor. Left at `rem` it pinned editor tables to
-   the app baseline while the prose around them scaled with
-   `--attn-doc-scale` — a `manuscript` document rendered 17px prose next to a
-   15.5px table. */
-.ProseMirror table {
-  width: 100%;
-  /* `separate` + zero spacing, not `collapse`: a collapsed table merges its
-     cell borders into the table box and squares off `border-radius`. Twin of
-     `.attn-doc table` in base.css — the surface has to be repeated here
-     because `@layer components` beats `@layer base` wholesale, so a single
-     property set on the editor side would silently drop the rest. */
-  border-collapse: separate;
-  border-spacing: 0;
-  margin-bottom: 1.25rem;
-  font-size: 1em;
-  background: var(--code-block);
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  box-shadow: inset 0 1px 3px oklch(0 0 0 / 4%);
-}
+   The table SURFACE — fill, border, radius, inset lip, cell padding, the
+   eyebrow header, the `em` sizing that lets a typeset rescale tables with
+   the prose — lives once, in base.css's `.attn-doc table` family, and
+   reaches this editor through the mount's `attn-doc` class in `@layer doc`.
 
+   This file used to carry a full twin of that surface with a comment
+   explaining that `@layer components` beats `@layer base` wholesale, so the
+   restatement was load-bearing. The doc tier retired that: what remains here
+   is only what the EDITOR adds to a table, and `doc-surface-parity.test.ts`
+   fails if the surface ever gets restated on this side again. */
 .ProseMirror th,
 .ProseMirror td {
-  padding: 0.5rem 0.75rem;
-  text-align: left;
-  border-bottom: 1px solid var(--border);
   /* prosemirror-tables inserts `.column-resize-handle` and `.selectedCell::after`
      as absolutely-positioned children of the CELL, so the cell has to be their
      containing block — upstream's own stylesheet (which this file deliberately
@@ -463,33 +449,21 @@
      so TableMap computes width NaN and both overlays throw before they render
      (attn-11g4.7). This is the half of the fix that lives in CSS.
 
-     `border-collapse: separate` (above) is what makes this well-defined — under
+     `border-collapse: separate` (on `.attn-doc table` in base.css, whose doc
+     layer paints this editor's tables) is what makes this well-defined — under
      `collapse`, CSS 2.1 §17.6.2 leaves `position` on a cell undefined. Cells
      carry no background, so becoming positioned repaints nothing over the
-     table's own fill, radius or inset lip; only the existing 1px bottom rules
-     move painting phase, in place and over an opaque surface. */
+     table's own fill, radius or inset lip; only the 1px bottom rules move
+     painting phase, in place and over an opaque surface. */
   position: relative;
 }
 
 /* Last row's rule would double the panel's own bottom border and cut across
    the rounded corners. `> :last-child` is the trailing row section — tbody,
    after the colgroup prosemirror-tables' TableView prepends. */
-.ProseMirror table > :last-child > tr:last-child > :is(th, td) {
-  border-bottom: 0;
-}
-
-.ProseMirror th {
-  font-family: var(--sans);
-  font-weight: 600;
-  /* `em` of the table above, matching `.attn-doc th` — see the note there. */
-  font-size: 0.7em;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--muted-foreground);
-  /* One rule at twice the ink of --border, not two pixels of it: on a filled
-     panel the old 2px bar competed with the frame. See base.css's twin. */
-  border-bottom-color: color-mix(in oklch, var(--foreground) 32%, transparent);
-}
+/* (The last-row border trim and the `th` eyebrow used to be restated here as
+   twins of base.css — deleted with the rest of the surface when the doc layer
+   made the single copy authoritative. See the mechanics-only note above.) */
 
 /* Code block language label. Inside the .code-block frame it pins to the
    frame's top-left (matching the pinned copy button) so it can't slide away
@@ -677,7 +651,7 @@
   height: min(94vh, 980px);
   display: flex;
   flex-direction: column;
-  border-radius: 0.75rem;
+  border-radius: 10px; /* lg — matches dialog surfaces */
   overflow: hidden;
   background: var(--background);
   border: 1px solid var(--border);
@@ -712,7 +686,7 @@
   color: var(--foreground);
   cursor: pointer;
   line-height: 1;
-  font-size: 1.1rem;
+  font-size: 1.15rem; /* control-lg */
 }
 
 .mermaid-fullscreen-btn:hover {
@@ -864,7 +838,14 @@
   margin: 0;
   font: 400 0.82rem/1.55 var(--mono);
 }
-.ProseMirror .frontmatter-pairs dt { color: var(--muted-foreground); margin: 0; }
+/* Keys in the accent, values in ink (attn-bw2h.7). This is a sanctioned
+   labelling role under the One Pencil Rule's carve-out (DESIGN.md, added
+   2026-08-07), not decoration: in a two-column key/value grid the key names
+   the content rather than being it, and the tint separates the columns by
+   role so the pairs scan without a rule between them. Measured on the card's
+   own `--code-block` ground, not the page: 6.47:1 in Paper, 7.67:1 in Ink —
+   both clear the 4.5:1 floor these 0.82rem mono keys are held to. */
+.ProseMirror .frontmatter-pairs dt { color: var(--primary); margin: 0; }
 .ProseMirror .frontmatter-pairs dd {
   color: var(--foreground);
   margin: 0;

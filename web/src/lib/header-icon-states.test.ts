@@ -39,6 +39,7 @@ const source = (relative: string): string =>
 
 const app = source('../App.svelte');
 const badge = source('SnapshotBadge.svelte');
+const shareChip = source('ShareChip.svelte');
 
 defineCase('the snapshot control uses file-clock, not a camera', () => {
   assert(
@@ -72,6 +73,44 @@ defineCase('interactive header icons share one active treatment', () => {
   assert(
     badge.includes("CHIP_REST") && badge.includes('border-transparent'),
     'the resting state must be a borderless ghost so the active outline is a real change',
+  );
+});
+
+defineCase('the compact share chip obeys the same resting-ghost rule', () => {
+  // attn-64iy.6. The convention case above asserted only against App.svelte
+  // and SnapshotBadge.svelte, which is exactly how ShareChip drifted: its
+  // compact variant wore `border-primary/30 bg-primary/5` permanently and was
+  // reported as "the lightning bolt should not have a border around it if the
+  // save icon does not". Pin the compact variant here so it cannot drift back.
+  const ACTIVE = 'border-primary/35 bg-primary/10 text-primary';
+  assert(
+    shareChip.includes(`const CHIP_ACTIVE = '${ACTIVE} hover:bg-primary/15'`),
+    'the compact share chip must promote to the shared active treatment',
+  );
+  for (const rest of ['CHIP_REST_LIVE', 'CHIP_REST_OFFLINE']) {
+    const decl = shareChip.slice(shareChip.indexOf(`const ${rest} =`));
+    assert(decl.length > 0, `${rest} must exist`);
+    assert(
+      decl.slice(0, 160).includes('border-transparent'),
+      `${rest} must be a borderless ghost, not a bordered pill`,
+    );
+  }
+  // The demotion must not cost the live room its standing disclosure: the
+  // resting live chip keeps the accent, and the state is still carried by a
+  // glyph swap so it never rests on colour alone (PRODUCT.md).
+  assert(
+    shareChip.slice(shareChip.indexOf('const CHIP_REST_LIVE =')).slice(0, 160).includes('text-primary'),
+    'the resting live chip keeps the primary accent',
+  );
+  for (const glyph of ['<Zap', '<Wifi', '<CloudOff']) {
+    assert(shareChip.includes(glyph), `the connection glyph swap must survive (${glyph})`);
+  }
+  // The TEXT variant is a labelled chip in a wide bar, not a member of an icon
+  // cluster — it is deliberately exempt, so its bordered treatment must remain
+  // reachable rather than being collapsed into the compact one.
+  assert(
+    shareChip.includes("'border-primary/30 bg-primary/5 text-primary hover:bg-primary/10'"),
+    'the non-compact text variant keeps its own bordered treatment',
   );
 });
 

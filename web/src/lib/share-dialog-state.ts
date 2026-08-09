@@ -22,9 +22,85 @@
 
 export type SharePhase = 'configure' | 'minting' | 'ready' | 'error';
 
-/** Shown when the daemon reported a failure but sent no message of its own. */
-export const RELAY_ERROR_MESSAGE =
-  "Couldn't reach the review relay — the share didn't complete. Nothing left this machine.";
+/**
+ * Rendered while no fingerprint has been computed. Mirrors the value
+ * `ownerKeyFingerprint('')` returns for an absent key; `share-dialog-state.test.ts`
+ * pins the two together so they cannot drift.
+ */
+export const FINGERPRINT_PLACEHOLDER = '—— —— ——';
+
+/** Shown when the fingerprint could not be computed at all. */
+export const FINGERPRINT_UNAVAILABLE_MESSAGE =
+  'This browser did not provide the crypto needed to compute the fingerprint, so there is nothing to read aloud. Verify over another channel.';
+
+/**
+ * How the Advanced panel presents the verify-key fingerprint.
+ *
+ * - `absent`  — no signing key yet. The em-dash placeholder is the honest
+ *               rendering and there is nothing to copy.
+ * - `pending` — a key exists and the digest is still being computed.
+ * - `ready`   — a real fingerprint the owner can read aloud.
+ * - `failed`  — a key exists but the digest threw. Web Crypto is undefined on
+ *               insecure non-loopback origins (`task dev DEV_HOST=0.0.0.0`
+ *               reached over a LAN IP is exactly that), and the old code let
+ *               the rejection escape an async `$effect` and left the em-dashes
+ *               on screen forever — indistinguishable from `absent`, under a
+ *               label telling the owner to read them to their reviewer. This
+ *               state is what makes the failure sayable.
+ */
+export type FingerprintStatus = 'absent' | 'pending' | 'ready' | 'failed';
+
+export interface FingerprintPresentation {
+  status: FingerprintStatus;
+  /** What the `<code>` element renders. Never empty. */
+  text: string;
+  /** True only when `text` is a real fingerprint worth copying. */
+  copyable: boolean;
+}
+
+/**
+ * Resolve the fingerprint row. Pure; safe to call in `$derived`.
+ *
+ * `computed` is whatever the last settled `ownerKeyFingerprint` call produced
+ * ('' while in flight), and `failed` records that the call rejected.
+ */
+export function resolveFingerprintPresentation(
+  ownerSigningKey: string,
+  computed: string,
+  failed: boolean,
+): FingerprintPresentation {
+  if (ownerSigningKey.length === 0) {
+    return { status: 'absent', text: FINGERPRINT_PLACEHOLDER, copyable: false };
+  }
+  if (failed) return { status: 'failed', text: FINGERPRINT_PLACEHOLDER, copyable: false };
+  if (computed.length === 0 || computed === FINGERPRINT_PLACEHOLDER) {
+    return { status: 'pending', text: FINGERPRINT_PLACEHOLDER, copyable: false };
+  }
+  return { status: 'ready', text: computed, copyable: true };
+}
+
+/**
+ * Shown when the mint deadline expired with no answer at all (attn-bw2h.6).
+ *
+ * This is the ONLY way to reach 'error' with no daemon message: the
+ * daemon-failure effect requires a non-empty `shareErrorMessage` before it
+ * flips the phase, so a silent error is always the timeout.
+ *
+ * The previous text — "Couldn't reach the review relay … Nothing left this
+ * machine." — asserted two things a timeout does not establish. We do not know
+ * the relay was unreachable (the mint may have failed anywhere along the path,
+ * or in the raw browser dev loop never have been transported at all), and we
+ * certainly do not know nothing left the machine: the daemon may have created
+ * the room and published before failing to answer in time. Telling an owner
+ * their data stayed local when it may not have is the one kind of wrong this
+ * product cannot afford.
+ *
+ * What IS true, and is the reassurance worth giving: no invite link was
+ * produced, so nobody holds the key. The room secret only ever travels in a
+ * link fragment, and no link exists.
+ */
+export const MINT_TIMEOUT_MESSAGE =
+  "The share didn't finish in time, so there's no invite link to send. Nobody can open this document without a link.";
 
 /**
  * Shown when the mint "succeeded" but produced nothing sendable. Deliberately
@@ -92,7 +168,7 @@ export function resolveSharePresentation(input: SharePresentationInput): SharePr
         ? input.daemonErrorMessage
         : input.phase === 'ready'
           ? EMPTY_INVITE_MESSAGE
-          : RELAY_ERROR_MESSAGE;
+          : MINT_TIMEOUT_MESSAGE;
     return { phase, errorMessage, primary: { kind: 'pending', text: '' } };
   }
 

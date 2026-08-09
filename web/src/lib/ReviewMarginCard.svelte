@@ -2,9 +2,15 @@
   ReviewMarginCard — single Google-Docs-style margin card.
 
   Per `planning/collab/ui/review-panel-design.md` §1.2 "Card anatomy" the
-  card has a header (author chip + age + kind badge + state badge), an
+  card has a header (author chip + meta badge + state badge), an
   anchor-quote preview, the body, and an action row whose buttons depend
   on the kind (`comment` vs `suggestion`).
+
+  The meta badge is the single right-hand chip (attn-bw2h.2/.3): it
+  carries the relative age, the `suggest` word for suggestions, and a
+  tick when the thread is resolved. There is deliberately no `comment`
+  chip — a card in the comments rail is self-evidently a comment — and
+  no `resolved` word next to the tick.
 
   This component is presentational: the parent `ReviewMargin` resolves the
   thread → kind/state/preview/handlers and feeds them in via `Props`. The
@@ -15,6 +21,44 @@
   No emoji, no window.confirm/alert. Action handlers are callbacks; the
   parent wires them to IPC or local state.
 -->
+
+<script module lang="ts">
+  // ---------------------------------------------------------------------------
+  // Shared relative-age ticker (attn-bw2h.2)
+  // ---------------------------------------------------------------------------
+  //
+  // The age moved from loose header text into the meta badge, where it is
+  // the thing users scan — so it must not freeze at its mount-time value
+  // ("just now" an hour later is a lie). `Date.now()` isn't reactive, so a
+  // tick counter drives the recompute.
+  //
+  // ONE interval for every mounted card, refcounted: the rail renders up
+  // to ~50 cards (§6 DOM cap) and 50 independent timers would be 50 wakeups
+  // per period for a label that changes at minute granularity.
+
+  const AGE_TICK_MS = 30_000;
+
+  let ageTick = $state(0);
+  let ageTimer: ReturnType<typeof setInterval> | null = null;
+  let ageSubscribers = 0;
+
+  function subscribeAgeTick(): () => void {
+    ageSubscribers += 1;
+    if (ageTimer === null) {
+      ageTimer = setInterval(() => {
+        ageTick += 1;
+      }, AGE_TICK_MS);
+    }
+    return () => {
+      ageSubscribers -= 1;
+      if (ageSubscribers <= 0 && ageTimer !== null) {
+        clearInterval(ageTimer);
+        ageTimer = null;
+        ageSubscribers = 0;
+      }
+    };
+  }
+</script>
 
 <script lang="ts">
   import AmbiguousAnchorPicker from './AmbiguousAnchorPicker.svelte';
@@ -192,7 +236,23 @@
   // Age helper (mirrors ReviewApplyExpand for visual consistency)
   // ---------------------------------------------------------------------------
 
-  const ageLabel = $derived(formatAge(thread.rootEvent.meta.createdAt));
+  // `void ageTick` is the live-update subscription: the shared 30s ticker
+  // (module block) is the only reason this recomputes for an unchanged
+  // thread, so "just now" ages into "1m" without a store round-trip.
+  const ageLabel = $derived.by(() => {
+    void ageTick;
+    return formatAge(thread.rootEvent.meta.createdAt);
+  });
+
+  $effect(() => subscribeAgeTick());
+
+  /** Absolute creation time — hover affordance behind the relative age. */
+  const timestampTitle = $derived(formatTimestamp(thread.rootEvent.meta.createdAt));
+
+  function formatTimestamp(ms: number | undefined): string | undefined {
+    if (typeof ms !== 'number' || !Number.isFinite(ms)) return undefined;
+    return new Date(ms).toLocaleString();
+  }
 
   function formatAge(ms: number | undefined): string {
     if (typeof ms !== 'number' || !Number.isFinite(ms)) return '';
@@ -421,13 +481,7 @@
       aria-hidden="true"
     >{avatarGlyph}</span>
     <span class="rmc-author">{authorName}</span>
-    {#if ageLabel}<span class="rmc-age">· {ageLabel}</span>{/if}
     <span class="rmc-spacer"></span>
-    {#if kind === 'suggestion'}
-      <span class="rmc-kind rmc-kind-suggestion">suggest</span>
-    {:else}
-      <span class="rmc-kind rmc-kind-comment">comment</span>
-    {/if}
     {#if cardState === 'remapped_moved'}
       <!--
         `attn-moved-badge` is the canonical selector per
@@ -445,8 +499,34 @@
       <span class="rmc-badge rmc-badge-ambiguous" title="multiple anchor candidates">amb</span>
     {:else if cardState === 'stale'}
       <span class="rmc-badge rmc-badge-stale" title="anchor lost — needs re-anchor">stale</span>
-    {:else if cardState === 'resolved'}
-      <span class="rmc-badge rmc-badge-resolved">resolved</span>
+    {/if}
+    <!--
+      Meta badge (attn-bw2h.2/.3) — the ONE chip on the right. Carries the
+      relative age, `suggest` for suggestions (a suggestion proposes an
+      edit; that is real information a comment chip never was), and a tick
+      when the thread is resolved. `resolved` as a word is gone: the tick
+      plus the sr-only text below say it, and the card's own aria-label
+      already spells out the state.
+    -->
+    {#if ageLabel || kind === 'suggestion' || cardState === 'resolved'}
+      <span
+        class="rmc-meta"
+        data-testid="review-margin-card-meta"
+        data-kind={kind}
+        data-state={cardState}
+        title={timestampTitle}
+      >
+        {#if kind === 'suggestion'}
+          <span class="rmc-meta-kind">suggest</span>
+        {/if}
+        {#if ageLabel}
+          <span class="rmc-meta-age">{ageLabel}</span>
+        {/if}
+        {#if cardState === 'resolved'}
+          <span class="rmc-meta-tick" aria-hidden="true">✓</span>
+          <span class="rmc-sr-only">resolved</span>
+        {/if}
+      </span>
     {/if}
   </header>
 
@@ -696,16 +776,36 @@
       border-color 120ms ease-out;
   }
 
-  /* The straight accent edge. Pinned to the padding box (`left/top/bottom:
-     0`), which is exactly where the old inset shadow sat, so content x and
-     card height are unchanged. `z-index: -1` paints it above the card's own
+  /* The straight accent edge. `z-index: -1` paints it above the card's own
      background but below every in-flow child, and `border-radius: 0` is
-     stated to make the squareness deliberate rather than incidental. */
+     stated to make the squareness deliberate rather than incidental.
+
+     THE OFFSETS ARE NOT ZERO ON PURPOSE (attn-bw2h.1). Absolute offsets
+     resolve against the containing block's PADDING box, and this card has
+     `border: 1px solid`. With `top/bottom: 0` the strip spanned
+     (card height − 2px), sitting 1px inside the top and bottom edges while
+     the card's own right border ran the full height — reported as "the
+     left hand border isn't as tall as the right hand side". `-1px` pushes
+     the strip back out over the horizontal borders so its height equals
+     the card's BORDER box. Do not "tidy" these to 0; that reopens the bug.
+     (An inset box-shadow hid the asymmetry because it reaches the border's
+     inner edge on all four sides at once — but it also tapered into the
+     radius, which is why it was replaced.)
+
+     THE ASYMMETRY (−1px vertically, 0 horizontally) IS ALSO DELIBERATE.
+     The bug was about HEIGHT only, so the vertical offsets change and the
+     horizontal one does not: the rendered edge stays 1px of card border,
+     then 3px of accent, now running the full height. `left: -1px` would
+     eat that border line into a 4px slab of colour — a different, larger
+     visual than attn-11g4.4 signed off — and it would move the square
+     ends to x=0, where the 6px corner curve is at its steepest (a 6px
+     overhang at the outermost column, versus 2.7px where they sit now).
+     Content x and the strip's x are therefore untouched. */
   .review-margin-card::before {
     content: '';
     position: absolute;
-    top: 0;
-    bottom: 0;
+    top: -1px;
+    bottom: -1px;
     left: 0;
     width: 3px;
     border-radius: 0;
@@ -788,16 +888,17 @@
     white-space: nowrap;
   }
 
-  .rmc-age {
-    color: color-mix(in oklch, var(--foreground, currentColor) 62%, var(--muted-foreground, currentColor));
-  }
-
   .rmc-spacer {
     flex: 1 1 auto;
   }
 
-  .rmc-kind,
+  /* Chips never shrink; the author name is the only part of the header
+     allowed to ellipsis (its `overflow: hidden` already zeroes its
+     automatic minimum size, so it absorbs the squeeze). This is what
+     stops the age wrapping onto its own line at a narrow rail. */
+  .rmc-meta,
   .rmc-badge {
+    flex-shrink: 0;
     font-size: 0.7rem;
     text-transform: uppercase;
     letter-spacing: 0.04em;
@@ -807,16 +908,61 @@
     border: 1px solid transparent;
   }
 
-  .rmc-kind-suggestion {
+  /* Meta badge: quiet by default — it is a timestamp, not an alert, so it
+     must not out-shout the state badges it sits beside. */
+  .rmc-meta {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    background: var(--muted);
+    color: var(--muted-foreground);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  /* Suggestions keep the tint they had as a kind chip — but the word
+     `suggest` inside carries the meaning, so the color is reinforcement,
+     never the sole signal (PRODUCT.md). */
+  .rmc-meta[data-kind='suggestion'] {
     background: color-mix(in oklch, var(--review-card-suggestion-accent) 20%, transparent);
     color: color-mix(in oklch, var(--review-card-suggestion-accent) 78%, var(--foreground, currentColor));
     border-color: color-mix(in oklch, var(--review-card-suggestion-accent) 34%, transparent);
   }
 
-  .rmc-kind-comment {
-    background: color-mix(in oklch, var(--review-card-comment-accent) 20%, transparent);
-    color: color-mix(in oklch, var(--review-card-comment-accent) 78%, var(--foreground, currentColor));
-    border-color: color-mix(in oklch, var(--review-card-comment-accent) 34%, transparent);
+  .rmc-meta-kind {
+    font-weight: 600;
+  }
+
+  /* Separator between `suggest` and the age — a rule, not a glyph, so it
+     never gets read out or uppercased. */
+  .rmc-meta-kind + .rmc-meta-age::before {
+    content: '';
+    display: inline-block;
+    width: 1px;
+    height: 0.7em;
+    margin-right: 4px;
+    vertical-align: -0.05em;
+    background: currentColor;
+    opacity: 0.4;
+  }
+
+  .rmc-meta-tick {
+    font-size: 0.78rem;
+    line-height: 1;
+  }
+
+  /* Visually hidden, still announced — the tick must not be the only
+     carrier of "resolved" (attn-bw2h.3). */
+  .rmc-sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+    border: 0;
   }
 
   .rmc-badge-moved {
@@ -830,11 +976,6 @@
   .rmc-badge-stale {
     background: var(--destructive);
     color: var(--destructive-foreground);
-  }
-
-  .rmc-badge-resolved {
-    background: var(--muted);
-    color: var(--muted-foreground);
   }
 
   .rmc-quote {

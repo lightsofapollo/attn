@@ -61,7 +61,7 @@ test('landing hash intent creates without any dialog', async ({ page }) => {
   await expect(page).toHaveURL(/\/app\/w\/[A-Za-z0-9_-]+\/untitled\.md$/u);
   await expect(page.locator('.save-state[data-save-state]')).toHaveAttribute(
     'data-save-state',
-    'Saved on this device',
+    'Changes autosaved',
   );
 });
 
@@ -285,7 +285,7 @@ test('editing autosaves durable revisions and recovers after reload', async ({ p
   });
   await expect(page.locator('.save-state[data-save-state]')).toHaveAttribute(
     'data-save-state',
-    'Saved on this device',
+    'Changes autosaved',
     { timeout: 15_000 },
   );
   await page.reload();
@@ -319,7 +319,7 @@ test('active Markdown rename stays mounted and autosave follows the new path', a
   });
   await expect(page.locator('.save-state[data-save-state]')).toHaveAttribute(
     'data-save-state',
-    'Saved on this device',
+    'Changes autosaved',
     { timeout: 15_000 },
   );
   await page.reload();
@@ -478,7 +478,7 @@ test('a duplicated tab gets a distinct identity and takes the pen seamlessly', a
   });
   await expect(page.locator('.save-state[data-save-state]')).toHaveAttribute(
     'data-save-state',
-    'Saved on this device',
+    'Changes autosaved',
     { timeout: 15_000 },
   );
   await page.reload();

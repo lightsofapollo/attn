@@ -239,7 +239,7 @@
     </span>
     <span class="h-3 w-px shrink-0 bg-border" aria-hidden="true"></span>
     <span
-      class="min-w-0 truncate font-sans text-[13px] font-medium text-foreground"
+      class="min-w-0 truncate font-sans text-meta font-medium text-foreground"
       data-slot="owner-doc-name"
     >{activeEntryPath ? activeEntryPath.split('/').at(-1) : workspaceName}</span>
     <div class="ml-auto flex h-full min-w-0 shrink-0 items-center gap-1.5">

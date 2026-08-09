@@ -172,14 +172,17 @@
 <svelte:window onkeydown={handleKeyDown} />
 
 {#if visible}
+  <!-- `shrink-0` lives here, not on a host wrapper (attn-64iy.3): the ReviewBar
+       wrapper that used to carry it rendered even when this indicator did not,
+       and an empty flex item still consumes the row's gap. -->
   <div
-    class="outbox-indicator relative inline-flex flex-col items-end gap-1"
+    class="outbox-indicator relative inline-flex shrink-0 flex-col items-end gap-1"
     data-slot="outbox-indicator"
     data-state={showOwnerOfflineNotice ? 'owner-offline' : 'pending'}
   >
     <button
       type="button"
-      class="outbox-pill inline-flex h-7 shrink-0 items-center gap-1 rounded-full border border-border bg-muted/40 px-2 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+      class="outbox-pill inline-flex h-7 shrink-0 items-center gap-1 rounded-full border border-border bg-muted/40 px-2 text-micro font-medium text-muted-foreground transition-colors hover:bg-muted/60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
       data-slot="outbox-indicator-pill"
       aria-label={pillLabel}
       aria-haspopup="dialog"
@@ -199,7 +202,7 @@
         accent border keeps it informational, not alarming.
       -->
       <p
-        class="owner-offline-notice inline-flex max-w-[18rem] items-center gap-1.5 rounded-md border border-border/60 bg-accent/30 px-2 py-1 text-[11px] text-muted-foreground"
+        class="owner-offline-notice inline-flex max-w-[18rem] items-center gap-1.5 rounded-md border border-border/60 bg-accent/30 px-2 py-1 text-micro text-muted-foreground"
         data-slot="outbox-indicator-owner-offline"
       >
         <CloudOff class="size-3 shrink-0" aria-hidden="true" />
@@ -232,7 +235,7 @@
         </header>
 
         <p
-          class="mb-2 text-[11px] text-muted-foreground"
+          class="mb-2 text-micro text-muted-foreground"
           data-slot="outbox-indicator-summary"
         >
           {#if showOwnerOfflineNotice}
@@ -244,7 +247,7 @@
 
         {#if entries.length > 0}
           <ul
-            class="mb-2 flex max-h-40 flex-col gap-1 overflow-y-auto border-t border-border/50 pt-2 text-[11px]"
+            class="mb-2 flex max-h-40 flex-col gap-1 overflow-y-auto border-t border-border/50 pt-2 text-micro"
             data-slot="outbox-indicator-list"
           >
             {#each entries as entry, i (entry.envelopeId ?? i)}
@@ -264,7 +267,7 @@
           {#if onRetry}
             <button
               type="button"
-              class="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-[11px] font-medium hover:bg-muted"
+              class="inline-flex items-center gap-1 rounded-md border border-border bg-background px-2 py-1 text-micro font-medium hover:bg-muted"
               data-slot="outbox-indicator-retry"
               onclick={handleRetry}
             >
@@ -274,7 +277,7 @@
           {/if}
           <button
             type="button"
-            class="rounded-md px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-muted"
+            class="rounded-md px-2 py-1 text-micro font-medium text-muted-foreground hover:bg-muted"
             data-slot="outbox-indicator-dismiss"
             onclick={closePopover}
           >

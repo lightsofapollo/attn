@@ -17,7 +17,7 @@ test('workspace export → import → export round-trips byte-identically', asyn
   await page.keyboard.type('# Round Trip\n\nRecovery round trip body text.');
   await expect(page.locator('.save-state[data-save-state]')).toHaveAttribute(
     'data-save-state',
-    'Saved on this device',
+    'Changes autosaved',
     { timeout: 15_000 },
   );
 
@@ -60,7 +60,7 @@ test('deleting a workspace destroys it: gone from the desk and from storage', as
   await page.keyboard.type('Ephemeral workspace body.');
   await expect(page.locator('.save-state[data-save-state]')).toHaveAttribute(
     'data-save-state',
-    'Saved on this device',
+    'Changes autosaved',
     { timeout: 15_000 },
   );
   await page.goto('/app');
@@ -87,7 +87,7 @@ test('the share link secret never appears in any network request', async ({ page
   await page.keyboard.type('Secret hygiene document.');
   await expect(page.locator('.save-state[data-save-state]')).toHaveAttribute(
     'data-save-state',
-    'Saved on this device',
+    'Changes autosaved',
     { timeout: 15_000 },
   );
   await page.getByRole('button', { name: 'Share for review' }).click();

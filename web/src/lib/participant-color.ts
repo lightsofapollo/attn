@@ -5,9 +5,12 @@
 // here so a participant reads as the SAME color everywhere.
 //
 // Resolution order (humans):
-//   1. A color the participant declared themselves (ParticipantJoined
-//      `color`, or the local profile's picked color) — validated first.
-//   2. Deterministic fallback: hash of the participantId into the curated
+//   1. For OUR OWN participant id: the local profile's picked color. Ours is
+//      ours in every room and under every role — the announce that carries it
+//      to peers can lag it, and never happens at all for a view-tier reviewer.
+//   2. A color the participant declared themselves (ParticipantJoined
+//      `color`) — validated first.
+//   3. Deterministic fallback: hash of the participantId into the curated
 //      palette. Stable per room, identical on every client, no coordination.
 //
 // Agents are exempt: they keep the fixed violet family so the hex chip +
@@ -101,4 +104,104 @@ export function resolveParticipantColor(
 ): string {
   if (kind === 'agent') return AGENT_COLOR;
   return sanitizeParticipantColor(declared) ?? hashParticipantColor(participantId);
+}
+
+/** One `ParticipantJoined` colour declaration, flattened out of the event log. */
+export interface DeclaredColorAnnounce {
+  participantId: string;
+  /** The announced color, or null/undefined for "Auto" (no declaration). */
+  color?: string | null;
+  /** Authored time of the announce (`meta.createdAt`) — NOT arrival order. */
+  announcedAt: number;
+}
+
+/**
+ * Reduce a room's `ParticipantJoined` announces to participantId → declared
+ * color. Latest-authored announce wins per participant, and — crucially — an
+ * announce that declares NO color CLEARS any earlier declaration: picking
+ * "Auto" is a choice, and a re-announce is exactly how it travels. (Keeping
+ * the last non-null color instead made Auto un-pickable once a color had been
+ * announced: the withdrawal was invisible to every client, self included.)
+ *
+ * Validated here so a malicious declaration never reaches an inline style;
+ * an invalid color reads as no declaration and falls through to the hash.
+ * Ties on `announcedAt` resolve to the later entry in iteration order.
+ */
+export function harvestDeclaredColors(
+  announces: Iterable<DeclaredColorAnnounce>,
+): Record<string, string> {
+  const colors: Record<string, string> = {};
+  const announcedAt: Record<string, number> = {};
+  for (const announce of announces) {
+    if ((announcedAt[announce.participantId] ?? -1) > announce.announcedAt) continue;
+    announcedAt[announce.participantId] = announce.announcedAt;
+    const color = sanitizeParticipantColor(announce.color);
+    if (color) colors[announce.participantId] = color;
+    else delete colors[announce.participantId];
+  }
+  return colors;
+}
+
+/** Everything known about who the local device is, from the caller's view. */
+export interface SelfIdentity {
+  /** The local device identity's own participant id, when known. */
+  selfParticipantId: string | null | undefined;
+  /** The room owner's participant id (snapshot-derived), when known. */
+  ownerParticipantId: string | null | undefined;
+  /** The local role in the active room. */
+  role: 'owner' | 'reviewer' | 'unknown' | null | undefined;
+}
+
+/**
+ * Is `participantId` the local user?
+ *
+ * Identity first: a match against our OWN participant id is self in every
+ * room, under every role. The owner branch is the fallback for surfaces that
+ * never learned a local participant id (rooms shared before the init payload
+ * carried one; hosted surfaces that mint a per-session id) — and it is
+ * role-gated on purpose: on a reviewer window `ownerParticipantId` is
+ * SOMEONE ELSE, so matching it there would paint the owner in our color.
+ */
+export function isSelfParticipant(
+  participantId: string,
+  { selfParticipantId, ownerParticipantId, role }: SelfIdentity,
+): boolean {
+  if (participantId.length === 0) return false;
+  if (selfParticipantId && participantId === selfParticipantId) return true;
+  return role === 'owner' && !!ownerParticipantId && participantId === ownerParticipantId;
+}
+
+/** Inputs to the one identity-color decision every surface renders through. */
+export interface IdentityColorInput {
+  participantId: string;
+  kind: 'owner' | 'reviewer' | 'agent';
+  /** Color this participant announced on `ParticipantJoined`, if any. */
+  announced?: string | null;
+  /** True when this id is the local device's own participant. */
+  isSelf?: boolean;
+  /** The local user's picked color; null means "Auto" (use the hash). */
+  selfColor?: string | null;
+}
+
+/**
+ * Resolve the color for one participant, self included.
+ *
+ * For self the LOCAL pick outranks our own last announce: it is the freshest
+ * statement of what we chose, and the re-announce that carries it to peers
+ * may still be in flight (or may never have been made — a view-tier reviewer
+ * never announces at all). For everyone else the announce is all we have.
+ *
+ * Agents short-circuit to violet BEFORE the self override, so an agent
+ * rendering its own surface can never repaint itself out of the agent brand.
+ */
+export function resolveIdentityColor({
+  participantId,
+  kind,
+  announced = null,
+  isSelf = false,
+  selfColor = null,
+}: IdentityColorInput): string {
+  if (kind === 'agent') return AGENT_COLOR;
+  const declared = (isSelf ? sanitizeParticipantColor(selfColor) : null) ?? announced;
+  return resolveParticipantColor(participantId, declared, kind);
 }

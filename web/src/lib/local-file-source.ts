@@ -285,6 +285,26 @@ export function localShareableFiles(): SearchResultItem[] {
   return [...store.keys()].map((path) => ({ path, fileType: detectFileType(path) }));
 }
 
+/**
+ * Read one stored file's markdown without delivering it to the editor.
+ *
+ * The mock share pipeline needs the real bytes of every file it publishes a
+ * snapshot for (attn-64iy.1): a snapshot carrying invented content would
+ * produce anchors that resolve against a document nobody is looking at, so
+ * comments would land in the wrong place — or nowhere. `deliverLocalPath`
+ * cannot serve that job because it also pushes the content into the active
+ * editor, which would yank the user's view to whichever file was shared last.
+ *
+ * `null` when the path is not held this session (never picked, or dropped by
+ * `resetLocalFiles`), which callers must treat as "cannot share this", not as
+ * an empty document.
+ */
+export async function localMarkdown(path: string): Promise<string | null> {
+  const file = store.get(path);
+  if (!file) return null;
+  return file.text();
+}
+
 /** Read one stored file and push it to the app as the daemon would. */
 export async function deliverLocalPath(path: string): Promise<boolean> {
   const file = store.get(path);

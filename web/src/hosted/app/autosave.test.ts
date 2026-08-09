@@ -117,7 +117,7 @@ defineCase('debounce: rapid changes collapse to one durable commit', async () =>
   await h.scheduler.advance(1_000);
   assertEqual(h.commits.length, 1, 'one commit');
   assertEqual(h.commits[0], 'abc', 'latest text wins');
-  assertEqual(h.states.at(-1), 'Saved on this device', 'saved only after commit');
+  assertEqual(h.states.at(-1), 'Changes autosaved', 'saved only after commit');
 });
 
 defineCase('bounded debounce: continuous typing still commits', async () => {
@@ -134,7 +134,7 @@ defineCase('flush commits immediately (visibility/pagehide path)', async () => {
   h.controller.noteChange('draft');
   await h.controller.flush();
   assertEqual(h.commits.length, 1, 'flush committed');
-  assertEqual(h.states.at(-1), 'Saved on this device', 'state settled');
+  assertEqual(h.states.at(-1), 'Changes autosaved', 'state settled');
   await h.controller.flush();
   assertEqual(h.commits.length, 1, 'clean flush is a no-op');
 });
@@ -150,7 +150,7 @@ defineCase('failure keeps text pending, reports attention, and retries', async (
   await h.scheduler.advance(1_000); // automatic retry
   assertEqual(h.commits.length, 1, 'retry committed');
   assertEqual(h.commits[0], 'precious', 'no text lost');
-  assertEqual(h.states.at(-1), 'Saved on this device', 'recovered');
+  assertEqual(h.states.at(-1), 'Changes autosaved', 'recovered');
 });
 
 defineCase('changes during an in-flight commit recommit afterwards', async () => {
@@ -205,7 +205,7 @@ defineCase('a throwing serialization provider fails honestly and does not wedge'
   h.controller.noteChange('recovered');
   await h.controller.flush();
   assertEqual(h.commits.at(-1), 'recovered', 'controller recovered after the provider throw');
-  assertEqual(h.states.at(-1), 'Saved on this device', 'clean state after recovery');
+  assertEqual(h.states.at(-1), 'Changes autosaved', 'clean state after recovery');
 });
 
 async function runAllCases(): Promise<void> {

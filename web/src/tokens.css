@@ -38,8 +38,52 @@
   --ease: cubic-bezier(0.165, 0.84, 0.44, 1);
   --t: 140ms;
 
+  /* ============================================================
+     THE ELEVATION RULE (attn-evme.3, 2026-08-08). Read this before
+     adding any surface token.
+
+     A surface embedded IN the reading column steps TOWARD the
+     foreground: darker on Paper, lighter in Ink. Both directions mean
+     the same thing — "more ink here". A surface floating ABOVE the
+     page (card, dialog, popover, menu) may step away from the
+     foreground instead, and it earns a lift shadow for doing so.
+     NOTHING ON PAPER IS LIGHTER THAN THE PAGE.
+
+     This is not a preference. Paper is the lightest thing a reading
+     surface has; a block brighter than the sheet it sits on reads as
+     emissive, which is the exact opposite of the e-ink calm this
+     palette exists to produce. It was also self-contradictory: the
+     code block has carried an INSET shadow ("pressed in") since
+     attn-11g4.3 while its tone said "lifted". Ink always obeyed the
+     rule and only its magnitude was wrong; Paper inverted it.
+
+     --code-block / --code-block-nested are the embedded tier.
+     --surface-raised / --surface-raised-2 are the floating tier and
+     are CORRECTLY lighter than the page on Paper — review cards,
+     dialogs and popovers are above the document, not in it. Do not
+     "make them consistent".
+     ============================================================ */
+
   /* Surfaces */
-  --code-block: oklch(0.972 0.008 78);
+  /* Embedded tier — one token for every block that lives inside the
+     reading column: `pre`, inline `code`, tables (DESIGN.md: "a table
+     and a code block are the same class of object") and the
+     frontmatter card. One token on purpose; if a fifth block arrives
+     it takes this value too rather than inventing a fifth grey.
+
+     0.972 → 0.885. The old value sat 0.067 LIGHTER than the 0.905
+     page — a lit panel on a matte sheet, and the reported "too stark"
+     complaint. 0.885 is 0.020 the other way: a ~2% step, the Kindle
+     register — present enough to bound the block, quiet enough that
+     the eye never stops on the edge. The hairline border and the
+     inset lip do the rest, and now they agree with the tone. */
+  --code-block: oklch(0.885 0.010 78);
+  /* One further step in the same direction, for a block nested inside
+     a block — today that is inline `code` in a table cell. Without it
+     the chip has nowhere to go: it was dropped to --background to stay
+     recessed, which INVERTS the moment --code-block passes the page
+     (the chip would become the lightest thing in the table). */
+  --code-block-nested: oklch(0.865 0.010 78);
   --background: oklch(0.905 0.010 78);
   --foreground: oklch(0.14 0.008 55);
   --card: oklch(0.89 0.012 76);
@@ -53,10 +97,24 @@
   --primary: oklch(0.48 0.14 28);
   --primary-hover: oklch(0.42 0.15 28);
   --primary-foreground: oklch(0.98 0.005 78);
-  --link: oklch(0.38 0.04 55);
-  --link-hover: oklch(0.30 0.05 55);
-  --link-visited: oklch(0.42 0.03 45);
-  --link-underline: oklch(0.38 0.04 55 / 40%);
+  /* Links ARE the accent (attn-evme.1). Reported: "links are not clearly
+     separated in text". They were oklch(0.38 0.04 55) — a near-neutral warm
+     brown sitting 0.24 lighter than the 0.14 body in the same hue family, so
+     on a link-dense page they read as faded prose rather than as links.
+     A hyperlink is an action, and the One Pencil Rule already reserves the
+     accent for action — this needs no new exception, it corrects an old one.
+     See base.css's `a` rule for why the rest-state underline that comes with
+     this is load-bearing rather than decorative. */
+  --link: oklch(0.48 0.14 28);
+  --link-hover: oklch(0.42 0.15 28);
+  /* Visited stays in the accent family but is DULLER and rotated toward
+     violet — chroma 0.14 → 0.10, hue 28 → 15 — which is the print/browser
+     convention for "you have been here" and, unlike the old neutral brown,
+     cannot be mistaken for body text. 6.72:1 on the page, 6.31:1 on the code
+     surface (measured in sRGB, both clear AA for body-size text). Ink applies
+     the same transform: 220 → 270, chroma 0.10 → 0.09. */
+  --link-visited: oklch(0.42 0.10 15);
+  --link-underline: oklch(0.48 0.14 28 / 38%);
   --selection: oklch(0.62 0.13 82 / 32%);
 
   /* Semantic surfaces */
@@ -153,7 +211,12 @@
    ============================================ */
 .dark {
   /* Surfaces */
-  --code-block: oklch(0.19 0.014 256);
+  /* Embedded tier — see THE ELEVATION RULE above the Paper block. Ink already
+     stepped the right way (toward its light foreground); only the magnitude
+     was wrong. 0.19 → 0.176 pulls the step from 0.042 down to 0.028, matching
+     Paper's ~2-3% and putting both themes in the same quiet register. */
+  --code-block: oklch(0.176 0.014 256);
+  --code-block-nested: oklch(0.204 0.014 256);
   --background: oklch(0.148 0.014 255);
   --foreground: oklch(0.87 0.008 250);
   --card: oklch(0.195 0.014 256);
@@ -167,10 +230,17 @@
   --primary: oklch(0.72 0.10 220);
   --primary-hover: oklch(0.78 0.10 220);
   --primary-foreground: oklch(0.12 0.005 260);
-  --link: oklch(0.74 0.06 235);
-  --link-hover: oklch(0.80 0.06 235);
-  --link-visited: oklch(0.66 0.04 250);
-  --link-underline: oklch(0.74 0.06 235 / 40%);
+  /* Links are the accent here too (attn-evme.1) — see the Paper block. The old
+     0.74 0.06 235 was a desaturated steel that landed 0.13 off the 0.87 body
+     ink: the same "faded prose" failure Paper had, in the other direction. */
+  --link: oklch(0.72 0.10 220);
+  --link-hover: oklch(0.78 0.10 220);
+  /* Same transform as Paper: duller, rotated toward violet. 7.31:1 on the
+     page. The hue rotation is what carries the distinction — visited and
+     unvisited are close in lightness on purpose, because a visited link on a
+     near-black page still has to be readable. */
+  --link-visited: oklch(0.70 0.09 270);
+  --link-underline: oklch(0.72 0.10 220 / 38%);
   --selection: oklch(0.72 0.10 220 / 30%);
 
   /* Semantic surfaces */

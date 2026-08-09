@@ -26,6 +26,7 @@ import {
 } from './accordion-core';
 import {
   accordionContentClass,
+  accordionContentInnerClass,
   accordionTriggerClass,
 } from './accordion-styles';
 import {
@@ -82,6 +83,77 @@ function assertEq<T>(actual: T, expected: T, msg: string): void {
 // ---------------------------------------------------------------------------
 
 const element = createFakeElement;
+
+// ---------------------------------------------------------------------------
+// Resting-style model (attn-bw2h.9)
+//
+// The regression this pins was not a wrong class — the right class was on the
+// right element with the right specificity, and the panel still did not
+// resize, because a stranded `grid-template-rows` transition owned the used
+// value from the animation cascade origin. So the contract worth testing is
+// not "these strings are present" but "with every transition and animation
+// disabled, the panel's size is still a function of `data-state`".
+//
+// `restingUtilities` is that reading of the cascade: it drops what only exists
+// while a transition runs (`@starting-style`) and resolves the state variant,
+// leaving what an engine that refuses to animate at all would paint. Source
+// order is preserved and last-wins, which matches both the declaration order
+// in accordion-styles.ts and Tailwind's variant specificity (`.u[data-state]`
+// is 0,2,0 against a bare `.u`'s 0,1,0). Unknown variants throw rather than
+// being ignored: a variant this model has not been taught is a variant whose
+// resting behaviour nobody has thought about.
+// ---------------------------------------------------------------------------
+
+type PanelState = 'open' | 'closed';
+
+const DISPLAY_UTILITIES: Record<string, string> = {
+  hidden: 'none',
+  block: 'block',
+  grid: 'grid',
+  flex: 'flex',
+  contents: 'contents',
+  'inline-block': 'inline-block',
+  'inline-flex': 'inline-flex',
+};
+
+function restingUtilities(className: string, state: PanelState): string[] {
+  const resting: string[] = [];
+  for (const token of className.split(/\s+/).filter(Boolean)) {
+    const split = token.lastIndexOf(':');
+    if (split === -1) {
+      resting.push(token);
+      continue;
+    }
+    const variant = token.slice(0, split + 1);
+    const utility = token.slice(split + 1);
+    switch (variant) {
+      // Reachable only for the frame a transition starts on. With transitions
+      // off it never applies, which is exactly why the from-values live here.
+      case 'starting:':
+        break;
+      // Applies under `prefers-reduced-motion`, which is the strictest case:
+      // it can only ever remove motion, never add a value.
+      case 'motion-reduce:':
+        resting.push(utility);
+        break;
+      case 'data-[state=open]:':
+        if (state === 'open') resting.push(utility);
+        break;
+      default:
+        throw new Error(`resting model has no rule for variant "${variant}" (in "${token}")`);
+    }
+  }
+  return resting;
+}
+
+/** The `display` the panel resolves to with no motion of any kind. */
+function restingDisplay(className: string, state: PanelState): string | null {
+  let display: string | null = null;
+  for (const utility of restingUtilities(className, state)) {
+    if (utility in DISPLAY_UTILITIES) display = DISPLAY_UTILITIES[utility];
+  }
+  return display;
+}
 
 /** Build N bare items the way a caller who owns their own markup would. */
 function buildItems(
@@ -184,8 +256,10 @@ defineCase('6. trigger/panel are cross-referenced, and a closed panel is inert',
   assertEq(openPanel['aria-labelledby'], ids.triggerId, 'labelled by its trigger');
   assertEq(openPanel.inert, null, 'open panel is reachable');
 
-  // The load-bearing one: the panel stays in the DOM so 0fr->1fr can animate,
-  // so `inert` is what must keep collapsed content out of the tab order.
+  // The panel stays in the DOM when closed (the entry animation needs an
+  // element to start from), so `inert` is the attribute-level guarantee that
+  // collapsed content is never a tab stop — independent of whatever a consumer
+  // does to the panel's `display` through the `class` prop.
   assertEq(contentAttributes(ids, false).inert, '', 'closed panel is inert');
 });
 
@@ -371,22 +445,58 @@ defineCase('12. NodeView lifecycle: build imperatively, interact, destroy clean'
   return `${live} listeners while alive, 0 after destroy`;
 });
 
-defineCase('13. the motion + reduced-motion contract is in the shared class strings', () => {
-  // These are asserted, not eyeballed, because BOTH consumers import them: a
-  // regression here silently desyncs the NodeView from the Svelte components.
-  assert(accordionContentClass.includes('grid-rows-[0fr]'), 'panel collapses via grid rows');
+defineCase('13. the panel\'s resting size is state alone, with motion disabled', () => {
+  // The Truth Rule, as an assertion. BOTH consumers import these strings, so a
+  // regression here silently desyncs the NodeView from the Svelte components —
+  // and the last one shipped a card that could not be opened or closed.
+  assertEq(restingDisplay(accordionContentClass, 'closed'), 'none', 'closed panel is not rendered');
+  assertEq(restingDisplay(accordionContentClass, 'open'), 'block', 'open panel is rendered');
+
+  // The regression itself: no size may be interpolated toward. A transition on
+  // the panel is how the used value ends up owned by the animation origin
+  // instead of by `data-state`.
+  const panelTokens = accordionContentClass.split(/\s+/).filter(Boolean);
+  const motionOnPanel = panelTokens.filter((token) =>
+    /^(transition|duration|ease|animate|delay)/.test(token),
+  );
+  assertEq(motionOnPanel, [], 'the panel carries no transition of its own');
   assert(
-    accordionContentClass.includes('data-[state=open]:grid-rows-[1fr]'),
-    'panel expands via grid rows (no measured pixel height)',
+    !/\[\d*fr\]|grid-rows-/.test(accordionContentClass),
+    'no fr-unit grid track: that is the value WKWebView could not interpolate',
+  );
+
+  // The enhancement may transition, but only toward values state does not own,
+  // and only away from values that cannot outlive the transition.
+  const innerTokens = accordionContentInnerClass.split(/\s+/).filter(Boolean);
+  const hidingUtilities = innerTokens.filter((token) =>
+    /(^|:)-?(opacity-0|translate-|scale-|blur)/.test(token),
+  );
+  assert(hidingUtilities.length > 0, 'there is still a reveal to enhance');
+  assertEq(
+    hidingUtilities.filter((token) => !token.startsWith('starting:')),
+    [],
+    'every from-value lives in @starting-style, so none can survive a strand',
   );
   assert(
-    accordionContentClass.includes('duration-[var(--t)]')
-      && accordionContentClass.includes('ease-[var(--ease)]'),
-    'panel uses the single motion signature from tokens.css',
+    !accordionContentInnerClass.includes('data-[state='),
+    'the enhancement is not keyed to state — state must not be able to pin it',
+  );
+  assertEq(
+    restingUtilities(accordionContentInnerClass, 'open').filter((token) =>
+      /^(opacity-|-?translate-|scale-)/.test(token),
+    ),
+    [],
+    'with motion off the content rests fully visible and in place',
+  );
+
+  assert(
+    accordionContentInnerClass.includes('duration-[var(--t)]')
+      && accordionContentInnerClass.includes('ease-[var(--ease)]'),
+    'the reveal uses the single motion signature from tokens.css',
   );
   assert(
-    accordionContentClass.includes('motion-reduce:transition-none'),
-    'reduced motion is an instant snap, stated locally',
+    accordionContentInnerClass.includes('motion-reduce:transition-none'),
+    'reduced motion is an instant reveal, stated locally',
   );
   assert(
     accordionTriggerClass.includes('focus-visible:ring-[3px]'),
@@ -396,6 +506,43 @@ defineCase('13. the motion + reduced-motion contract is in the shared class stri
     accordionTriggerClass.includes('dark:hover:bg-accent/50'),
     'Ink gets its own hover wash, not Paper’s',
   );
+
+  return 'closed → display:none, open → display:block, no transition in the path';
+});
+
+defineCase('14. repeated toggles keep pixels equal to state (the attn-bw2h.9 repro)', () => {
+  // Case 13 reads the class strings; this one reads what the core actually
+  // writes onto the panel the NodeView ships, and runs the exact sequence that
+  // failed in the built app: open, then three clean toggles. In WKWebView the
+  // computed size stopped following `data-state` after the first one.
+  const { element: dom, controller } = createAccordionDom(
+    [{ value: 'frontmatter', label: 'Frontmatter', content: element('dl') as unknown as Node }],
+    { document: fakeDocument, idPrefix: 'fm', type: 'single' },
+  );
+  const root = dom as unknown as FakeElement;
+  const trigger = root.findAll('button')[0];
+  // root > item wrapper > [trigger, panel] — the shape createAccordionDom builds.
+  const panel = root.children[0].children[1];
+
+  const observed = (): string | null =>
+    restingDisplay(panel.className, panel.getAttribute('data-state') as PanelState);
+
+  assertEq(observed(), 'none', 'starts folded and unrendered');
+
+  const seen: Array<string | null> = [];
+  for (let i = 0; i < 4; i += 1) {
+    trigger.fire('click');
+    seen.push(observed());
+    assertEq(
+      observed(),
+      controller.value.includes('frontmatter') ? 'block' : 'none',
+      `toggle ${i + 1}: display follows the open-set`,
+    );
+  }
+  assertEq(seen, ['block', 'none', 'block', 'none'], 'four toggles, four honest sizes');
+
+  controller.destroy();
+  return 'no toggle count strands the panel — nothing between state and display';
 });
 
 // ---------------------------------------------------------------------------

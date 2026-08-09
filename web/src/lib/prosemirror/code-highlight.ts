@@ -6,6 +6,7 @@ import type { Decoration } from 'prosemirror-view';
 import {
   createHighlighterCore,
   type HighlighterCore,
+  type ThemeRegistrationAny,
 } from 'shiki/core';
 import { createJavaScriptRegexEngine } from 'shiki/engine/javascript';
 import { bundledThemes } from 'shiki/themes';
@@ -18,6 +19,38 @@ type ParserFn = (options: {
   language?: string;
   size: number;
 }) => Decoration[] | Promise<void>;
+
+/**
+ * github-light-high-contrast clears AA on the recessed code ground for every
+ * token family except ONE, and this closes it.
+ *
+ * Its comment grey (#66707B) measures 3.79:1 on oklch(0.885) — better than
+ * anything else tried, and still short of the 4.5:1 a comment owes as ordinary
+ * text. Nothing about the surface can rescue it: the ground would have to go
+ * back to roughly oklch(0.955) for #66707B to clear, which is the near-white
+ * panel attn-evme.3 exists to remove.
+ *
+ * So the theme is patched rather than the page. #58616B is the same hue and
+ * family, darkened until it measures 4.68:1 on the same ground — margin enough
+ * that a later nudge to the surface does not immediately re-break it.
+ *
+ * `colorReplacements` is shiki's own mechanism for this and runs at tokenize
+ * time, so nothing downstream needs to know: no `!important` override, no
+ * per-token CSS hook (shiki emits inline colours and a bare `.shiki` class, so
+ * there is no selector that could target comments anyway).
+ *
+ * Light only. The dark theme's comment already clears AA on the Ink ground.
+ */
+const LIGHT_COMMENT_AA_FIX = { '#66707b': '#58616B' } as const;
+
+async function highContrastLightTheme(): Promise<ThemeRegistrationAny> {
+  const mod = await bundledThemes['github-light-high-contrast']();
+  const theme = structuredClone(mod.default) as ThemeRegistrationAny & {
+    colorReplacements?: Record<string, string>;
+  };
+  theme.colorReplacements = { ...(theme.colorReplacements ?? {}), ...LIGHT_COMMENT_AA_FIX };
+  return theme;
+}
 
 /** Preloaded at highlighter creation so the common cases paint on the first
  *  decoration pass; anything else in shiki's bundle loads on demand. */
@@ -63,19 +96,40 @@ function getHighlighter(): Promise<HighlighterCore> {
     highlighterPromise = createHighlighterCore({
       engine: createJavaScriptRegexEngine(),
       themes: [
-        bundledThemes['vitesse-light'],
-        bundledThemes['github-dark'],
+        highContrastLightTheme,
+        bundledThemes['github-dark-high-contrast'],
       ],
       langs: PRELOAD_LANGS.map((id) => bundledLanguages[id]),
     }).then((highlighter) => {
       resolvedHighlighter = highlighter;
       resolvedParser = createParser(highlighter, {
         themes: {
-          // vitesse-light: darker, muted tokens that clear WCAG AA on the warm
-          // paper code ground (github-light's keyword was 3.23:1) and read
-          // warmer, on-brand (gate-35).
-          light: 'vitesse-light',
-          dark: 'github-dark',
+          // The HIGH-CONTRAST pair, and the reason is a moving target that has
+          // now moved twice.
+          //
+          // gate-35 picked vitesse-light because it cleared AA on the code
+          // ground as it stood then: oklch(0.972), a near-white panel. It named
+          // github-light's keyword at 3.23:1 as the thing it was fixing.
+          //
+          // attn-evme.3 moved that ground to oklch(0.885) — the block is now
+          // RECESSED into the paper rather than lit on top of it — and every
+          // token lost the headroom vitesse-light had been chosen for. Measured
+          // on the new surface: comments 1.76:1, punctuation 2.15:1, variables
+          // 2.69:1, strings 3.08:1, keywords 3.67:1. Several of those cannot
+          // reach 4.5:1 on ANY background (vitesse's comment grey tops out at
+          // 2.34:1 against pure white), so this was not a tuning problem the
+          // surface could be blamed for — the palette had no headroom left.
+          //
+          // github-*-high-contrast is built for exactly this: the same token
+          // vocabulary, darkened until it clears AA with room to spare. The
+          // dark side moves with it so the two themes stay one decision rather
+          // than drifting apart the next time a surface changes.
+          //
+          // reading-palette.spec.ts measures every rendered token family
+          // against the live code surface in both themes, so the next surface
+          // move cannot silently strand this choice the way it stranded gate-35's.
+          light: 'github-light-high-contrast',
+          dark: 'github-dark-high-contrast',
         },
       });
       return highlighter;

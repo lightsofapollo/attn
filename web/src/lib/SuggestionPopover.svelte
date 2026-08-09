@@ -47,7 +47,7 @@
     <span class="truncate text-xs font-medium text-foreground" data-slot="suggestion-author">
       {info.author}
     </span>
-    <span class="shrink-0 text-[10px] uppercase tracking-wide text-muted-foreground">
+    <span class="shrink-0 text-badge uppercase tracking-wide text-muted-foreground">
       suggested {verb}
     </span>
   </div>
@@ -65,7 +65,7 @@
   <div class="flex items-center justify-end gap-1">
     <button
       type="button"
-      class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-muted"
+      class="inline-flex items-center gap-1 rounded-md px-2 py-1 text-micro font-medium text-muted-foreground hover:bg-muted"
       data-slot="suggestion-comment"
       onclick={onComment}
     >
@@ -73,7 +73,7 @@
     </button>
     <button
       type="button"
-      class="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-[11px] font-medium hover:bg-muted"
+      class="inline-flex items-center gap-1 rounded-md border border-border px-2 py-1 text-micro font-medium hover:bg-muted"
       data-slot="suggestion-reject"
       onclick={onReject}
     >
@@ -81,7 +81,7 @@
     </button>
     <button
       type="button"
-      class="inline-flex items-center gap-1 rounded-md bg-primary px-2 py-1 text-[11px] font-medium text-primary-foreground hover:bg-primary/90"
+      class="inline-flex items-center gap-1 rounded-md bg-primary px-2 py-1 text-micro font-medium text-primary-foreground hover:bg-primary/90"
       data-slot="suggestion-accept"
       onclick={onAccept}
     >

@@ -119,6 +119,19 @@ export class FakeElement {
     return found;
   }
 
+  /** Depth-first search by attribute, self included. Prefer this over
+   *  `findByClass` for structural lookups: `data-slot` is a stable contract of
+   *  the primitive, whereas a utility class is a styling decision that changes
+   *  when the styling does (attn-bw2h.9 changed the panel's `display` and broke
+   *  every test that had located it by `grid`). */
+  findByAttr(name: string, value?: string): FakeElement[] {
+    const found: FakeElement[] = [];
+    const actual = this.getAttribute(name);
+    if (actual !== null && (value === undefined || actual === value)) found.push(this);
+    for (const child of this.children) found.push(...child.findByAttr(name, value));
+    return found;
+  }
+
   /** Depth-first search by class name, self included. */
   findByClass(name: string): FakeElement[] {
     const found: FakeElement[] = [];

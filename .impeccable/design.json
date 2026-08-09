@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-07T02:06:32.640618+00:00",
+  "generatedAt": "2026-08-09T03:01:28.977392+00:00",
   "title": "Design System: attn",
   "extensions": {
     "colorMeta": {
@@ -195,6 +195,32 @@
           "oklch(0.836 0.012 75)",
           "oklch(0.950 0.012 75)"
         ]
+      },
+      "link": {
+        "role": "action",
+        "displayName": "Link (accent + rest underline)",
+        "canonical": "oklch(0.48 0.14 28)",
+        "darkCanonical": "oklch(0.72 0.10 220)",
+        "note": "Links ARE the accent (One Pencil: a hyperlink is an action). The rest-state underline is load-bearing: no lightness passes both AA-vs-page and G183-vs-body on this palette. Chrome anchors are exempt (@layer chrome reset).",
+        "tonalRamp": [
+          "oklch(0.42 0.15 28)",
+          "oklch(0.48 0.14 28)",
+          "oklch(0.42 0.10 15)"
+        ]
+      },
+      "code-block": {
+        "role": "surface-embedded",
+        "displayName": "Recessed Block",
+        "canonical": "oklch(0.885 0.010 78)",
+        "darkCanonical": "oklch(0.176 0.014 256)",
+        "note": "The embedded tier: steps TOWARD the foreground (darker on Paper, lighter in Ink). Shared by pre, inline code, tables and the frontmatter card. Nothing on Paper is lighter than the page (Two-Tier Surface Rule)."
+      },
+      "code-block-nested": {
+        "role": "surface-embedded",
+        "displayName": "Recessed Block, Second Step",
+        "canonical": "oklch(0.865 0.010 78)",
+        "darkCanonical": "oklch(0.204 0.014 256)",
+        "note": "A block inside a block (inline code in a table cell) takes one further step toward the ink."
       }
     },
     "typographyMeta": {
@@ -242,6 +268,22 @@
         "displayName": "Control Lg",
         "purpose": "App-shell chrome: larger controls and emphasis. Sans.",
         "fontSize": "1.15rem"
+      },
+      "micro": {
+        "displayName": "Micro",
+        "note": "The standard chrome chip step (11px). Utility: text-micro."
+      },
+      "badge": {
+        "displayName": "Badge",
+        "note": "The FLOOR (10px): no visible text ships below it. Utility: text-badge."
+      },
+      "chrome-xs": {
+        "displayName": "Chrome XS",
+        "note": "The component library's text-xs (12px), recognized as a step."
+      },
+      "chrome-sm": {
+        "displayName": "Chrome SM",
+        "note": "The component library's text-sm (14px); tree rows and the wordmark sit here."
       }
     },
     "shadows": [
@@ -332,7 +374,8 @@
       "refersTo": "review-card",
       "description": "Attributed inline marks in the reading surface: green insertion, red strikethrough deletion, amber comment anchor.",
       "html": "<p class=\"ds-track\">The mesh moves workloads <ins>frictionlessly </ins>between <del>owned </del>metal and <mark>rented capacity</mark>.</p>",
-      "css": ".ds-track { font-family: 'Source Serif 4 Variable', Georgia, serif; font-size: 1rem; line-height: 1.72; color: oklch(0.14 0.008 55); } .ds-track ins { text-decoration: none; color: #15803d; background: rgba(34, 197, 94, 0.16); border-radius: 2px; box-decoration-break: clone; } .ds-track del { text-decoration: line-through; text-decoration-thickness: 1px; color: #b91c1c; background: rgba(239, 68, 68, 0.13); border-radius: 2px; box-decoration-break: clone; } .ds-track mark { background: oklch(0.82 0.12 85 / 22%); border-radius: 2px; box-decoration-break: clone; color: inherit; }"
+      "css": ".ds-track { font-family: 'Source Serif 4 Variable', Georgia, serif; font-size: 1rem; line-height: 1.72; color: oklch(0.14 0.008 55); } .ds-track ins { text-decoration: none; color: oklch(0.58 0.15 150); background: oklch(0.78 0.13 150 / 18%); border-radius: 2px; box-decoration-break: clone; } .ds-track del { text-decoration: line-through; text-decoration-thickness: 1px; color: oklch(0.55 0.20 27); background: oklch(0.55 0.20 27 / 22%); border-radius: 2px; box-decoration-break: clone; } .ds-track mark { background: oklch(0.82 0.12 85 / 22%); border-radius: 2px; box-decoration-break: clone; color: inherit; }",
+      "note": "Colours are the review tokens (suggestion accent / destructive / suggestion-deletion), not the pre-2026-08-08 Tailwind palette."
     }
   ],
   "narrative": {
@@ -350,7 +393,7 @@
     "rules": [
       {
         "name": "The One Pencil Rule",
-        "body": "The primary accent is a red pencil, not a highlighter. It appears on primary action, current selection, and focus — nowhere else. If two things on a screen are terracotta, one of them is wrong.",
+        "body": "The primary accent is a red pencil, not a highlighter. It appears on primary action, current selection, and focus — nowhere else. If two things on a screen are terracotta, one of them is wrong. Links are action: a prose hyperlink carries the accent plus a load-bearing rest-state underline (no lightness passes AA-vs-page and G183-vs-body at once on this palette).",
         "section": "colors"
       },
       {
@@ -375,7 +418,7 @@
       },
       {
         "name": "The Scoped-Document Rule",
-        "body": "Document typography is scoped to `.attn-doc` — the class the editor mount and the viewer article carry. Bare `p` / `h1` / `ul` / `li` selectors are never global: chrome rendered in the same tree used to inherit 2rem heading gaps and absolutely-positioned list bullets that escaped their card, and each leak got patched individually until an opt-out class existed purely to undo the defaults. Type the document, not the page.",
+        "body": "Document typography is scoped to `.attn-doc` — the class the editor mount carries (`div.prosemirror-mount.attn-doc`, the ONLY document surface; the static viewer article is deleted). It lives in `@layer doc` and reaches the editor by descendant selectors.",
         "section": "typography"
       },
       {
@@ -407,10 +450,18 @@
         "name": "The Topmost-Escape Rule",
         "body": "Escape closes exactly one layer — the topmost (palette → composer → dialog → popover → drawer) — and never destroys a draft. Every overlay stores focus on open and restores it on close.",
         "section": "elevation-depth"
+      },
+      {
+        "name": "The Two-Tier Surface Rule",
+        "body": "Embedded surfaces (code, tables, frontmatter, inputs) step toward the FOREGROUND — darker on Paper, lighter in Ink; both mean \"more ink here\" — and carry the pressed inset. Floating surfaces (cards, dialogs, popovers) may step away and earn a lift shadow. Nothing on Paper is lighter than the page."
+      },
+      {
+        "name": "The Layer Order",
+        "body": "One cascade order declared in app.css: theme < base < chrome < doc < components < utilities. chrome (hosted bare-tag resets) sits below doc so a reset can never erase document grammar; utilities beat doc so margin utilities on doc elements genuinely win. Unlayered rules are a closed, justified list (Truth Rule, sidebar hard overrides, scrollbars). Pinned by doc-surface-parity.test.ts."
       }
     ],
     "dos": [
-      "Do keep the terracotta/steel accent to action, selection, and focus only — the One Pencil Rule. Everything else is ink, paper, and the second neutral layer.",
+      "Do keep the terracotta/steel accent to action, selection, and focus — the One Pencil Rule — plus its two enumerated labelling exceptions (frontmatter keys, the saved save-state glyph) and nothing else. Everything else is ink, paper, and the second neutral layer.",
       "Do use serif for everything read and sans for everything operated — no exceptions (the Read/Do Rule).",
       "Do hold the paper ground at chroma ≤ 0.012; carry warmth through the accent and the serif.",
       "Do keep the review hues (green / amber / peer colors) quarantined to the collaboration layer, distinguished by meaning and attribution — never decoration.",

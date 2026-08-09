@@ -2,6 +2,7 @@
   import type { Snippet } from 'svelte';
   import BrandMark from '../../lib/BrandMark.svelte';
   import type { PersistenceMode } from './types';
+  import { SAVE_STATE_STORAGE_ATTENTION } from '../../lib/save-state-copy';
 
   interface Props {
     mode: PersistenceMode;
@@ -31,7 +32,7 @@
       case 'unavailable':
         return { label: 'View-only', tone: 'warn' };
       case 'quota-pressure':
-        return { label: 'Storage needs attention', tone: 'warn' };
+        return { label: SAVE_STATE_STORAGE_ATTENTION, tone: 'warn' };
     }
   });
 

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
+  import { SAVE_STATE_AUTOSAVED, SAVE_STATE_SAVING } from '../../lib/save-state-copy';
   import type { EditorView } from 'prosemirror-view';
   import BottomSheet from './BottomSheet.svelte';
   import DegradedBanner from './DegradedBanner.svelte';
@@ -3077,12 +3078,12 @@
       role="status"
       aria-label={saveState}
     >
-      {#if saveState === 'Saving…'}
+      {#if saveState === SAVE_STATE_SAVING}
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
              stroke-width="2" stroke-linecap="round" aria-hidden="true">
           <path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1" />
         </svg>
-      {:else if saveState === 'Saved on this device'}
+      {:else if saveState === SAVE_STATE_AUTOSAVED}
         <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
              stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
           <path d="M20 6 9 17l-5-5" />

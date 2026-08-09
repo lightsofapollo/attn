@@ -31,7 +31,8 @@
   import type { EditorView } from 'prosemirror-view';
   import { TextSelection, type Plugin as PMPlugin } from 'prosemirror-state';
   import { getVersion } from 'prosemirror-collab';
-  import MessageSquareText from '@lucide/svelte/icons/message-square-text';
+  import PanelRightClose from '@lucide/svelte/icons/panel-right-close';
+  import PanelRightOpen from '@lucide/svelte/icons/panel-right-open';
   import Editor from './lib/Editor.svelte';
   import HtmlViewer from './lib/HtmlViewer.svelte';
   import ReviewMargin from './lib/ReviewMargin.svelte';
@@ -1259,7 +1260,7 @@
             <span class="select-none font-serif text-sm font-bold leading-none text-foreground">attn</span>
           </span>
           <span class="h-3 w-px shrink-0 bg-border" aria-hidden="true"></span>
-          <span class="min-w-0 truncate font-sans text-[13px] font-medium text-foreground" data-slot="browser-review-doc-name">
+          <span class="min-w-0 truncate font-sans text-meta font-medium text-foreground" data-slot="browser-review-doc-name">
             {currentFileName}
           </span>
           <div class="ml-auto flex shrink-0 items-center gap-1.5">
@@ -1278,18 +1279,32 @@
               onRetryOutbox={() => { void session.retryOutbox(); }}
             />
             {#if desktopLayout && displayedDocType !== 'html'}
+              <!-- Same glyph vocabulary and active treatment as the native
+                   and hosted owner headers (attn-o17v): panel-right open/close
+                   says "this opens and shuts a panel" where the old speech
+                   bubble said "add a comment", and the open rail promotes the
+                   ghost to the shared accent pill. The LABELS stay this
+                   surface's own — a reviewer flips between reading and review
+                   modes, which is more than show/hide. -->
               <button
                 type="button"
-                class="inline-flex h-7 items-center gap-1 rounded-md px-1.5 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+                class="inline-flex h-7 items-center gap-1 rounded-md border px-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 {reviewStore.panelOpen
+                  ? 'border-primary/35 bg-primary/10 text-primary hover:bg-primary/15'
+                  : 'border-transparent text-muted-foreground hover:bg-accent hover:text-foreground'}"
                 data-slot="browser-review-rail-toggle"
+                data-active={reviewStore.panelOpen ? 'true' : 'false'}
                 aria-pressed={reviewStore.panelOpen}
                 aria-label={reviewStore.panelOpen ? 'Reading mode' : 'Review mode'}
                 title="{reviewStore.panelOpen ? 'Reading mode — hide the comment band' : 'Review mode — show all comments'} (⌘J)"
                 onclick={toggleRail}
               >
-                <MessageSquareText class="size-3.5" aria-hidden="true" />
+                {#if reviewStore.panelOpen}
+                  <PanelRightClose class="size-3.5" aria-hidden="true" />
+                {:else}
+                  <PanelRightOpen class="size-3.5" aria-hidden="true" />
+                {/if}
                 {#if activeThreadCount > 0}
-                  <span class="text-[10px] font-semibold" data-slot="browser-review-rail-count">{activeThreadCount}</span>
+                  <span class="text-badge font-semibold" data-slot="browser-review-rail-count">{activeThreadCount}</span>
                 {/if}
               </button>
             {/if}

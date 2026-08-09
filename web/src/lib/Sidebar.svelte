@@ -1,6 +1,7 @@
 <script lang="ts">
   import { tick, type Snippet } from 'svelte';
   import type { SearchResultItem, TreeNode } from './types';
+  import BrandMark from './BrandMark.svelte';
   import FileTree from './FileTree.svelte';
   import ReviewFileTree from './ReviewFileTree.svelte';
   import { dragWindow, zoomWindow } from './ipc';
@@ -68,6 +69,16 @@
     sharedProjects?: Set<string>;
     /** Browser-owned workspaces do not expose an outline until one is derived. */
     showOutline?: boolean;
+    /**
+     * Render the attn mark + wordmark above the project label (attn-64iy.5).
+     *
+     * Opt-in, and only one surface opts in: `App.svelte` in a BROWSER tab,
+     * where there are no traffic lights and the sidebar's top-left corner is
+     * therefore free. The desktop window keeps its brand in the header — that
+     * corner belongs to the OS — and the hosted surfaces carry their own brand
+     * in their own headers. Defaults false so none of them change.
+     */
+    showBrand?: boolean;
   }
 
   let {
@@ -98,6 +109,7 @@
     projectMenuActions = [],
     sharedProjects = new Set<string>(),
     showOutline = true,
+    showBrand = false,
   }: Props = $props();
   let sidebarView: 'files' | 'outline' = $state('files');
   let query = $state('');
@@ -321,6 +333,19 @@
   {/if}
 
   <div class="sidebar-controls" data-sidebar-controls="true">
+    {#if showBrand}
+      <!-- Product identity, in the corner the browser leaves free
+           (attn-64iy.5). It sits inside `.sidebar-controls`, which is outside
+           the file tree's ScrollArea, so "fixed in position" is structural
+           rather than a `position: fixed` that would have to be unwound at
+           every breakpoint. Above the project label, not merged into its row:
+           the mark says which product this is and the label says which folder
+           is open, and one of those changes while the other never does. -->
+      <div class="sidebar-brand" data-slot="sidebar-brand" aria-label="attn">
+        <BrandMark size={18} />
+        <span class="sidebar-brand-word">attn</span>
+      </div>
+    {/if}
     <!-- Project identity: a quiet small-caps label (editorial furniture), not a
          button. It becomes an interactive switcher only when there is more
          than one project to switch to. -->
@@ -430,8 +455,10 @@
       </div>
     {/if}
 
-    <!-- Filter: borderless furniture that only draws its box on focus; a search
-         glyph, an honest `/` hint, and a clear affordance once typing. -->
+    <!-- Filter: a standing box (attn-64iy.7 — it used to be borderless until
+         focus, which left an input reading as a label), a search glyph, an
+         honest `/` hint, and a clear affordance once typing. Focus promotes the
+         box to the accent ring. -->
     <div class="sidebar-filter" data-has-query={query.length > 0}>
       <Search class="sidebar-filter-icon size-3.5" />
       <input

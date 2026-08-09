@@ -94,15 +94,23 @@ body::after {
   background-size: 190px;
 }
 
-button,
-a,
-input {
-  font: inherit;
-}
+/* Bare-tag chrome resets — `@layer chrome` (cascade model, see app.css).
+   These style the hosted shell's OWN anchors and controls; the layer exists
+   so they can never erase document grammar again. The `a` reset used to be
+   unlayered, which beat `.attn-doc a` in every layer and forced the prose-link
+   rule in base.css to hide outside the layers to survive; now `doc` beats
+   `chrome` by declared order and both rules say what they mean. */
+@layer chrome {
+  button,
+  a,
+  input {
+    font: inherit;
+  }
 
-a {
-  color: inherit;
-  text-decoration: none;
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
 }
 
 /* Available to assistive tech, removed from the visual layer. Used by live
@@ -248,7 +256,7 @@ a {
 
 ::-webkit-scrollbar-thumb {
   background: color-mix(in oklch, var(--ink) 22%, transparent);
-  border-radius: 999px;
+  border-radius: 9999px;
   border: 3px solid transparent;
   background-clip: padding-box;
 }

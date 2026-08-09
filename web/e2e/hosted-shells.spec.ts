@@ -33,7 +33,7 @@ test('landing one-click intent opens an untitled draft editor', async ({ page })
   await expect(page.locator('[data-path][data-active="true"]')).toContainText('untitled.md');
   await expect(page.locator('[data-save-state]')).toHaveAttribute(
     'data-save-state',
-    'Saved on this device',
+    'Changes autosaved',
   );
 });
 

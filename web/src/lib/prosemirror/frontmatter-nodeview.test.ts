@@ -201,7 +201,7 @@ defineCase('7. the rendered card is an accordion, with no <details> left', () =>
   assertEq(trigger.getAttribute('aria-expanded'), 'false', 'starts folded, as before');
   assertEq(
     trigger.getAttribute('aria-controls'),
-    dom.findByClass('grid')[0]?.getAttribute('id'),
+    dom.findByAttr('data-slot', 'accordion-content')[0]?.getAttribute('id'),
     'trigger points at its panel',
   );
 
@@ -226,7 +226,7 @@ defineCase('8. the key/value grid is rendered, unpadded by the primitive', () =>
 
   // bodyClass: '' — .frontmatter-pairs owns its padding; the primitive must
   // not stack its own on top.
-  const panel = dom.findByClass('grid')[0];
+  const panel = dom.findByAttr('data-slot', 'accordion-content')[0];
   const body = panel.children[0].children[0];
   assertEq(body.className, '', 'panel body is unstyled by the primitive');
   assertEq(body.children[0], dl, 'and holds the dl directly');
@@ -236,7 +236,7 @@ defineCase('9. the card toggles, and destroy() releases every listener', () => {
   clearFocusLog();
   const { view, dom } = renderCard('title: Hello');
   const trigger = dom.findAll('button')[0];
-  const panel = dom.findByClass('grid')[0];
+  const panel = dom.findByAttr('data-slot', 'accordion-content')[0];
 
   assertEq(panel.getAttribute('data-state'), 'closed', 'folded initially');
   assert(panel.hasAttribute('inert'), 'folded content is out of the tab order');

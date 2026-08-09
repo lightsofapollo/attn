@@ -1,6 +1,6 @@
 <script lang="ts">
   import { tick, type Snippet } from 'svelte';
-  import { SvelteMap } from 'svelte/reactivity';
+  import { SvelteMap, SvelteSet } from 'svelte/reactivity';
   import type {
     AppMode,
     ContentPayload,
@@ -95,6 +95,10 @@
     revertSuggestion,
   } from '@handlewithcare/prosemirror-suggest-changes';
   import { hasTextSelection } from './lib/review/popover-anchor';
+  import {
+    resolveComposeAvailability,
+    toolbarShouldRender,
+  } from './lib/review/compose-availability';
   import type { ConstructAnchorContext } from './lib/review/anchors';
   import { toast } from 'svelte-sonner';
   import { Toaster } from '$lib/components/ui/sonner';
@@ -109,6 +113,18 @@
   import { consumePendingRoomFocus } from './lib/review/pending-room-focus';
   import ReviewMargin from './lib/ReviewMargin.svelte';
   import BrandMark from './lib/BrandMark.svelte';
+  import { brandPlacement, reservesWindowControls } from './lib/shell';
+  import {
+    SAVE_STATE_AUTOSAVED,
+    SAVE_STATE_AUTOSAVED_TITLE,
+    SAVE_STATE_SAVING,
+  } from './lib/save-state-copy';
+  import {
+    AUTOSAVE_HELD_DISK_CONFLICT,
+    AUTOSAVE_HELD_SHORT,
+    NativeAutosave,
+    resolveAutosaveGate,
+  } from './lib/native-autosave';
   import OpenLocalFiles from './lib/OpenLocalFiles.svelte';
   import ReviewFileNav from './lib/ReviewFileNav.svelte';
   import ReviewFileTree from './lib/ReviewFileTree.svelte';
@@ -264,6 +280,22 @@
   // A reviewer always gets the sidebar shell (to host the shared-file tree),
   // even when they opened attn on an empty directory with no local files.
   let hasSidebar = $derived(fileTree.length > 0 || isReviewerInRoom);
+
+  // --- Shell-aware chrome (attn-64iy.5) --------------------------------------
+  //
+  // This component serves the wry desktop window AND an ordinary browser tab.
+  // It used to assume the first, reserving space for macOS traffic lights that
+  // a browser does not have — 46px of sidebar and up to 6.5rem of header
+  // indent, both dead. `lib/shell.ts` owns the predicate so the two decisions
+  // below (and any later one) cannot drift apart, and so refining it for
+  // non-macOS wry hosts is a one-file change.
+  //
+  // Read ONCE, not `$derived`: it resolves from a flag `installMockIpc` sets
+  // before `mount(App, …)` and nothing can change the shell mid-session.
+  const nativeChrome = reservesWindowControls();
+  /** Desktop keeps the brand in the header; a browser tab gives it the freed
+   *  corner — unless there is no sidebar to put it in. */
+  const brandInHeader = $derived(brandPlacement(hasSidebar) === 'header');
   let showBreadcrumbShare = $derived(
     (activeFileType === 'markdown' || activeFileType === 'html') &&
       !shareDialogOpen &&
@@ -510,8 +542,13 @@
   // read and the iframe would never reload.
   const htmlMtimeByPath = new SvelteMap<string, number>();
   const markdownCacheByPath = new Map<string, string>();
-  const deferredReloadMtimeByPath = new Map<string, number | null>();
-  const deferredReloadNoticeByPath = new Set<string>();
+  // Files that changed on disk while their buffer was dirty, so the reload was
+  // DEFERRED rather than applied (see `deferExternalReload`). Reactive
+  // collections, not plain ones: since attn-yzsa this set also gates autosave —
+  // the save chip has to re-render the moment a conflict appears, and a plain
+  // `Set` mutation would never invalidate the `$derived` that reads it.
+  const deferredReloadMtimeByPath = new SvelteMap<string, number | null>();
+  const deferredReloadNoticeByPath = new SvelteSet<string>();
   const loadedDirPaths = new Set<string>();
   let editorDirty = $state(false);
   let pendingLinkAnchor: { path: string; fragment: string } | null = $state(null);
@@ -1027,24 +1064,123 @@
     requestAnimationFrame(() => scrollViewToPos(view, jump.pos));
   });
 
-  let collabSaveTimer: ReturnType<typeof setTimeout> | null = null;
+  // ---------------------------------------------------------------------------
+  // Autosave (attn-yzsa.1)
+  //
+  // ONE timer writes this window's file. It used to be a 1.5s debounce living
+  // inside `handleCollabDocChange` and guarded by `collabActive && collabRole
+  // === 'owner'`, which meant a person editing a local file with no review room
+  // open had no autosave at all — the "Changes autosaved" the chip now claims
+  // was true on hosted /app and false here. Bringing autosave to plain edit
+  // mode is the whole point of the epic; keeping the old collab timer beside
+  // the new one would have been the easy version and the wrong one, because two
+  // debounces racing to write the same path interleave and a late one can land
+  // a staler buffer on top of a newer save.
+  //
+  // The policy — when it is safe to write at all, and how long it waits — lives
+  // in lib/native-autosave.ts so it can be unit-tested against a virtual clock.
+  // This file spends the decision; it does not make it.
+  const nativeAutosave = new NativeAutosave({
+    commit: () => saveEdits(),
+    // Re-asked at fire time, deliberately. The disk-conflict state can appear
+    // DURING the debounce window (an agent rewrites the file mid-sentence), and
+    // the decision that governs a write is the one true when it lands.
+    gate: () =>
+      resolveAutosaveGate({
+        mode,
+        fileType: activeFileType,
+        hasPath: Boolean(activePath),
+        isReviewerViewingSnapshot,
+        collabActive,
+        collabRole,
+        externalChangePending: activePath
+          ? deferredReloadMtimeByPath.has(activePath)
+          : false,
+      }),
+  });
+
+  /** Reactive mirror of the autosave hold, for the save chip (see below). */
+  let autosaveHeld = $derived(
+    mode === 'edit'
+      && activeFileType === 'markdown'
+      && Boolean(activePath)
+      && deferredReloadMtimeByPath.has(activePath),
+  );
+
+  // Save-chip copy (attn-yzsa.2). One vocabulary with hosted /app, which is
+  // only honest now that autosave actually runs here — before this epic the
+  // chip's two states were "Unsaved changes" and "Saved on this device", and
+  // relabelling THAT "Changes autosaved" would have been the most direct kind
+  // of lie a status region can tell.
+  //
+  // "Saved on this device" was carrying two jobs in one string: the save state
+  // and the local-first, nothing-leaves-your-machine claim. They are split
+  // here. The chip reports save state; the claim keeps its dedicated homes (the
+  // hosted persistence badge and the landing Hero, both untouched) and rides
+  // along in this chip's hover title, which has room for the longer sentence.
+  //
+  // Three states, two glyphs. Dirty-and-held is not a third icon because it is
+  // not a third KIND of state — it is the dirty state that stopped resolving
+  // itself, and the words are where that difference belongs. This is the second
+  // job the dirty state acquired under autosave: it is now the only signal that
+  // a write is being deliberately withheld.
+  let saveChipLabel = $derived(
+    !editorDirty ? SAVE_STATE_AUTOSAVED : autosaveHeld ? AUTOSAVE_HELD_SHORT : SAVE_STATE_SAVING,
+  );
+  let saveChipTitle = $derived(
+    !editorDirty
+      ? SAVE_STATE_AUTOSAVED_TITLE
+      : autosaveHeld
+        ? AUTOSAVE_HELD_DISK_CONFLICT
+        : 'Saving your changes to this device…',
+  );
+
+  /**
+   * Every doc-changing transaction in an editable view, collab or not. This is
+   * the single funnel into autosave: `onDirtyChange` would not do, because it
+   * only fires on the false→true EDGE, so a quiet-period debounce hung off it
+   * would actually measure from the first keystroke of a burst rather than the
+   * last — a ceiling wearing a debounce's name.
+   */
+  function handleEditorDocChange(): void {
+    nativeAutosave.noteChange();
+  }
+
   function handleCollabDocChange(): void {
     // Reviewer views consume owner broadcasts read-only. A remote transaction
     // must never become a local submission or reach the owner's save path.
     if (collabRole !== 'owner') return;
     collabController?.onLocalChange();
-    // The owner persists the converged live doc to disk (debounced) so a
-    // co-typing session isn't lost on close and each save republishes a
-    // snapshot capturing the latest state. Reviewers have no local file, so
-    // only the owner writes back.
-    if (collabRole === 'owner' && collabActive) {
-      if (collabSaveTimer !== null) clearTimeout(collabSaveTimer);
-      collabSaveTimer = setTimeout(() => {
-        collabSaveTimer = null;
-        saveEdits();
-      }, 1500);
-    }
+    // The owner still persists the converged live doc to disk so a co-typing
+    // session isn't lost on close and each save republishes a snapshot with the
+    // latest state — but through the one autosave controller above, which
+    // already holds the collab-owner clause in its gate. Reviewers have no
+    // local file, so only the owner writes back.
+    nativeAutosave.noteChange();
   }
+
+  $effect(() => {
+    // Last resort before the window goes away. The debounce is short, but "I
+    // typed a line and closed the window" must not be the one case that loses
+    // it. `pagehide` is the reliable teardown signal in a WKWebView;
+    // `visibilitychange` covers the app being backgrounded without unloading.
+    const flush = (): void => {
+      nativeAutosave.flush();
+    };
+    const onVisibility = (): void => {
+      if (document.visibilityState === 'hidden') flush();
+    };
+    window.addEventListener('pagehide', flush);
+    document.addEventListener('visibilitychange', onVisibility);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      document.removeEventListener('visibilitychange', onVisibility);
+      // Flush before disposing, not after: dispose is final and a pending
+      // write dropped here is a write that never happens.
+      nativeAutosave.flush();
+      nativeAutosave.dispose();
+    };
+  });
 
   // ---------------------------------------------------------------------------
   // Suggestion composer (attn-nnj.4.5)
@@ -1105,10 +1241,20 @@
 
   function openCommentComposer(): void {
     const view = pmViewForReview;
+    // Legitimately silent: with no editor or no selection there is nothing the
+    // person asked for. Every OTHER refusal below is reported (attn-64iy.2).
     if (!view) return;
     if (!hasTextSelection(view)) return;
     const roomId = reviewStore.currentRoomId;
     if (!roomId) return;
+    if (commentAvailability.status !== 'ready') {
+      // The toolbar is on screen for this selection and already carries the
+      // reason, so this path does not invent a second way of saying it — it
+      // just declines to open a composer that would have nothing to anchor to.
+      // What it must NOT do is silently no-op with no explanation anywhere.
+      refreshSelectionToolbar();
+      return;
+    }
     const snapshot = resolveActiveSnapshotForCompose();
     if (!snapshot || !snapshot.anchorIndex) return;
     const { from, to } = view.state.selection;
@@ -1127,12 +1273,20 @@
   }
 
   function openSuggestionComposer(): void {
-    if (reviewStore.localGrantTier !== 'suggest') return;
     const view = pmViewForReview;
+    // Same split as openCommentComposer: no editor / no selection is silence
+    // the person asked for; a wrong grant tier or a missing snapshot is not.
     if (!view) return;
     if (!hasTextSelection(view)) return;
     const roomId = reviewStore.currentRoomId;
     if (!roomId) return;
+    if (suggestAvailability.status !== 'ready') {
+      // Includes the grant-tier refusal that used to be the very first bare
+      // `return` in this function — a reviewer holding a comment-only invite
+      // pressed ⌘⇧. and got nothing, with no way to learn why.
+      refreshSelectionToolbar();
+      return;
+    }
     const snapshot = resolveActiveSnapshotForCompose();
     if (!snapshot || !snapshot.anchorIndex) return;
     const { from, to } = view.state.selection;
@@ -1199,18 +1353,43 @@
   // shortcuts use.
   let toolbarSelection = $state<{ from: number; to: number } | null>(null);
 
+  /**
+   * Why composing is or is not possible right now (attn-64iy.2).
+   *
+   * Resolved once and spent by the toolbar, both keyboard shortcuts and both
+   * composers, so they cannot disagree about why an action is unavailable.
+   */
+  const composeContext = $derived.by(() => {
+    const roomId = reviewStore.currentRoomId;
+    const snapshot = resolveActiveSnapshotForCompose();
+    return {
+      hasRoom: roomId !== null,
+      roomHasSnapshot:
+        roomId !== null && reviewStore.snapshots.some((s) => s.roomId === roomId),
+      fileHasSnapshot: snapshot !== null,
+      fileSnapshotHasAnchors: Boolean(snapshot?.anchorIndex),
+      grantTier: reviewStore.localGrantTier,
+    };
+  });
+  const commentAvailability = $derived(
+    resolveComposeAvailability('comment', composeContext),
+  );
+  const suggestAvailability = $derived(
+    resolveComposeAvailability('suggest', composeContext),
+  );
+
   function refreshSelectionToolbar(): void {
     const view = pmViewForReview;
     if (!view || !hasTextSelection(view)) {
       if (toolbarSelection !== null) toolbarSelection = null;
       return;
     }
-    if (!reviewStore.currentRoomId) {
-      if (toolbarSelection !== null) toolbarSelection = null;
-      return;
-    }
-    const snapshot = resolveActiveSnapshotForCompose();
-    if (!snapshot || !snapshot.anchorIndex) {
+    // The toolbar used to ALSO clear itself when no snapshot was resolvable,
+    // which is how "I highlight text but nothing appears" happened: the
+    // control never rendered, so there was nothing to explain itself. It now
+    // renders whenever there is a review context and reports its own state —
+    // `absent` (no room at all) is the only case with genuinely nothing to say.
+    if (!toolbarShouldRender(commentAvailability)) {
       if (toolbarSelection !== null) toolbarSelection = null;
       return;
     }
@@ -1887,6 +2066,12 @@
   }
 
   function openPathNow(path: string, fileType?: FileType, newTab = false): void {
+    // The buffer is about to be replaced, so anything the autosave clock still
+    // owes has to land NOW, while `activePath` still points at the file those
+    // edits belong to. Firing after the switch would write one document's text
+    // over another's. `flush()` still consults the gate, so a held disk
+    // conflict is not force-written by the act of navigating away.
+    nativeAutosave.flush();
     const ft = fileType ?? detectFileType(path);
 
     // For directories, always (re-)load children so DirectoryOverview shows the full listing.
@@ -2613,8 +2798,29 @@
     consumeNativeRoomFocus();
   }
 
+  /**
+   * Write the buffer to disk now.
+   *
+   * WHAT ⌘S MEANS NOW THAT AUTOSAVE EXISTS (attn-yzsa.1). It is no longer the
+   * only thing standing between the user and lost work — autosave covers that.
+   * It keeps two jobs, and both are real:
+   *
+   *   1. An immediate flush. "Write it, I'm about to do something else" is a
+   *      reasonable thing to want, and a 1.2s wait you cannot skip is not.
+   *   2. The explicit resolution of a disk conflict, which is the job autosave
+   *      CANNOT do. When the file changed underneath the buffer, autosave holds
+   *      (lib/native-autosave.ts) and the only two ways out are this — my
+   *      version wins, and the `deferredReload*` clears below discard the disk
+   *      copy — and Escape/`cancelEdit`, the disk wins. A timer must never pick
+   *      between those on the user's behalf, so ⌘S deliberately does NOT go
+   *      through the gate.
+   */
   function saveEdits(): void {
     if (editorRef) {
+      // Whatever the autosave clock was owing, this call discharges. Cancel
+      // BEFORE writing so a re-entrant change during the save re-arms cleanly
+      // instead of being swallowed by a cancel that arrives after it.
+      nativeAutosave.cancel();
       const md = editorRef.getMarkdown();
       if (activePath && detectFileType(activePath) === 'markdown') {
         rawMarkdown = md;
@@ -2632,6 +2838,11 @@
   }
 
   function cancelEdit(): void {
+    // The other half of the ⌘S pair: these edits are being thrown away, so the
+    // pending autosave must be dropped rather than flushed. Without this the
+    // revert would be undone 1.2 seconds later by a timer holding the text the
+    // user just discarded.
+    nativeAutosave.cancel();
     if (editorRef) {
       editorRef.resetToMarkdown(rawMarkdown);
     }
@@ -3055,6 +3266,7 @@
         onSave={saveEdits}
         onCancel={cancelEdit}
         onDirtyChange={handleEditorDirtyChange}
+        onDocChange={handleEditorDocChange}
         plugins={editorPlugins}
         onReady={handleEditorReady}
         collabClientId={collabClientId ?? undefined}
@@ -3089,6 +3301,7 @@
         onSave={saveEdits}
         onCancel={cancelEdit}
         onDirtyChange={handleEditorDirtyChange}
+        onDocChange={handleEditorDocChange}
         plugins={editorPlugins}
         onReady={handleEditorReady}
         collabClientId={collabClientId ?? undefined}
@@ -3172,19 +3385,30 @@
        that story. Same change in HostedDesktopWorkspaceFrame (owner-header)
        and BrowserReviewApp (browser-review-header) — one grammar, one plane. -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <!-- The 6.5rem left indent is traffic-light clearance for the no-sidebar
+       case, so it is owed only where traffic lights exist. In a browser tab it
+       was 104px of dead inset (attn-64iy.5). Drag/zoom hang off the same
+       predicate: both post window commands no daemon is listening for here. -->
   <header
-    class={`relative z-40 flex h-11 shrink-0 items-center gap-2 border-b border-[var(--panel-border)] bg-[var(--panel-surface)] pr-3 ${hasSidebar ? 'pl-3' : 'pl-[6.5rem]'}`}
+    class={`relative z-40 flex h-11 shrink-0 items-center gap-2 border-b border-[var(--panel-border)] bg-[var(--panel-surface)] pr-3 ${hasSidebar || !nativeChrome ? 'pl-3' : 'pl-[6.5rem]'}`}
     data-slot="native-header"
-    onmousedown={dragWindow}
-    ondblclick={zoomWindow}
+    data-shell={nativeChrome ? 'native' : 'browser'}
+    onmousedown={nativeChrome ? dragWindow : undefined}
+    ondblclick={nativeChrome ? zoomWindow : undefined}
   >
-    <span class="flex shrink-0 items-center gap-1.5" data-slot="native-brand" aria-label="attn">
-      <BrandMark size={18} />
-      <span class="select-none font-serif text-sm font-bold leading-none text-foreground">attn</span>
-    </span>
-    <span class="h-3 w-px shrink-0 bg-border" aria-hidden="true"></span>
+    {#if brandInHeader}
+      <!-- In a browser tab with a sidebar the brand lives in the sidebar's
+           freed top-left corner instead; see `brandPlacement`. The divider
+           travels with it — it separates the brand from the document name and
+           has nothing to separate once the brand is gone. -->
+      <span class="flex shrink-0 items-center gap-1.5" data-slot="native-brand" aria-label="attn">
+        <BrandMark size={18} />
+        <span class="select-none font-serif text-sm font-bold leading-none text-foreground">attn</span>
+      </span>
+      <span class="h-3 w-px shrink-0 bg-border" aria-hidden="true"></span>
+    {/if}
     <span
-      class="min-w-0 truncate font-sans text-[13px] font-medium text-foreground"
+      class="min-w-0 truncate font-sans text-meta font-medium text-foreground"
       data-slot="native-doc-name"
       title={activePath}
     >{headerDocumentName}</span>
@@ -3208,8 +3432,9 @@
           class="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground"
           data-slot="native-save-chip"
           data-state={editorDirty ? 'dirty' : 'saved'}
+          data-autosave={autosaveHeld ? 'held' : 'armed'}
           role="status"
-          title={editorDirty ? 'Unsaved changes' : 'Saved on this device'}
+          title={saveChipTitle}
         >
           <!-- `save-check` / `save-pen`, vendored from Lucide (ISC) rather
                than imported: this repo pins @lucide/svelte 0.561, which
@@ -3218,7 +3443,22 @@
                surface across the ~100 icons the app imports. Paths are
                verbatim from lucide 1.29.0; see lucide.dev/icons/save-check.
                Keeping BOTH states in the save family (disk + check / disk +
-               pen) means they differ by glyph, not just tint. -->
+               pen) means they differ by glyph, not just tint.
+
+               The SAVED glyph carries `--primary` (attn-bw2h.8) — a sanctioned
+               role under the One Pencil Rule's carve-out (DESIGN.md, added
+               2026-08-07): this chip is the one piece of chrome that reports
+               where the user's work lives, which is the product's whole claim.
+               Dirty keeps `--amber-deep`. Both states are tinted, so tint is
+               not the signal either way; the glyph is. Contrast on the header's
+               `--panel-surface` plane: saved 4.51:1 in Paper / 7.91:1 in Ink,
+               dirty 7.05:1 / 10.85:1 (a 14px 2px-stroke glyph owes 3:1, so
+               even the thinnest of these has room).
+
+               No border and no fill, deliberately: the header's active-control
+               convention (attn-11g4.6) is tint + `bg-primary/10` + a
+               `border-primary/35` hairline arriving together, and this chip is
+               a `role="status"`, not a button. It must not borrow the pill. -->
           {#if editorDirty}
             <svg
               class="size-3.5 text-amber-deep" viewBox="0 0 24 24" fill="none"
@@ -3232,7 +3472,7 @@
             </svg>
           {:else}
             <svg
-              class="size-3.5" viewBox="0 0 24 24" fill="none"
+              class="size-3.5 text-primary" viewBox="0 0 24 24" fill="none"
               stroke="currentColor" stroke-width="2" stroke-linecap="round"
               stroke-linejoin="round" aria-hidden="true"
             >
@@ -3242,9 +3482,7 @@
               <path d="M7 3v4a1 1 0 0 0 1 1h7" />
             </svg>
           {/if}
-          <span class="sr-only" data-slot="native-save-chip-label"
-            >{editorDirty ? 'Unsaved changes' : 'Saved on this device'}</span
-          >
+          <span class="sr-only" data-slot="native-save-chip-label">{saveChipLabel}</span>
         </span>
       {/if}
       {#if showBreadcrumbShare}
@@ -3320,6 +3558,8 @@
   <Sidebar
     entries={fileTree}
     reviewMode={isReviewerInRoom}
+    showWindowDragRegion={nativeChrome}
+    showBrand={!brandInHeader}
     {activePath}
     {rootPath}
     {knownProjects}
@@ -3372,6 +3612,7 @@
         onSave={saveEdits}
         onCancel={cancelEdit}
         onDirtyChange={handleEditorDirtyChange}
+        onDocChange={handleEditorDocChange}
         plugins={editorPlugins}
         onReady={handleEditorReady}
       />
@@ -3503,6 +3744,8 @@
     to={toolbarSelection.to}
     onComment={openCommentComposer}
     onSuggest={openSuggestionComposer}
+    comment={commentAvailability}
+    suggest={suggestAvailability}
     canSuggest={reviewStore.localGrantTier === 'suggest'}
   />
 {/if}

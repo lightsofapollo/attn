@@ -156,11 +156,17 @@ export function triggerAttributes(
 /**
  * ARIA + data attributes for the panel.
  *
- * `inert` (not `hidden`) is what closes it: the panel stays in the DOM so the
- * 0fr -> 1fr grid reveal can animate, and `inert` is what keeps a collapsed
- * panel out of the tab order and the accessibility tree meanwhile. `hidden`
- * would kill the animation; leaving it neither hidden nor inert would leave
- * invisible focusable content behind, which is the classic accordion bug.
+ * `data-state` is what closes it: the panel's stylesheet turns `closed` into
+ * `display: none` with no transition in the path, so the collapsed size is a
+ * fact about state rather than the end value of an animation (accordion-
+ * styles.ts explains what happened when it was the latter).
+ *
+ * `inert` is the second lock, and it is not redundant: `display` is the one
+ * thing a consumer can override through `Accordion.Content`'s `class` prop, and
+ * a panel that is merely invisible must still not hand the keyboard a tab stop
+ * it cannot see. That failure — focusable content behind a collapsed panel —
+ * is the classic accordion bug, so it is guarded by an attribute rather than by
+ * a stylesheet.
  */
 export function contentAttributes(
   ids: AccordionItemIds,

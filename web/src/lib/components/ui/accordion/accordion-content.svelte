@@ -34,11 +34,12 @@
 	});
 </script>
 
-<!-- Three elements, not one: the outer grid animates 0fr -> 1fr, the middle
-     clips, the inner holds the body at its natural height. The core adds
-     `role="region"`, `aria-labelledby`, `data-state` and — while closed —
-     `inert`, so collapsed content is out of the tab order and the
-     accessibility tree without `hidden` killing the reveal. -->
+<!-- Three elements, not one: the outer is displayed or not, straight off
+     `data-state`, and masks; the middle carries the entry motion, which is
+     enhancement only; the inner holds the body. The core adds `role="region"`,
+     `aria-labelledby`, `data-state` and — while closed — `inert`. The panel's
+     resting size is state alone: no transition sits between the two. See the
+     note atop accordion-styles.ts. -->
 <div
 	bind:this={ref}
 	data-slot="accordion-content"

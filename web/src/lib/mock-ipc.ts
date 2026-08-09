@@ -5,22 +5,43 @@ import type {
   EventAuth,
   EventId,
   EventMeta,
+  FileId,
   InitPayload,
   IpcMessage,
   ParticipantId,
   ReviewAnchorResolutionUpdate,
   ReviewEvent,
   ReviewEventBody,
+  ReviewShareReady,
   ReviewSnapshot,
   ReviewStatus,
   RoomId,
   RoomPolicy,
+  SnapshotId,
   SuggestionAcceptedBody,
   SuggestionCreatedBody,
   SuggestionDraft,
   UpdatePayload,
 } from './types';
-import { deliverLocalPath, localShareableFiles } from './local-file-source';
+import type { InviteTierV3 } from './review/browser-invite';
+import {
+  deliverLocalPath,
+  hasLocalFiles,
+  localMarkdown,
+  localShareableFiles,
+} from './local-file-source';
+// The real thing, not a mock: see `publishMockSnapshots`. A snapshot is the one
+// payload in this file whose content has to be genuine, so it borrows the same
+// hasher and the same canonical Rust/comrak indexer the hosted browser
+// publisher uses.
+import { buildCanonicalAnchorIndex } from './review/browser-anchor-index';
+import { contentHash } from './review/browser-crypto';
+import {
+  mockFileIdFor,
+  mockSnapshotIdFor,
+  pathWithinRoot,
+  sharedMarkdownPaths,
+} from './mock-share-snapshot';
 
 const SAMPLE_MARKDOWN = `# Project Plan
 
@@ -145,8 +166,24 @@ interface AttnBridge {
   reviewFocusCard?: (eventId: string) => void;
 }
 
-/** Kinds of review callback the test helper can fire into the bridge. */
-export type MockReviewEmitKind = 'status' | 'event' | 'snapshot' | 'anchor_resolution';
+/**
+ * Kinds of review callback the test helper can fire into the bridge.
+ *
+ * `share_ready` is the browser stand-in for the daemon's
+ * `ReviewUpdate::ShareReady`, pushed by Rust right after `Bootstrapper::share`
+ * succeeds. Keep it in step with the Rust side: `build_invite_url_v3` /
+ * `build_browser_invite_url_v3` (src/review/bootstrap.rs) mint the URLs and
+ * `ReviewManager` (src/review/manager.rs) sends them; here they are
+ * synthesised. Same callback (`window.__attn__.reviewShareReady`), same
+ * payload shape (`ReviewShareReady` in types.ts), same consumer
+ * (`applyShareReady` in review/store.svelte.ts).
+ *
+ * Without it the share sheet could not complete in this loop at all: there is
+ * no relay client here, so `review_share` produced a status and nothing else,
+ * no invite URL ever reached the dialog, and the sheet pended until its 15s
+ * deadline and then reported a failure (attn-bw2h.6).
+ */
+export type MockReviewEmitKind = 'status' | 'event' | 'snapshot' | 'anchor_resolution' | 'share_ready';
 
 /**
  * One scripted entry in a mock-IPC scenario file. Mirrors the
@@ -274,6 +311,55 @@ const MOCK_AUTHOR_ID: ParticipantId = 'mock-author-1';
 const MOCK_DEVICE_ID = 'mock-device-1';
 const MOCK_SIGNING_KEY_ID = 'mock-signing-key-1';
 
+// Fake key material for the synthesised invites (attn-bw2h.6). Correct
+// base64url charset and correct LENGTHS — 43 chars for a 32-byte key, 86 for a
+// 64-byte Ed25519 signature — so anything that eyeballs or parses an invite in
+// this loop sees a realistic shape. The values are fixed nonsense; nothing
+// here derives from a secret and no verifier must ever accept them, exactly
+// like `mockAuth`'s 'mock-signature'.
+const MOCK_READ_CAPABILITY_KEY = '2r_JM_YJOpt85UeVcDTMc_6PCjhosdMZFORQNZxx7Yo';
+const MOCK_WRITE_ADMISSION_KEY = 'fS2m-CamUJ3w_YzSh6R50QBgWlWd5ef-H9ri-CkDdi8';
+const MOCK_OWNER_SIGNING_KEY = '2v50b1M1T8i2A5qJzJZxtnH7y0_d9HNNBtCZD7dR_Ng';
+/**
+ * Per-tier owner grants. The read and write keys are shared across tiers
+ * because both derive from the one room secret; the GRANT is what differs, and
+ * it is a signature over `{grantTier, purpose, roomId, v}` (see
+ * `canonical_device_grant_v3` in src/review/bootstrap.rs). That is what makes
+ * comment-vs-suggest a cryptographic boundary rather than a label a joiner
+ * could edit, so the mock reproduces the distinction instead of emitting three
+ * interchangeable URLs.
+ */
+const MOCK_TIER_GRANTS: Record<'comment' | 'suggest', string> = {
+  comment:
+    'U63wyrpCLZt_AyNd7jsTuKXnnJJZxlRLdEiReFEmZVtDb-c_LW8xt42BXRbuIvPx7_8otW5HX51sRqeISLxPXA',
+  suggest:
+    'ZXp12_pwQggKR7J25unrHIQInsaeJ9dTTvf4oi-MIG_DJ5FsgjDUznedQ2o2bS6PsFhH63IfYUHJAZJSoaHtGw',
+};
+/** Matches `DEFAULT_BROWSER_REVIEW_URL` in src/review/bootstrap.rs. */
+const MOCK_BROWSER_REVIEW_BASE = 'https://attn.sh/review';
+
+/**
+ * Build a v3 invite fragment the way `build_invite_fragment_v3`
+ * (src/review/bootstrap.rs) does — field order included, since the Rust parser
+ * rejects noncanonical ordering. `view` carries the read key only; a writable
+ * tier adds the write admission key and the owner's grant.
+ */
+function mockInviteFragment(tier: InviteTierV3): string {
+  const read = `#v=3&tier=${tier}&read=${MOCK_READ_CAPABILITY_KEY}`;
+  if (tier === 'view') return read;
+  return `${read}&write=${MOCK_WRITE_ADMISSION_KEY}&grant=${MOCK_TIER_GRANTS[tier]}`;
+}
+
+/** `attn://review/<roomId>#…` — the deep link installed reviewers use. */
+function mockNativeInvite(tier: InviteTierV3): string {
+  return `attn://review/${MOCK_ROOM_ID}${mockInviteFragment(tier)}`;
+}
+
+/** The hosted HTTPS form. Same fragment; only the base differs. */
+function mockBrowserInvite(tier: InviteTierV3): string {
+  return `${MOCK_BROWSER_REVIEW_BASE}/${MOCK_ROOM_ID}${mockInviteFragment(tier)}`;
+}
+
 let mockEventCounter = 0;
 function mockEventId(prefix: string): EventId {
   mockEventCounter += 1;
@@ -304,7 +390,7 @@ function mockStatus(mode: RoomPolicy['mode']): ReviewStatus {
   };
 }
 
-function mockEventMeta(eventId: EventId): EventMeta {
+function mockEventMeta(eventId: EventId, snapshotId?: SnapshotId): EventMeta {
   return {
     v: 2,
     eventId,
@@ -313,7 +399,14 @@ function mockEventMeta(eventId: EventId): EventMeta {
     deviceId: MOCK_DEVICE_ID,
     createdAt: Date.now(),
     parentEventIds: [],
-    snapshotId: MOCK_SNAPSHOT_ID,
+    // The snapshot the event was authored against. This used to be the fixed
+    // `MOCK_SNAPSHOT_ID` unconditionally, which was harmless only while no real
+    // snapshot existed; now that shares publish per-file snapshots
+    // (attn-64iy.1), naming an id that was never published would leave every
+    // event pointing at a snapshot nothing can look up. Callers pass the id
+    // their anchor actually targets; the constant is the last resort for
+    // synthetic events with no anchor of their own.
+    snapshotId: snapshotId ?? MOCK_SNAPSHOT_ID,
   };
 }
 
@@ -327,9 +420,13 @@ function mockAuth(): EventAuth {
   };
 }
 
-function mockReviewEvent(body: ReviewEventBody, eventId: EventId): ReviewEvent {
+function mockReviewEvent(
+  body: ReviewEventBody,
+  eventId: EventId,
+  snapshotId?: SnapshotId,
+): ReviewEvent {
   return {
-    meta: mockEventMeta(eventId),
+    meta: mockEventMeta(eventId, snapshotId),
     body,
     auth: mockAuth(),
   };
@@ -343,6 +440,11 @@ function emitEvent(event: ReviewEvent): void {
   window.__attn__?.reviewEvent(event);
 }
 
+function emitShareReady(payload: ReviewShareReady): void {
+  // Optional on the bridge interface, unlike `reviewStatus`/`reviewEvent`.
+  window.__attn__?.reviewShareReady?.(payload);
+}
+
 function emitSnapshot(snapshot: ReviewSnapshot): void {
   window.__attn__?.reviewSnapshot(snapshot);
 }
@@ -351,14 +453,127 @@ function emitAnchorResolution(update: ReviewAnchorResolutionUpdate): void {
   window.__attn__?.reviewAnchorResolution(update);
 }
 
+/** First share mints; re-sharing is idempotent, as it is against the daemon. */
+let mockRoomMinted = false;
+
 function handleReviewShare(msg: Extract<IpcMessage, { type: 'review_share' }>): void {
   // Real flow: Rust ReviewManager (attn-nnj.2.8) mints a room, derives keys,
-  // and reports back live/direct connection status. Mock just emits a single
-  // synthetic status payload after a short delay so the store visibly
-  // populates.
+  // and reports back live/direct connection status.
+  //
+  // ShareReady is the half that used to be missing (attn-bw2h.6). Emitting the
+  // status alone left the sheet with no invite URL to render, so it pended for
+  // its full 15s deadline and then reported a failure — on every share, in
+  // every browser tab, with no way to reach the ready state at all. ShareReady
+  // goes FIRST because it is what carries the room: the daemon's own ordering,
+  // and it means the ReviewBar and the dialog agree on the room id before any
+  // connection state arrives.
+  const newlyCreated = !mockRoomMinted;
+  mockRoomMinted = true;
+  const shareReady: ReviewShareReady = {
+    kind: 'share_ready',
+    roomId: MOCK_ROOM_ID,
+    inviteUrl: mockNativeInvite('comment'),
+    browserInviteUrl: mockBrowserInvite('comment'),
+    viewInviteUrl: mockNativeInvite('view'),
+    suggestInviteUrl: mockNativeInvite('suggest'),
+    browserViewInviteUrl: mockBrowserInvite('view'),
+    browserSuggestInviteUrl: mockBrowserInvite('suggest'),
+    // The path the owner shared — the dialog matches this against its target
+    // to recognise its own room, so a share rooted at a folder must report the
+    // folder, not the focused file.
+    ownerDisplayPath: msg.path || msg.primaryPath || '',
+    ownerSigningKey: MOCK_OWNER_SIGNING_KEY,
+    mode: msg.mode,
+    expiresAt: mockPolicy(msg.mode).expiresAt,
+    newlyCreated,
+  };
   setTimeout(() => {
+    emitShareReady(shareReady);
     emitStatus(mockStatus(msg.mode));
+    // Snapshots come AFTER the room, for the same reason ShareReady precedes
+    // status: a snapshot is scoped to a room and the store drops one that
+    // arrives for a room it has never heard of.
+    void publishMockSnapshots(msg);
   }, 200);
+}
+
+/**
+ * Fallback content for a share of something the session store does not hold.
+ *
+ * With no files picked, the browser loop still renders `SAMPLE_MARKDOWN` from
+ * the mock init payload, and sharing that document should snapshot what is on
+ * screen. Anything else is unshareable — returning `null` publishes nothing for
+ * it, which is honest, rather than a snapshot of "" that would read as the
+ * user's file having been emptied.
+ */
+function currentMockMarkdown(path: string): string | null {
+  if (hasLocalFiles()) return null;
+  return path ? SAMPLE_MARKDOWN : null;
+}
+
+/**
+ * Publish one snapshot per shared markdown file — the half of the mock share
+ * that was missing (attn-64iy.1).
+ *
+ * WHY THIS EXISTS. `handleReviewShare` used to emit ShareReady and a status and
+ * stop. With no snapshot, `reviewStore.snapshots` stayed empty, so
+ * `ownerFileIdForPath` in App.svelte could never resolve the open document to a
+ * FileId, so `currentFileId` was pinned at null, so
+ * `resolveActiveSnapshotForCompose` returned null and `openCommentComposer`
+ * returned silently. The user-visible symptom was the whole reason this issue
+ * exists: "I highlight text but nothing appears."
+ *
+ * WHY THE CONTENT AND INDEX ARE REAL. Everything else in this file is
+ * deliberately fake — signatures, keys, ids. A snapshot cannot be. The anchor
+ * resolver maps an anchor's authored `baseHash` onto the document actually on
+ * screen, so a snapshot holding invented text (or a hand-rolled index) yields
+ * comments that resolve nowhere and margin cards with no position. So the bytes
+ * come from the session store the user picked from, the hash is the same
+ * `contentHash` the hosted publisher uses, and the index is built by
+ * `buildCanonicalAnchorIndex` — the identical Rust/comrak indexer the real
+ * browser publisher calls, not a JS approximation of it.
+ */
+async function publishMockSnapshots(
+  msg: Extract<IpcMessage, { type: 'review_share' }>,
+): Promise<void> {
+  const createdAt = Date.now();
+  for (const path of sharedMarkdownPaths(msg, localShareableFiles())) {
+    try {
+      // A path the store does not hold is not shareable — better to publish
+      // nothing for it than a snapshot of an empty document, which would look
+      // like the user's file had been wiped.
+      const markdown = (await localMarkdown(path)) ?? currentMockMarkdown(path);
+      if (markdown === null) continue;
+
+      const bytes = new TextEncoder().encode(markdown);
+      const baseHash = contentHash(bytes);
+      const fileId = mockFileIdFor(path);
+      const snapshotId = mockSnapshotIdFor(fileId, baseHash);
+      const anchorIndex = await buildCanonicalAnchorIndex(bytes, snapshotId);
+
+      emitSnapshot({
+        roomId: MOCK_ROOM_ID,
+        fileId,
+        snapshotId,
+        // The store matches this against the open document's path to resolve a
+        // FileId (`ownerFileIdForPath`), so it has to be the path as the app
+        // knows it — not a basename, not a relative form.
+        ownerDisplayPath: path,
+        createdAt,
+        createdBy: MOCK_AUTHOR_ID,
+        baseHash,
+        byteLength: bytes.byteLength,
+        docType: 'markdown',
+        content: markdown,
+        anchorIndex,
+      });
+    } catch (err) {
+      // A failed index build must not take the whole share down with it: the
+      // other files are still publishable, and a silent total failure here is
+      // exactly the class of bug this issue is fixing.
+      console.error('[attn] mock snapshot failed for', path, err);
+    }
+  }
 }
 
 function handleReviewJoin(_msg: Extract<IpcMessage, { type: 'review_join' }>): void {
@@ -371,6 +586,8 @@ function handleReviewJoin(_msg: Extract<IpcMessage, { type: 'review_join' }>): v
 }
 
 function handleReviewStop(msg: Extract<IpcMessage, { type: 'review_stop' }>): void {
+  // Stopping drops the room, so the next share mints a new one.
+  mockRoomMinted = false;
   setTimeout(() => {
     emitStatus({
       roomId: msg.roomId ?? MOCK_ROOM_ID,
@@ -440,18 +657,17 @@ function handleReviewListShareableFiles(
   }, 50);
 }
 
-/** Mirrors the containment test the Rust scan gets for free from walking. */
-function pathWithinRoot(path: string, root: string): boolean {
-  const normalizedRoot = root.replace(/\/+$/u, '');
-  if (normalizedRoot.length === 0) return true;
-  return path === normalizedRoot || path.startsWith(`${normalizedRoot}/`);
-}
-
 function handleReviewCreateComment(
   msg: Extract<IpcMessage, { type: 'review_create_comment' }>,
 ): void {
   const eventId = mockEventId('comment');
-  const event = mockReviewEvent(commentBody(msg.anchor, msg.body, eventId), eventId);
+  // The anchor already names the snapshot it was authored against — echo that
+  // rather than a constant, so the event and its anchor agree (attn-64iy.1).
+  const event = mockReviewEvent(
+    commentBody(msg.anchor, msg.body, eventId),
+    eventId,
+    msg.anchor.snapshotId,
+  );
   setTimeout(() => emitEvent(event), 50);
 }
 
@@ -462,6 +678,7 @@ function handleReviewCreateSuggestion(
   const event = mockReviewEvent(
     suggestionCreatedBody(msg.draft, suggestionId),
     suggestionId,
+    msg.draft.anchor.snapshotId,
   );
   setTimeout(() => emitEvent(event), 50);
 }
@@ -482,6 +699,11 @@ function handleReviewResolveAnchor(
   // built from the position payload the caller supplied.
   const update: ReviewAnchorResolutionUpdate = {
     roomId: msg.roomId,
+    // `ReviewResolveAnchorMessage` carries no fileId, so there is nothing here
+    // to derive a real one from. Inert in practice: `applyAnchorResolution`
+    // keys resolutions by `eventId` alone and never reads this field. Left as
+    // the constant rather than guessed at — a plausible-looking wrong id would
+    // be worse than an obviously synthetic one.
     fileId: MOCK_FILE_ID,
     eventId: msg.eventId,
     resolved: {
@@ -543,6 +765,9 @@ function emitMockReview(kind: MockReviewEmitKind, payload: unknown): void {
       return;
     case 'anchor_resolution':
       emitAnchorResolution(payload as ReviewAnchorResolutionUpdate);
+      return;
+    case 'share_ready':
+      emitShareReady(payload as ReviewShareReady);
       return;
   }
 }

@@ -33,7 +33,12 @@
   import { ScrollArea } from './components/ui/scroll-area';
   import { reviewShare } from './ipc';
   import { ownerKeyFingerprint } from './review/fingerprint';
-  import { resolveSharePresentation, type SharePhase } from './share-dialog-state';
+  import {
+    FINGERPRINT_UNAVAILABLE_MESSAGE,
+    resolveFingerprintPresentation,
+    resolveSharePresentation,
+    type SharePhase,
+  } from './share-dialog-state';
   import type { RoomId, SearchResultItem } from './types';
 
   // ---------------------------------------------------------------------------
@@ -118,7 +123,10 @@
   let phase = $state<SharePhase>('configure');
   let selectedPaths = $state<string[]>([]);
   let fileQuery = $state('');
-  let fingerprint = $state('—— —— ——');
+  /** Last settled digest; '' while the first computation is in flight. */
+  let fingerprintDigest = $state('');
+  /** Set when `ownerKeyFingerprint` rejected — see `resolveFingerprintPresentation`. */
+  let fingerprintFailed = $state(false);
   /** Guards the minting phase: if ShareReady never lands, surface an error. */
   let mintTimeout: ReturnType<typeof setTimeout> | null = null;
   const MINT_TIMEOUT_MS = 15000;
@@ -272,11 +280,31 @@
   });
 
   // Recompute the fingerprint whenever the owner key changes.
+  //
+  // The rejection path is load-bearing, not defensive dressing: `crypto.subtle`
+  // is undefined on an insecure non-loopback origin, so reaching a dev server
+  // over a LAN IP makes `ownerKeyFingerprint` throw. Without the catch the
+  // rejection escaped this effect unhandled and the row kept rendering the
+  // em-dash placeholder indefinitely — a pending state with no deadline and no
+  // way to tell it apart from "no key yet", under a label that tells the owner
+  // to read it aloud as an identity check.
   $effect(() => {
+    const key = ownerSigningKey;
     let cancelled = false;
+    // Drop the previous key's digest immediately. Holding it while the new one
+    // computes would show a fingerprint that verifies the wrong identity.
+    fingerprintDigest = '';
+    fingerprintFailed = false;
     void (async () => {
-      const fp = await ownerKeyFingerprint(ownerSigningKey);
-      if (!cancelled) fingerprint = fp;
+      try {
+        const fp = await ownerKeyFingerprint(key);
+        if (!cancelled) fingerprintDigest = fp;
+      } catch {
+        if (!cancelled) {
+          fingerprintDigest = '';
+          fingerprintFailed = true;
+        }
+      }
     })();
     return () => {
       cancelled = true;
@@ -403,7 +431,10 @@
   }
 
   async function handleCopyFingerprint(): Promise<void> {
-    const ok = await copyToClipboard(fingerprint);
+    // Guarded as well as disabled: copying the em-dash placeholder would hand
+    // the owner something that looks like a verification value and isn't.
+    if (!fingerprintView.copyable) return;
+    const ok = await copyToClipboard(fingerprintView.text);
     if (ok) {
       copiedFingerprint = true;
       setTimeout(() => (copiedFingerprint = false), 1500);
@@ -435,6 +466,10 @@
   /** The one thing the primary card copies: CLI one-liner, else the link. */
   const primaryShare = $derived(presentation.primary);
   const canShareTargetOnly = $derived(!targetIsDirectory && filePath.length > 0);
+  /** Same discipline as `presentation`: the row renders a resolved status. */
+  const fingerprintView = $derived(
+    resolveFingerprintPresentation(ownerSigningKey, fingerprintDigest, fingerprintFailed),
+  );
 </script>
 
 <Dialog.Root bind:open>
@@ -531,7 +566,7 @@
                   onchange={(event) => togglePath(file.path, event.currentTarget.checked)}
                 />
                 <span class="min-w-0 truncate font-mono text-xs text-foreground">{relativePath(file.path)}</span>
-                <span class="text-[11px] text-muted-foreground">
+                <span class="text-micro text-muted-foreground">
                   {file.path === filePath ? 'Current · ' : ''}{file.fileType === 'html' ? 'Read-only' : 'Markdown'}
                 </span>
               </label>
@@ -692,7 +727,7 @@
               >
                 <span class="min-w-0">
                   <span class="block text-sm font-medium text-foreground">{link.label}</span>
-                  <span class="block truncate text-[11px] leading-4 text-muted-foreground">{link.detail}</span>
+                  <span class="block truncate text-micro leading-4 text-muted-foreground">{link.detail}</span>
                 </span>
                 <span class="flex size-7 items-center justify-center rounded border border-border text-muted-foreground group-hover:text-foreground">
                   {#if copiedTier === link.tier}
@@ -767,12 +802,14 @@
               id="share-fingerprint"
               class="flex-1 rounded-md border border-border bg-muted/40 px-2 py-1.5 font-mono text-xs tracking-wider text-foreground"
               data-slot="share-fingerprint"
-            >{fingerprint}</code>
+              data-status={fingerprintView.status}
+            >{fingerprintView.text}</code>
             <Button
               type="button"
               variant={copiedFingerprint ? 'default' : 'outline'}
               size="sm"
               onclick={handleCopyFingerprint}
+              disabled={!fingerprintView.copyable}
               data-slot="share-copy-fingerprint"
             >
               {#if copiedFingerprint}
@@ -784,9 +821,15 @@
               {/if}
             </Button>
           </div>
-          <p class="text-[11px] text-muted-foreground">
-            Read aloud to your reviewer for out-of-band identity check (SHA-256 of your signing key).
-          </p>
+          {#if fingerprintView.status === 'failed'}
+            <p class="text-micro text-destructive" data-slot="share-fingerprint-unavailable">
+              {FINGERPRINT_UNAVAILABLE_MESSAGE}
+            </p>
+          {:else}
+            <p class="text-micro text-muted-foreground">
+              Read aloud to your reviewer for out-of-band identity check (SHA-256 of your signing key).
+            </p>
+          {/if}
         </div>
 
         <label class="flex cursor-pointer items-start gap-2 rounded p-1.5" data-slot="share-single-device-row">
@@ -798,7 +841,7 @@
           />
           <div class="flex min-w-0 flex-col">
             <span class="text-xs font-medium text-foreground">I only use one device for review</span>
-            <span class="text-[11px] text-muted-foreground">
+            <span class="text-micro text-muted-foreground">
               Auto-deletes mailbox events after I acknowledge them.
             </span>
           </div>

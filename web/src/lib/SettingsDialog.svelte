@@ -169,7 +169,7 @@
                   style="font-family: var(--doc-font); font-size: calc(0.9rem * var(--attn-doc-scale)); letter-spacing: var(--doc-tracking); line-height: 1.25rem;"
                 >{preset.specimen}</span>
               </span>
-              <span class="block truncate text-[11px] leading-4 text-muted-foreground">{preset.description}</span>
+              <span class="block truncate text-micro leading-4 text-muted-foreground">{preset.description}</span>
             </span>
             <span
               class="flex size-5 shrink-0 items-center justify-center rounded-full border {typeset === preset.id
@@ -199,7 +199,7 @@
           <label class="flex cursor-pointer items-center justify-between gap-4 rounded-md px-1 py-1.5">
             <span class="min-w-0">
               <span class="block text-sm text-foreground">Launch at login</span>
-              <span class="block text-[11px] text-muted-foreground">{residentStatusLabel}</span>
+              <span class="block text-micro text-muted-foreground">{residentStatusLabel}</span>
             </span>
             <input
               type="checkbox"
@@ -216,7 +216,7 @@
           <label class="flex cursor-pointer items-center justify-between gap-4 rounded-md px-1 py-1.5">
             <span class="min-w-0">
               <span class="block text-sm text-foreground">Mute this review</span>
-              <span class="block text-[11px] text-muted-foreground">Unread badges stay available.</span>
+              <span class="block text-micro text-muted-foreground">Unread badges stay available.</span>
             </span>
             <input
               type="checkbox"

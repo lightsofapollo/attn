@@ -61,6 +61,15 @@
     onCheckboxToggle?: (md: string) => void;
     onDirtyChange?: (dirty: boolean) => void;
     /**
+     * Fired after EVERY doc-changing transaction in an editable view — local or
+     * remote, collab or not. Distinct from `onDirtyChange`, which only fires on
+     * the clean↔dirty EDGE: a quiet-period debounce built on the edge would
+     * measure from the first keystroke of a burst instead of the last, which is
+     * a ceiling wearing a debounce's name. Desktop autosave (attn-yzsa.1) is
+     * the caller.
+     */
+    onDocChange?: () => void;
+    /**
      * Extra ProseMirror plugins appended AFTER the built-in plugins.
      * Built-ins (history, search, code-highlight, tables, keymaps) load first
      * so injected plugins can see their decorations and state.
@@ -137,6 +146,7 @@
     onSuggestionClick,
     onCheckboxToggle,
     onDirtyChange,
+    onDocChange,
     plugins: extraPlugins,
     nodeViews: extraNodeViews,
     onReady,
@@ -879,6 +889,11 @@
           view.updateState(nextState);
           if (applied.docChanged && editable) {
             setDirty(true);
+            // Every change, not just the clean→dirty edge — see the prop's
+            // doc comment. `editable` is the guard that keeps a read-only
+            // reviewer view (which consumes the owner's broadcasts through
+            // this same path) from arming the owner-side save clock.
+            onDocChange?.();
           }
         },
         nodeViews: buildNodeViews(),

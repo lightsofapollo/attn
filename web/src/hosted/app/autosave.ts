@@ -4,6 +4,11 @@
 // follows a durable commit.
 
 import type { SaveState } from './types';
+import {
+  SAVE_STATE_AUTOSAVED,
+  SAVE_STATE_SAVING,
+  SAVE_STATE_STORAGE_ATTENTION,
+} from '../../lib/save-state-copy';
 
 export interface AutosaveOptions {
   /** Quiet period after the last keystroke before committing. */
@@ -63,7 +68,7 @@ export class AutosaveController {
       // Pending text is REPORTED immediately (gate: the chip must never
       // claim "Saved" while unsaved keystrokes exist — that is what makes
       // an immediate reload guard honest).
-      this.onState('Saving…');
+      this.onState(SAVE_STATE_SAVING);
     }
     this.cancelTimer?.();
     const pendingFor = this.now() - this.dirtySince;
@@ -128,7 +133,7 @@ export class AutosaveController {
     const provider = this.pendingProvider!;
     this.pendingProvider = null;
     this.dirtySince = null;
-    this.onState('Saving…');
+    this.onState(SAVE_STATE_SAVING);
     let succeeded = false;
     try {
       // Serialize exactly once, here — not per keystroke. Inside the guard:
@@ -138,7 +143,7 @@ export class AutosaveController {
       await this.commit(text);
       succeeded = true;
       if (this.pendingProvider === null) {
-        this.onState('Saved on this device');
+        this.onState(SAVE_STATE_AUTOSAVED);
       }
     } catch {
       // The durable head is still the previous commit; keep the change pending
@@ -147,7 +152,7 @@ export class AutosaveController {
         this.pendingProvider = provider;
         this.dirtySince = this.now();
       }
-      this.onState('Storage needs attention');
+      this.onState(SAVE_STATE_STORAGE_ATTENTION);
     } finally {
       if (this.pendingProvider !== null && !this.disposed) {
         // Newer text arrived mid-commit (or the commit failed): reschedule.

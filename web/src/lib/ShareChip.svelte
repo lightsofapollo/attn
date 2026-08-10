@@ -43,11 +43,59 @@
     onManageShare?: () => void;
     /** Attempts to upgrade to a direct peer-to-peer link (parent-owned). */
     onReconnect?: () => void;
+    /**
+     * Collapse the chip to a single glyph sized like its neighbouring header
+     * buttons. The native header is a 44px strip that also has to hold the
+     * document name, the snapshot badge, the comments toggle and settings —
+     * "Sharing · some-long-file.md" was taking a third of it to say something
+     * that rarely changes. The connection glyph still distinguishes the three
+     * states without colour, and the full label, the status word and the file
+     * count all stay in the accessible name / `title` / sr-only slots, so the
+     * standing disclosure survives the collapse. Text surfaces (hosted owner
+     * header) leave this off.
+     */
+    compact?: boolean;
   }
 
-  let { isOwner = true, shareOpen = false, onManageShare, onReconnect }: Props = $props();
+  let {
+    isOwner = true,
+    shareOpen = false,
+    onManageShare,
+    onReconnect,
+    compact = false,
+  }: Props = $props();
 
   let popoverOpen = $state(false);
+
+  // --- Chip treatment (attn-64iy.6) ------------------------------------------
+  //
+  // The COMPACT chip is a member of the native header's icon cluster, so it
+  // owes that cluster's convention (attn-11g4.6, pinned by
+  // header-icon-states.test.ts): a borderless ghost at rest, promoting to a
+  // filled + outlined pill in the accent while the surface it owns is open.
+  // It used to carry `border-primary/30 bg-primary/5` permanently, which made
+  // it the one control in the row wearing an active treatment while idle —
+  // visibly wrong beside a save chip that is borderless by design, and it
+  // spent the active state before there was anything active to report.
+  //
+  // Shape stays `rounded-full`: SnapshotBadge's chips are round too, so this
+  // is the established silhouette for review-dock controls, not an outlier.
+  // Only the border and fill move.
+  //
+  // The rust tint survives the demotion. The chip still has to report a live
+  // room, and the connection state is already carried by a glyph swap (Zap /
+  // Wifi / CloudOff), so nothing here rests on colour alone (PRODUCT.md).
+  //
+  // The TEXT variant (hosted owner header) keeps its bordered treatment: it is
+  // a labelled chip in a wide bar, not an icon in a cluster, so the convention
+  // this fixes does not apply to it.
+  const CHIP_ACTIVE = 'border-primary/35 bg-primary/10 text-primary hover:bg-primary/15';
+  const CHIP_REST_LIVE = 'border-transparent text-primary hover:bg-primary/10';
+  // `--accent` rather than `--muted` for the offline hover: on the header's
+  // recessed `--panel-surface` plane `--muted` collapses to near-invisibility
+  // (App.svelte's header cluster makes the same choice for the same reason).
+  const CHIP_REST_OFFLINE =
+    'border-transparent text-muted-foreground/80 hover:bg-accent hover:text-foreground';
 
   const hasActiveRoom = $derived(reviewStore.currentRoomId !== null);
   const connection = $derived(resolveConnection(reviewStore.status, reviewStore.connection));
@@ -56,6 +104,23 @@
   const peers: ReviewStatusPeer[] = $derived(reviewStore.peersResolved);
   const outboxPending = $derived(reviewStore.status?.outboxPending ?? 0);
   const label = $derived(shareChipLabel(isOwner, descriptor, files, hasActiveRoom));
+  /** Named separately from the prop so the markup reads as a layout mode. */
+  const iconOnly = $derived(compact);
+  /**
+   * Is a surface this chip owns currently open? Its own popover, or — before a
+   * room exists — the share dialog, which is where `toggle()` routes instead.
+   * Pre-mint the chip exists ONLY because that dialog is open, so leaving it a
+   * quiet ghost in that state would under-report as badly as the permanent
+   * border over-reported.
+   */
+  const surfaceOpen = $derived(popoverOpen || shareOpen);
+  const compactTone = $derived(
+    surfaceOpen
+      ? CHIP_ACTIVE
+      : connection === 'offline' && hasActiveRoom
+        ? CHIP_REST_OFFLINE
+        : CHIP_REST_LIVE,
+  );
 
   function toggle(): void {
     // Pre-mint (sheet open, no room yet) the chip is a spatial anchor that
@@ -95,31 +160,51 @@
   <div class="share-chip relative inline-flex shrink-0" data-slot="share-chip-root">
     <button
       type="button"
-      class="chip inline-flex h-7 max-w-[15rem] shrink-0 items-center gap-1.5 rounded-full border px-2.5 font-sans text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50
-        {connection === 'offline' && hasActiveRoom
-          ? 'border-border/60 bg-muted/20 text-muted-foreground/80 hover:bg-muted/40'
-          : 'border-primary/30 bg-primary/5 text-primary hover:bg-primary/10'}"
+      class="chip inline-flex h-7 shrink-0 items-center rounded-full border font-sans text-micro font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50
+        {iconOnly ? 'w-7 justify-center' : 'max-w-[15rem] gap-1.5 px-2.5'}
+        {iconOnly
+          ? compactTone
+          : connection === 'offline' && hasActiveRoom
+            ? 'border-border/60 bg-muted/20 text-muted-foreground/80 hover:bg-muted/40'
+            : 'border-primary/30 bg-primary/5 text-primary hover:bg-primary/10'}"
       data-slot="share-chip"
       data-state={connection}
       data-active={hasActiveRoom}
+      data-surface={surfaceOpen ? 'open' : 'closed'}
+      data-compact={iconOnly}
       data-file-count={files.length}
       aria-haspopup="dialog"
       aria-expanded={popoverOpen}
       aria-label={hasActiveRoom ? `${label} — ${descriptor.label}` : 'Share for review'}
-      title={hasActiveRoom ? descriptor.detail : 'Share for review'}
+      title={hasActiveRoom ? `${label} — ${descriptor.detail}` : 'Share for review'}
       onclick={toggle}
     >
-      {#if hasActiveRoom}
+      {#if !hasActiveRoom}
+        <!-- 14px collapsed, matching both the state glyphs below and the
+             header's own share button; 12px stays the inline-with-text size. -->
+        <Share2 class={`shrink-0 ${iconOnly ? 'size-3.5' : 'size-3'}`} aria-hidden="true" />
+      {:else if iconOnly}
+        <!-- The glyph carries the state that the dot + word used to split
+             between colour and text, and matches the popover header so the
+             chip and the panel it opens agree at a glance. -->
+        {#if descriptor.icon === 'live'}
+          <Zap class="size-3.5 shrink-0" aria-hidden="true" />
+        {:else if descriptor.icon === 'connected'}
+          <Wifi class="size-3.5 shrink-0" aria-hidden="true" />
+        {:else}
+          <CloudOff class="size-3.5 shrink-0" aria-hidden="true" />
+        {/if}
+      {:else}
         <span
           class="size-1.5 shrink-0 rounded-full
             {descriptor.tone === 'offline' ? 'bg-muted-foreground/70' : 'bg-primary'}
             {descriptor.tone === 'live' ? 'share-chip-dot-live' : ''}"
           aria-hidden="true"
         ></span>
-      {:else}
-        <Share2 class="size-3 shrink-0" aria-hidden="true" />
       {/if}
-      <span class="truncate" data-slot="share-chip-label">{label}</span>
+      <!-- Never dropped, only hidden: automation and assistive tech read the
+           label from the same node on every surface. -->
+      <span class={iconOnly ? 'sr-only' : 'truncate'} data-slot="share-chip-label">{label}</span>
       {#if hasActiveRoom && files.length > 0}
         <span class="sr-only" data-slot="share-chip-files">{files.length}</span>
       {/if}
@@ -136,7 +221,7 @@
       ></button>
 
       <div
-        class="attn-chrome absolute right-0 top-full z-[60] mt-1 w-80 rounded-lg border border-border bg-popover text-popover-foreground shadow-md"
+        class="absolute right-0 top-full z-[60] mt-1 w-80 rounded-lg border border-border bg-popover text-popover-foreground shadow-md"
         data-slot="share-chip-popover"
         role="dialog"
         aria-label="Share details"
@@ -157,7 +242,7 @@
               {descriptor.detail}
             </p>
             {#if outboxPending > 0}
-              <p class="pt-1 text-[11px] text-muted-foreground" data-slot="share-chip-outbox">
+              <p class="pt-1 text-micro text-muted-foreground" data-slot="share-chip-outbox">
                 {outboxPending} change{outboxPending === 1 ? '' : 's'} waiting to sync…
               </p>
             {/if}
@@ -166,7 +251,7 @@
 
         {#if files.length > 0}
           <section class="border-t border-border/50 px-3 py-2.5" aria-label="Shared files">
-            <h3 class="pb-1.5 text-[10px] uppercase tracking-wide text-muted-foreground">
+            <h3 class="pb-1.5 text-badge uppercase tracking-wide text-muted-foreground">
               {isOwner
                 ? `Reviewers can see ${files.length === 1 ? 'this file' : `these ${files.length} files`}`
                 : `Shared with you · ${files.length === 1 ? '1 file' : `${files.length} files`}`}
@@ -179,7 +264,7 @@
                     <div class="truncate text-xs text-foreground" title={f.name}>{f.name}</div>
                     {#if f.relPath && f.relPath !== f.name}
                       <div
-                        class="truncate font-mono text-[10px] text-muted-foreground"
+                        class="truncate font-mono text-badge text-muted-foreground"
                         title={f.relPath}
                       >
                         {f.relPath}
@@ -194,7 +279,7 @@
 
         <section class="border-t border-border/50 px-3 py-2.5" aria-label="People">
           <div class="flex items-center justify-between gap-2" data-slot="share-chip-identity">
-            <span class="min-w-0 truncate text-[11px] text-muted-foreground">
+            <span class="min-w-0 truncate text-micro text-muted-foreground">
               You:
               <span class="font-medium text-foreground" data-slot="share-chip-self-name">
                 {userProfile.effectiveName}
@@ -202,7 +287,7 @@
             </span>
             <button
               type="button"
-              class="shrink-0 rounded-md px-2 py-0.5 text-[11px] font-medium text-muted-foreground hover:bg-muted"
+              class="shrink-0 rounded-md px-2 py-0.5 text-micro font-medium text-muted-foreground hover:bg-muted"
               data-slot="share-chip-edit-name"
               onclick={() => {
                 userProfile.requestEdit();
@@ -213,11 +298,11 @@
             </button>
           </div>
           {#if peers.length === 0}
-            <p class="pt-1.5 text-[11px] text-muted-foreground" data-slot="share-chip-no-peers">
+            <p class="pt-1.5 text-micro text-muted-foreground" data-slot="share-chip-no-peers">
               No one else is here right now.
             </p>
           {:else}
-            <ul class="m-0 flex list-none flex-col gap-1 p-0 pt-1.5 text-[11px]" data-slot="share-chip-peer-list">
+            <ul class="m-0 flex list-none flex-col gap-1 p-0 pt-1.5 text-micro" data-slot="share-chip-peer-list">
               {#each peers as peer (peer.deviceId)}
                 <li
                   class="flex items-center justify-between gap-2"
@@ -246,7 +331,7 @@
               {#if descriptor.canTryFaster && onReconnect}
                 <button
                   type="button"
-                  class="rounded-md px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-muted"
+                  class="rounded-md px-2 py-1 text-micro font-medium text-muted-foreground hover:bg-muted"
                   data-slot="share-chip-reconnect"
                   onclick={handleReconnect}
                 >
@@ -257,7 +342,7 @@
             {#if isOwner && onManageShare}
               <button
                 type="button"
-                class="rounded-md border border-border bg-background px-2.5 py-1 text-[11px] font-medium text-foreground hover:bg-muted"
+                class="rounded-md border border-border bg-background px-2.5 py-1 text-micro font-medium text-foreground hover:bg-muted"
                 data-slot="share-chip-manage"
                 onclick={handleManage}
               >

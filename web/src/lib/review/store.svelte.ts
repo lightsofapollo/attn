@@ -29,8 +29,10 @@ import {
   type StaleAnchorEntry,
 } from './selectors';
 import {
-  resolveParticipantColor,
-  sanitizeParticipantColor,
+  harvestDeclaredColors,
+  isSelfParticipant,
+  resolveIdentityColor,
+  type DeclaredColorAnnounce,
 } from '../participant-color';
 import { userProfile } from '../profile.svelte';
 import { computeRailMode, type RailMode } from './rail-mode';
@@ -476,40 +478,53 @@ export class ReviewStore {
    * rules as `participantNames` above, and for the same reconnect-replay
    * reason). Validated at harvest so a malicious declared color can never
    * reach an inline style; invalid declarations fall through to the hash.
+   * Unlike names, an announce with NO color clears an earlier declaration —
+   * that is how a switch back to "Auto" travels (`harvestDeclaredColors`).
    */
   participantColors: Record<string, string> = $derived.by(() => {
-    const colors: Record<string, string> = {};
-    const coloredAt: Record<string, number> = {};
+    const announces: DeclaredColorAnnounce[] = [];
     for (const ev of this.events) {
       if (this.currentRoomId !== null && ev.meta.roomId !== this.currentRoomId) continue;
       if (ev.body.type === 'participant_joined') {
-        const p = ev.body.participant;
-        const color = sanitizeParticipantColor(p.color);
-        if (color && (coloredAt[p.participantId] ?? -1) <= ev.meta.createdAt) {
-          colors[p.participantId] = color;
-          coloredAt[p.participantId] = ev.meta.createdAt;
-        }
+        announces.push({
+          participantId: ev.body.participant.participantId,
+          color: ev.body.participant.color,
+          announcedAt: ev.meta.createdAt,
+        });
       }
     }
-    return colors;
+    return harvestDeclaredColors(announces);
   });
 
   /**
+   * Is this participant the local user? Our own participant id matches in
+   * every room under every role; the owner id is the role-gated fallback for
+   * windows that never learned one. See `isSelfParticipant` for why the gate
+   * matters (on a reviewer window the owner id is someone else).
+   */
+  isSelf(participantId: string): boolean {
+    return isSelfParticipant(participantId, {
+      selfParticipantId: userProfile.participantId,
+      ownerParticipantId: this.ownerParticipantId,
+      role: this.activeRoom?.role,
+    });
+  }
+
+  /**
    * The one identity color every surface renders for a participant (chips,
-   * carets, comment-card accents — attn-3gdd): their declared color from
-   * `ParticipantJoined`, then — on the owner's own window — the local
-   * profile's picked color (mirrors the `displayNameFor` owner-local
-   * fallback), else the deterministic palette hash. Agents are always
-   * violet (`resolveParticipantColor` short-circuits on kind).
+   * carets, comment-card accents — attn-3gdd): for ourselves the locally
+   * picked color, then the color declared on `ParticipantJoined`, else the
+   * deterministic palette hash. Agents are always violet
+   * (`resolveIdentityColor` short-circuits on kind before the self override).
    */
   colorFor(participantId: string): string {
-    const kind = this.participantKindFor(participantId);
-    const declared =
-      this.participantColors[participantId] ??
-      (participantId === this.ownerParticipantId && this.activeRoom?.role === 'owner'
-        ? userProfile.color
-        : null);
-    return resolveParticipantColor(participantId, declared, kind);
+    return resolveIdentityColor({
+      participantId,
+      kind: this.participantKindFor(participantId),
+      announced: this.participantColors[participantId] ?? null,
+      isSelf: this.isSelf(participantId),
+      selfColor: userProfile.color,
+    });
   }
 
   /**

@@ -183,8 +183,13 @@
     No peers
   </div>
 {:else}
+  <!-- `min-w-0 shrink` live here, not on a host wrapper (attn-64iy.3): the
+       ReviewBar wrapper that used to carry them rendered even when this strip
+       was empty, and an empty flex item still consumes the row's gap. This
+       root IS the flex item now, so the strip both shrinks correctly when the
+       dock is tight and disappears completely when there is nobody here. -->
   <div
-    class="peer-strip relative inline-flex h-7 items-center gap-1"
+    class="peer-strip relative inline-flex h-7 min-w-0 shrink items-center gap-1"
     data-slot="peer-strip"
     data-state="active"
     data-peer-count={peers.length}
@@ -204,7 +209,7 @@
       >
         <button
           type="button"
-          class="peer-chip relative inline-flex size-6 shrink-0 items-center justify-center text-[10px] font-semibold leading-none text-white shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+          class="peer-chip relative inline-flex size-6 shrink-0 items-center justify-center text-badge font-semibold leading-none text-white shadow-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
           class:peer-chip-round={visual.shape === 'round'}
           class:peer-chip-hex={visual.shape === 'hex'}
           class:peer-chip-you={youHere}
@@ -252,7 +257,7 @@
                chip; rendered as a sibling so the strip's flex flow handles
                positioning. -->
           <div
-            class="absolute right-0 top-full z-[60] mt-2 w-48 rounded-md border border-border bg-popover p-2 text-[11px] text-popover-foreground shadow-md"
+            class="absolute right-0 top-full z-[60] mt-2 w-48 rounded-md border border-border bg-popover p-2 text-micro text-popover-foreground shadow-md"
             data-slot="peer-presence-tooltip"
             role="tooltip"
           >
@@ -273,7 +278,7 @@
     {#if split.overflowCount > 0}
       <button
         type="button"
-        class="peer-chip peer-chip-overflow inline-flex size-6 shrink-0 items-center justify-center rounded-full border border-border bg-muted/60 text-[10px] font-medium text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+        class="peer-chip peer-chip-overflow inline-flex size-6 shrink-0 items-center justify-center rounded-full border border-border bg-muted/60 text-badge font-medium text-foreground hover:bg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
         data-slot="peer-chip-overflow"
         data-overflow-count={split.overflowCount}
         aria-haspopup="dialog"
@@ -296,12 +301,12 @@
         onclick={closeOverflow}
       ></button>
       <div
-        class="absolute right-0 top-full z-50 mt-1 w-56 rounded-md border border-border bg-popover p-2 text-[11px] text-popover-foreground shadow-md"
+        class="absolute right-0 top-full z-50 mt-1 w-56 rounded-md border border-border bg-popover p-2 text-micro text-popover-foreground shadow-md"
         data-slot="peer-strip-overflow-popover"
         role="dialog"
         aria-label="All peers"
       >
-        <header class="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+        <header class="mb-1 text-badge uppercase tracking-wide text-muted-foreground">
           {peers.length} peers
         </header>
         <ul class="flex flex-col gap-1" data-slot="peer-strip-overflow-list">
@@ -360,7 +365,7 @@
       >
         <header class="mb-2 flex items-start gap-2">
           <span
-            class="mt-0.5 inline-flex size-7 shrink-0 items-center justify-center text-[12px] font-semibold text-white"
+            class="mt-0.5 inline-flex size-7 shrink-0 items-center justify-center text-xs font-semibold text-white"
             class:peer-chip-round={visual.shape === 'round'}
             class:peer-chip-hex={visual.shape === 'hex'}
             data-shape={visual.shape}
@@ -379,14 +384,14 @@
                 {peer.displayName}
               </span>
               <span
-                class="rounded border border-border bg-muted px-1 text-[10px] uppercase tracking-wide text-muted-foreground"
+                class="rounded border border-border bg-muted px-1 text-badge uppercase tracking-wide text-muted-foreground"
                 data-slot="identity-card-kind"
               >
                 {peer.kind}
               </span>
             </div>
             <div
-              class="font-mono text-[10px] text-muted-foreground"
+              class="font-mono text-badge text-muted-foreground"
               data-slot="identity-card-tail6"
             >
               tail · {tail6(fp)}
@@ -394,7 +399,7 @@
           </div>
         </header>
 
-        <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-[11px]">
+        <dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-micro">
           <dt class="text-muted-foreground">Fingerprint</dt>
           <dd class="font-mono" data-slot="identity-card-fingerprint">{fp}</dd>
           <dt class="text-muted-foreground">participantId</dt>
@@ -414,7 +419,7 @@
         <footer class="mt-2 flex items-center justify-end">
           <button
             type="button"
-            class="rounded-md px-2 py-1 text-[11px] font-medium text-muted-foreground hover:bg-muted"
+            class="rounded-md px-2 py-1 text-micro font-medium text-muted-foreground hover:bg-muted"
             data-slot="identity-card-close"
             onclick={closeCard}
           >

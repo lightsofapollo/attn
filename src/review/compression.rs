@@ -37,11 +37,8 @@ pub fn compress_if_smaller(plaintext: &[u8]) -> Cow<'_, [u8]> {
     if plaintext.len() < 64 {
         return Cow::Borrowed(plaintext); // header overhead always loses
     }
-    let mut encoder =
-        flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
-    let compressed = encoder
-        .write_all(plaintext)
-        .and_then(|()| encoder.finish());
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    let compressed = encoder.write_all(plaintext).and_then(|()| encoder.finish());
     match compressed {
         Ok(bytes) if bytes.len() < plaintext.len() => Cow::Owned(bytes),
         _ => Cow::Borrowed(plaintext),
@@ -100,8 +97,8 @@ mod tests {
         }
         let wire = compress_if_smaller(&bytes);
         assert!(matches!(wire, Cow::Borrowed(_)), "random bytes stay raw");
-        let restored = decompress_if_needed(&bytes, MAX_DECOMPRESSED_SNAPSHOT_BYTES)
-            .expect("passthrough");
+        let restored =
+            decompress_if_needed(&bytes, MAX_DECOMPRESSED_SNAPSHOT_BYTES).expect("passthrough");
         assert!(matches!(restored, Cow::Borrowed(_)));
     }
 
@@ -128,7 +125,10 @@ mod tests {
     fn zip_bomb_hits_the_ceiling() {
         let zeros = vec![0u8; 1024 * 1024];
         let wire = compress_if_smaller(&zeros);
-        assert!(is_gzip(&wire) && wire.len() < 8192, "zeros must compress hard");
+        assert!(
+            is_gzip(&wire) && wire.len() < 8192,
+            "zeros must compress hard"
+        );
         let err = decompress_if_needed(&wire, 64 * 1024).expect_err("must hit ceiling");
         assert!(err.contains("decompression ceiling"), "{err}");
         let ok = decompress_if_needed(&wire, MAX_DECOMPRESSED_SNAPSHOT_BYTES)
@@ -161,12 +161,10 @@ mod tests {
         // (browser DEFLATE implementations differ from miniz_oxide). Encoded
         // here with flate2 but validated shape-wise: magic + round-trip.
         let plaintext = b"{\"v\":1,\"content\":\"interop across native and browser clients\"}";
-        let mut encoder =
-            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
         encoder.write_all(plaintext).expect("write");
         let wire = encoder.finish().expect("finish");
-        let restored =
-            decompress_if_needed(&wire, MAX_DECOMPRESSED_SNAPSHOT_BYTES).expect("open");
+        let restored = decompress_if_needed(&wire, MAX_DECOMPRESSED_SNAPSHOT_BYTES).expect("open");
         assert_eq!(restored.as_ref(), plaintext.as_slice());
     }
 }

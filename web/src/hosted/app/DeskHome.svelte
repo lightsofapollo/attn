@@ -33,6 +33,11 @@
     event.preventDefault();
     joinOpen = true;
     joinError = null;
+    // Push the hash the close path already assumes exists (attn-n01r.40).
+    // /app#join opened the panel on a real load, but clicking the tile only set
+    // local state, so a reload lost it — while closeJoin() unconditionally
+    // replaced the URL as though the hash were present. The two paths now agree.
+    if (window.location.hash !== '#join') history.pushState(null, '', '/app#join');
   }
 
   // Focus the paste field whichever way the panel opened (#join intent or
@@ -45,6 +50,68 @@
     joinOpen = false;
     joinError = null;
     if (window.location.hash === '#join') history.replaceState(null, '', '/app');
+    // Return focus to the control that opened the panel (attn-n01r.30).
+    // DESIGN.md's Topmost-Escape Rule: "Every overlay stores focus on open and
+    // restores it on close." The open half was already right — the panel
+    // focuses its input — but closing dropped focus to the document.
+    joinTrigger?.focus();
+  }
+
+  let joinTrigger = $state<HTMLAnchorElement | undefined>();
+
+  /** Escape closes the topmost layer; "/" focuses the filter; arrows move. */
+  function onDeskKeydown(event: KeyboardEvent): void {
+    if (event.key === '/' && !typingInField(event.target) && workspaces.length > 0) {
+      event.preventDefault();
+      filterInput?.focus();
+      return;
+    }
+    if ((event.key === 'ArrowDown' || event.key === 'ArrowUp') && !confirmingDeleteId) {
+      if (!typingInField(event.target) || event.target === filterInput) {
+        event.preventDefault();
+        moveSelection(event.key === 'ArrowDown' ? 1 : -1);
+        return;
+      }
+    }
+    if (event.key === 'Enter' && event.target === filterInput && selectedIndex >= 0) {
+      event.preventDefault();
+      openWorkspace(visibleWorkspaces[selectedIndex]);
+      return;
+    }
+    if (event.key !== 'Escape') return;
+    if (filterQuery && event.target === filterInput) {
+      event.stopPropagation();
+      filterQuery = '';
+      selectedIndex = -1;
+      return;
+    }
+    if (confirmingDeleteId !== null) {
+      event.stopPropagation();
+      cancelDelete();
+      return;
+    }
+    if (joinOpen) {
+      event.stopPropagation();
+      closeJoin();
+    }
+  }
+
+  /* The delete confirm announces role="alertdialog" but never behaved like one:
+     focus was never moved into it, was not trapped, and Escape did not dismiss
+     it, so a screen-reader user was told a dialog opened and then found focus
+     still on the Delete button behind it (attn-n01r.30). These remember the
+     invoking button so focus can go back where it came from. */
+  let deleteTrigger: HTMLButtonElement | undefined;
+
+  function openDeleteConfirm(workspaceId: string, trigger: HTMLButtonElement): void {
+    deleteTrigger = trigger;
+    confirmingDeleteId = workspaceId;
+  }
+
+  function cancelDelete(): void {
+    confirmingDeleteId = null;
+    deleteTrigger?.focus();
+    deleteTrigger = undefined;
   }
 
   function submitJoin(event: SubmitEvent): void {
@@ -62,12 +129,58 @@
   let renamingId = $state<string | null>(null);
   let renameValue = $state('');
   let confirmingDeleteId = $state<string | null>(null);
+
+  /* Keyboard model (attn-n01r.29). The desk scored 0/4 on Flexibility and
+     Efficiency — the sole keyboard handler in this file was Enter/Escape inside
+     the rename input — on the surface PRODUCT.md's primary user opens most, for
+     a product whose stated principle is that every action is keyboard-reachable.
+
+     Three things, which is what the finding asked for: a "/" filter that
+     narrows the list live, Up/Down to move a selection through it, and Enter to
+     open. Selection hangs off the workspace id the rows already carry. */
+  let filterQuery = $state('');
+  let filterInput = $state<HTMLInputElement | undefined>();
+  let selectedIndex = $state(-1);
+
+  const visibleWorkspaces = $derived.by(() => {
+    const q = filterQuery.trim().toLowerCase();
+    if (!q) return workspaces;
+    return workspaces.filter((w) => w.name.toLowerCase().includes(q));
+  });
+
+  // Keep the selection inside the filtered list as it narrows.
+  $effect(() => {
+    if (selectedIndex >= visibleWorkspaces.length) selectedIndex = visibleWorkspaces.length - 1;
+  });
+
+  function openWorkspace(workspace: WorkspaceSummary): void {
+    window.location.assign(`/app/w/${workspace.id}/${workspace.openPath}`);
+  }
+
+  function moveSelection(delta: number): void {
+    if (visibleWorkspaces.length === 0) return;
+    const next = selectedIndex < 0
+      ? (delta > 0 ? 0 : visibleWorkspaces.length - 1)
+      : Math.min(Math.max(selectedIndex + delta, 0), visibleWorkspaces.length - 1);
+    selectedIndex = next;
+    document
+      .querySelector<HTMLElement>(`[data-workspace-id="${visibleWorkspaces[next].id}"]`)
+      ?.scrollIntoView({ block: 'nearest' });
+  }
+
+  /** True while a control that owns its own key handling has focus. */
+  function typingInField(target: EventTarget | null): boolean {
+    const el = target as HTMLElement | null;
+    if (!el) return false;
+    return el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable;
+  }
   let importError = $state<string | null>(null);
 
-  function sharingLabel(sharing: SharingState): string {
+  /** Label for the non-shared states. The 'shared' case is handled in the
+   *  template, which needs the explanatory title attribute alongside it — this
+   *  used to carry an unreachable duplicate of that string (attn-n01r.44). */
+  function sharingLabel(sharing: Exclude<SharingState, 'shared'>): string {
     switch (sharing) {
-      case 'shared':
-        return 'Shared · relay sees only ciphertext';
       case 'backed-up':
         return 'Backed up';
       case 'local-only':
@@ -112,6 +225,8 @@
   }
 </script>
 
+<svelte:window onkeydown={onDeskKeydown} />
+
 <div class="app-shell" data-app-view="home">
   <AppHeader mode={health.mode}>
     {#snippet actions()}
@@ -128,34 +243,62 @@
       <p>No account · {health.quotaLabel === 'unavailable' ? 'storage unavailable' : `${health.quotaLabel} available`}</p>
     </div>
 
+    {#if storageUnavailable}
+      <!-- The reason the primary actions cannot be used (attn-n01r.46). They
+           previously used the `disabled` attribute, which removes them from the
+           tab order entirely — a keyboard user never encountered them at all
+           and was never told why. aria-disabled keeps them reachable and
+           announced; this element supplies the explanation they point at. -->
+      <p id="storage-blocked-reason" class="form-error" role="alert">
+        This browser profile cannot store workspaces, so creating and importing are unavailable.
+        Check private-browsing or site-data settings, then reload.
+      </p>
+    {/if}
     <div class="quick-actions">
       <button
         class="quick"
         type="button"
         data-action="new-workspace"
-        disabled={storageUnavailable}
-        onclick={onCreate}
+        aria-disabled={storageUnavailable}
+        aria-describedby={storageUnavailable ? 'storage-blocked-reason' : undefined}
+        onclick={() => {
+          if (storageUnavailable) return;
+          onCreate();
+        }}
       >
-        <span>One click · starts with untitled.md</span>
-        <big>＋ New workspace</big>
+        <strong class="quick-label">New workspace</strong>
+        <span class="quick-note">One click · starts with untitled.md</span>
       </button>
       <button
         class="quick"
         type="button"
         data-action="import-workspace"
-        disabled={storageUnavailable}
-        onclick={() => fileInput?.click()}
+        aria-disabled={storageUnavailable}
+        aria-describedby={storageUnavailable ? 'storage-blocked-reason' : undefined}
+        onclick={() => {
+          if (storageUnavailable) return;
+          fileInput?.click();
+        }}
       >
-        <span>Markdown, images, folders, or zip</span>
-        <big>↥ Import workspace</big>
+        <strong class="quick-label">Import workspace</strong>
+        <span class="quick-note">Markdown, images, folders, or zip</span>
       </button>
-      <a class="quick" href="/app#join" data-action="join-review" onclick={openJoin}>
-        <span>Browser or native link</span>
-        <big>↗ Join a review</big>
+      <a
+        class="quick"
+        href="/app#join"
+        data-action="join-review"
+        bind:this={joinTrigger}
+        aria-expanded={joinOpen}
+        aria-controls="join-panel"
+        onclick={openJoin}
+      >
+        <strong class="quick-label">Join a review</strong>
+        <span class="quick-note">Browser or native link</span>
       </a>
     </div>
     {#if joinOpen}
       <form
+        id="join-panel"
         class="join-panel"
         data-slot="join-panel"
         onsubmit={submitJoin}
@@ -171,15 +314,17 @@
             type="text"
             spellcheck="false"
             autocomplete="off"
+            aria-invalid={joinError ? 'true' : undefined}
+            aria-describedby={joinError ? 'join-error' : 'join-hint'}
             placeholder="https://attn.sh/s/… or attn://review/…"
           />
           <button class="join-go" type="submit">Join</button>
           <button class="join-cancel" type="button" onclick={closeJoin}>Cancel</button>
         </div>
         {#if joinError}
-          <p class="join-error" role="alert">{joinError}</p>
+          <p id="join-error" class="join-error" role="alert">{joinError}</p>
         {:else}
-          <p class="join-hint">
+          <p id="join-hint" class="join-hint">
             The part after <code>#</code> is the room key — it never reaches the relay.
           </p>
         {/if}
@@ -196,15 +341,44 @@
       onchange={onFilesPicked}
     />
     {#if importError}
-      <p role="alert" style="color: var(--rust-deep); font: 0.9rem/1.5 var(--sans);">
+      <p class="form-error" role="alert">
         Import failed: {importError}
       </p>
     {/if}
 
     {#if workspaces.length > 0}
-      <div class="folio-label">Recently on this device</div>
-      {#each workspaces as workspace (workspace.id)}
-        <div class="workspace-row" data-workspace-id={workspace.id}>
+      <!-- A real heading, and a real list (attn-n01r.30). The populated desk
+           previously exposed LESS structure than the empty one: the empty state
+           had an <h2> and the populated state had none, and the rows were a
+           flat run of divs with no list semantics — no "list, N items", no item
+           position, no way to jump to it. -->
+      <div class="folio-head">
+        <h2 class="folio-label" id="recent-workspaces">Recently on this device</h2>
+        <div class="folio-filter">
+          <label class="visually-hidden" for="workspace-filter">Filter workspaces</label>
+          <input
+            id="workspace-filter"
+            bind:this={filterInput}
+            bind:value={filterQuery}
+            type="search"
+            autocomplete="off"
+            spellcheck="false"
+            placeholder="Filter…"
+          />
+          <kbd aria-hidden="true">/</kbd>
+        </div>
+      </div>
+      <p class="visually-hidden" role="status" aria-live="polite">
+        {filterQuery ? `${visibleWorkspaces.length} of ${workspaces.length} workspaces match` : ''}
+      </p>
+      <ul class="workspace-list" aria-labelledby="recent-workspaces">
+      {#each visibleWorkspaces as workspace, index (workspace.id)}
+        <li>
+        <div
+          class="workspace-row"
+          data-workspace-id={workspace.id}
+          data-selected={index === selectedIndex ? 'true' : undefined}
+        >
           {#if renamingId === workspace.id}
             <input
               use:autofocus
@@ -228,32 +402,92 @@
             {workspace.markdownCount + workspace.assetCount === 1 ? 'file' : 'files'}
           </span>
           <span class="detail">{workspace.lastEditedLabel}</span>
+          <!-- sizeLabel is computed in toSummary and was never rendered
+               (attn-n01r.6). Showing it makes an empty workspace legibly empty
+               — "0 B" rather than a name that looks like it holds something.
+               This does not decide what New workspace should create; it stops
+               the desk from hiding the answer. -->
+          <span class="detail detail-size">{workspace.sizeLabel}</span>
+          <!-- Review work outranks file facts on a reviewer's desk
+               (attn-n01r.34): "3 suggestions waiting" is why you would open
+               this workspace; "6 files" is not. Rendered only when the
+               workspace actually has a review log, so a local-only row shows
+               nothing rather than a zero. -->
+          {#if workspace.review && (workspace.review.pendingSuggestions > 0 || workspace.review.openComments > 0)}
+            <span class="detail review-pill" data-slot="review-counts">
+              {#if workspace.review.pendingSuggestions > 0}
+                <span class="review-suggestions">
+                  {workspace.review.pendingSuggestions}
+                  {workspace.review.pendingSuggestions === 1 ? 'suggestion' : 'suggestions'}
+                </span>
+              {/if}
+              {#if workspace.review.openComments > 0}
+                <span class="review-comments">
+                  {workspace.review.openComments}
+                  {workspace.review.openComments === 1 ? 'comment' : 'comments'}
+                </span>
+              {/if}
+            </span>
+          {/if}
           <span class="row-tail">
             {#if workspace.sharing === 'shared'}
               <span class="local-badge" title="The relay stores encrypted envelopes only; the key stays in the link fragment."><span class="dot" aria-hidden="true"></span> Shared · relay sees only ciphertext</span>
             {:else}
               <span>{sharingLabel(workspace.sharing)}</span>
             {/if}
-            <button class="row-action" type="button" onclick={() => startRename(workspace)}>
-              Rename
+            <!-- Icons, not words (attn-n01r.2). These repeat on every row, so at
+                 James's realistic workspace count the three most-repeated words
+                 on the desk were "Rename, Delete, Rename, Delete…". Pencil and
+                 trash are conventional enough to read without the word; both
+                 keep a title for hover and an aria-label naming the workspace,
+                 so nothing is lost to assistive tech or to a first-timer who
+                 hovers. -->
+            <button
+              class="row-action"
+              type="button"
+              title="Rename"
+              aria-label={`Rename ${workspace.name}`}
+              onclick={() => startRename(workspace)}
+            >
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+                   stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 20h9" />
+                <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+              </svg>
             </button>
             <button
               class="row-action danger"
               type="button"
-              onclick={() => (confirmingDeleteId = workspace.id)}
+              title="Delete"
+              aria-label={`Delete ${workspace.name}`}
+              onclick={(event) => openDeleteConfirm(workspace.id, event.currentTarget)}
             >
-              Delete
+              <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+                   stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M3 6h18" />
+                <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" />
+                <path d="M19 6v14a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V6" />
+                <path d="M10 11v6M14 11v6" />
+              </svg>
             </button>
           </span>
         </div>
         {#if confirmingDeleteId === workspace.id}
-          <div class="confirm-clear" role="alertdialog" aria-label={`Delete ${workspace.name}?`}>
+          <!-- svelte-ignore a11y_no_noninteractive_element_to_interactive_role -->
+          <div
+            class="confirm-clear"
+            role="alertdialog"
+            aria-modal="true"
+            tabindex="-1"
+            use:autofocus
+            aria-label={`Delete ${workspace.name}?`}
+          >
             <strong>Delete “{workspace.name}” from this device?</strong>
             <p style="margin: 0.3rem 0 0; color: var(--hosted-muted);">
               This cannot be undone. Export it first if you need a copy.
             </p>
             <div class="actions">
-              <button class="button" type="button" onclick={() => (confirmingDeleteId = null)}>
+              <button class="button" type="button" onclick={cancelDelete}>
                 Cancel
               </button>
               <button
@@ -262,6 +496,7 @@
                 onclick={async () => {
                   await onDelete(workspace.id);
                   confirmingDeleteId = null;
+                  deleteTrigger = undefined;
                 }}
               >
                 Delete workspace
@@ -269,17 +504,32 @@
             </div>
           </div>
         {/if}
+        </li>
       {/each}
+      </ul>
     {:else if !storageUnavailable}
-      <div class="folio-label">Your first sheet</div>
-      <article class="empty-desk" aria-label="A half-written Markdown sheet, waiting">
-        <div class="meta">UNTITLED.MD · NOT CREATED YET</div>
-        <h2>What deserves your attention?</h2>
-        <p>
+      <h2 class="folio-label">Your first sheet</h2>
+      <!-- A button, not an <article> (attn-n01r.35). This is the largest,
+           warmest, most document-like object on the first-run screen and it had
+           no click handler at all — every first-time user clicks it. It is also
+           the same offer as the tile above, so it now performs that offer
+           rather than restating it.
+           The old aria-label ("A half-written Markdown sheet, waiting") named
+           the region with art direction that explained nothing about what to do
+           and contradicted its own content; the button's text is its name. -->
+      <button
+        class="empty-desk"
+        type="button"
+        disabled={storageUnavailable}
+        onclick={onCreate}
+      >
+        <span class="meta">UNTITLED.MD · NOT CREATED YET</span>
+        <span class="empty-desk-title">What deserves your attention?</span>
+        <span class="empty-desk-body">
           Start with one blank Markdown file. It stays on this device — no account, no upload,
           <span class="cursor-line">no naming step.&nbsp;<span class="caret" aria-hidden="true"></span></span>
-        </p>
-      </article>
+        </span>
+      </button>
     {/if}
   </main>
 </div>

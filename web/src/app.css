@@ -1,3 +1,33 @@
+/* THE CASCADE MODEL (design-system consolidation, 2026-08-08).
+
+   One explicit order, declared before Tailwind can declare its own four:
+
+     theme < base < chrome < doc < components < utilities
+
+   - base:       Tailwind preflight + the app ground (html/body, grain).
+   - chrome:     bare-tag RESETS the hosted shell applies to its own chrome
+                 (chrome.css's `a { color: inherit }` family). Below doc BY
+                 DESIGN: a reset must never erase document grammar.
+   - doc:        the document grammar — everything `.attn-doc`-scoped in
+                 base.css (typography, links, tables, code surfaces). Beats
+                 resets; loses to editor mechanics and utilities.
+   - components: editor mechanics (prosemirror.css), syntax highlighting,
+                 app component chrome.
+   - utilities:  Tailwind. A `mt-4` on a doc element now genuinely wins,
+                 which retires the old "margin utilities silently lose
+                 inside islands" trap.
+
+   Before this, base.css sat wholesale in `@layer base` and prosemirror.css
+   in `@layer components`, which forced the table surface to be declared
+   TWICE (components-beats-base, both files carried a documented twin), and
+   forced the prose-link rule to hide OUTSIDE all layers to survive the
+   hosted chrome reset. The doc tier is what lets each rule live exactly
+   once. Every rule still outside a layer is an enumerated escape hatch with
+   its reason attached: the Truth Rule below (must beat tw-animate
+   utilities), the sidebar hard overrides (beat utility classes), and the
+   scrollbar rules in base.css (native-widget override). */
+@layer theme, base, chrome, doc, components, utilities;
+
 @import "tailwindcss";
 
 /* The hosted Vite build is rooted at `web/hosted`, while the Svelte UI lives
@@ -49,7 +79,24 @@
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-ring: var(--sidebar-ring);
   --color-code-block: var(--code-block);
+  /* The second step of the embedded tier (attn-evme.3). Aliased for the same
+     reason every other token here is: a utility that resolves to nothing fails
+     silently, and the next component that needs a nested block surface should
+     find `bg-code-block-nested` rather than reach for --background and
+     reintroduce the inversion this token exists to fix. */
+  --color-code-block-nested: var(--code-block-nested);
   --color-blockquote-bar: var(--blockquote-bar);
+
+  /* The micro end of the DESIGN.md type ramp (ratified 2026-08-08).
+     11px was the most-used chrome size in the app (58 arbitrary
+     `text-[11px]` utilities) while officially not existing; 10px is the
+     FLOOR — no visible text below it. Size-only tokens, deliberately: a
+     `--text-*--line-height` companion would make these utilities set
+     line-height too, and the arbitrary values they replace set only
+     font-size — the sweep must be behavior-identical. */
+  --text-micro: 0.6875rem;
+  --text-badge: 0.625rem;
+  --text-meta: 0.78rem;
 }
 
 /* The Truth Rule (Theme v2, attn-hg5): a closed overlay must never paint or
@@ -70,6 +117,88 @@
   [data-slot="tooltip-content"]
 )[data-state="closed"] {
   display: none !important;
+}
+
+/* ---------------------------------------------------------------------------
+   THE HEADER IS AN ACCENT PLANE (2026-08-10, owner-directed).
+
+   The bar is `--header-surface`, which is `--primary` itself. That makes every
+   control on it wrong by default: the whole header vocabulary is written in
+   `--foreground`, `--muted-foreground`, `--accent` and — worst — `--primary`,
+   which is now the ground those controls sit ON. The active-state convention
+   (`bg-primary/10` + `border-primary/35` + `text-primary`, attn-11g4.6) would
+   be an invisible accent-on-accent pill.
+
+   Rather than rewrite ~8 components' class strings, the header RE-POINTS the
+   tokens for its own subtree. Every Tailwind utility inside — `text-muted-
+   foreground`, `bg-accent`, `border-primary/35`, `text-primary` — resolves
+   through `--color-*: var(--*)` in the @theme block above, so they all adapt
+   with no component edits. The translation is exact: on this plane the pencil
+   IS the on-accent foreground, so "active" still reads as a filled, outlined
+   pill and "muted" still reads as a step back.
+
+   POLARITY FLIPS BETWEEN THEMES and that is why nothing here is hard-coded to
+   white: Paper's accent is dark (0.48) so its foreground is near-white, while
+   Ink's is light (0.72) so its foreground is near-black. `--primary-foreground`
+   is correct in both, `white` would be correct in one.
+
+   --amber-deep goes with them: the dirty save glyph's amber has no contrast on
+   terracotta. DESIGN.md already states the save chip's real signal is the
+   GLYPH (disk+pen vs disk+check), not the tint, so flattening both states to
+   the on-accent foreground costs nothing that was carrying meaning.
+
+   THE POPOVERS OPT OUT below. ShareChip, SnapshotBadge, OutboxIndicator and
+   PeerStrip render their floating cards INSIDE the header subtree (deliberately
+   — they are absolutely positioned rather than portalled, so they cannot be
+   torn away by the overflow-prone dock row). Those cards are their own
+   surface, not the accent plane, so they restore the ordinary palette from the
+   `--chrome-*` values captured at :root. Portalled menus (bits-ui dropdowns)
+   escape the subtree and need nothing. */
+:is(
+  [data-slot="native-header"],
+  [data-slot="owner-header"],
+  [data-slot="browser-review-header"]
+) {
+  --foreground: var(--primary-foreground);
+  --muted-foreground: color-mix(in oklch, var(--primary-foreground) 80%, transparent);
+  --faint-foreground: color-mix(in oklch, var(--primary-foreground) 62%, transparent);
+  --primary: var(--primary-foreground);
+  --accent: color-mix(in oklch, var(--primary-foreground) 16%, transparent);
+  --accent-foreground: var(--primary-foreground);
+  --border: color-mix(in oklch, var(--primary-foreground) 34%, transparent);
+  --input: color-mix(in oklch, var(--primary-foreground) 34%, transparent);
+  --ring: var(--primary-foreground);
+  --amber-deep: var(--primary-foreground);
+  --muted: color-mix(in oklch, var(--primary-foreground) 14%, transparent);
+  color: var(--primary-foreground);
+}
+
+/* The floating cards are NOT the accent plane. Restoring from the captured
+   root values keeps this honest — no literal is repeated, and a palette change
+   moves the popovers with everything else. */
+:is(
+  [data-slot="native-header"],
+  [data-slot="owner-header"],
+  [data-slot="browser-review-header"]
+)
+  :is(
+    [data-slot="share-chip-popover"],
+    [data-slot="snapshot-badge-popover"],
+    [data-slot="outbox-indicator-popover"],
+    [data-slot="peer-strip-identity-card"],
+    [data-slot="peer-strip-overflow-popover"]
+  ) {
+  --foreground: var(--chrome-foreground);
+  --muted-foreground: var(--chrome-muted-foreground);
+  --faint-foreground: var(--chrome-muted-foreground);
+  --primary: var(--chrome-primary);
+  --accent: var(--chrome-accent);
+  --accent-foreground: var(--chrome-accent-foreground);
+  --border: var(--chrome-border);
+  --input: var(--chrome-border);
+  --ring: var(--chrome-ring);
+  --amber-deep: var(--chrome-amber-deep);
+  color: var(--popover-foreground);
 }
 
 [data-sidebar] ul {
@@ -103,6 +232,46 @@
     box-shadow: none;
   }
 
+  /* Grid items default to `min-width: auto`, which means they refuse to shrink
+     below their own min-content — and the filter's min-content is dominated by
+     the text input's INTRINSIC width (an <input> is sized from its `size`
+     attribute, 20 characters ≈ 130px, whatever CSS says about `min-width: 0`
+     on the input itself; that declaration governs flex shrinking INSIDE the
+     filter, not the filter's contribution to the grid).
+     The sidebar is user-resizable down to SIDEBAR_MIN_WIDTH (180px), so at the
+     bottom of that range the 194px filter bar simply hung out over the
+     document — reported on the desktop app, where a narrow window is normal.
+     `min-width: 0` lets every control shrink with the column; the input's own
+     `min-width: 0` then does the rest, and `size="1"` (Sidebar.svelte) removes
+     the intrinsic floor so the two agree. */
+  .project-sidebar .sidebar-controls[data-sidebar-controls="true"] > * {
+    min-width: 0;
+  }
+
+  /* Brand row (attn-64iy.5) — browser tabs only, where the top-left corner is
+     not the traffic lights'. Deliberately quiet: it names the product once, at
+     the top of the chrome, and then gets out of the way. The wordmark matches
+     the header's (serif, 14px, bold) so moving between shells does not look
+     like moving between two apps. No rule beneath it — the project row below
+     already draws one, and two hairlines 30px apart reads as a stack of
+     panels rather than one column of furniture. */
+  .sidebar-brand {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    padding-bottom: 2px;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+  .sidebar-brand-word {
+    font-family: var(--serif);
+    font-size: 0.875rem;
+    font-weight: 700;
+    line-height: 1;
+    color: var(--sidebar-foreground);
+  }
+
   /* Project identity row: the small-caps label + a hairline rule beneath it. */
   .sidebar-project-row {
     display: flex;
@@ -123,7 +292,7 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-    font-family: "Source Sans 3 Variable", "Source Sans 3", -apple-system, system-ui, sans-serif;
+    font-family: var(--sans);
     font-size: 0.7rem;
     font-weight: 600;
     line-height: 1.2;
@@ -182,7 +351,7 @@
     border-radius: inherit;
     border: 0;
     background: transparent;
-    font-family: "Source Sans 3 Variable", "Source Sans 3", -apple-system, system-ui, sans-serif;
+    font-family: var(--sans);
   }
 
   .sidebar-project-command [data-slot="command-input-wrapper"] {
@@ -207,7 +376,7 @@
     gap: 8px;
     white-space: nowrap;
     overflow: hidden;
-    font-family: "Source Sans 3 Variable", "Source Sans 3", -apple-system, system-ui, sans-serif;
+    font-family: var(--sans);
     font-size: 0.95rem;
     line-height: 1.25;
   }
@@ -257,7 +426,7 @@
      same type as the project rows, indented past the check gutter. */
   .sidebar-project-menu-action {
     padding-inline-start: calc(0.5rem + 8px + 0.875rem);
-    font-family: "Source Sans 3 Variable", "Source Sans 3", -apple-system, system-ui, sans-serif;
+    font-family: var(--sans);
     font-size: 0.95rem;
     line-height: 1.25;
     cursor: pointer;
@@ -296,7 +465,7 @@
     border: 0;
     background: transparent;
     cursor: pointer;
-    font-family: "Source Sans 3 Variable", "Source Sans 3", -apple-system, system-ui, sans-serif;
+    font-family: var(--sans);
     font-size: 0.7rem;
     font-weight: 600;
     line-height: 1.2;
@@ -338,8 +507,15 @@
     background: transparent;
   }
 
-  /* Borderless filter: transparent furniture that draws its box only on focus.
-     One control height; radius on the DESIGN.md scale (md = 8px). */
+  /* Filter with a STANDING box (attn-64iy.7).
+     One control height; radius on the DESIGN.md scale (md = 8px).
+
+     This was borderless furniture that drew its box only on focus. The intent
+     was restraint in a column of quiet editorial furniture, but the control is
+     a text input with a `/` shortcut hint sitting beside it, and until you
+     clicked it there was nothing to say so — it read as a label that happened
+     to have a magnifier next to it. The box is the resting state now; the
+     values below are exactly what `:focus-within` used to paint. */
   .sidebar-filter {
     display: flex;
     align-items: center;
@@ -347,17 +523,28 @@
     height: 30px;
     padding: 0 8px;
     border-radius: 8px;
-    border: 1px solid transparent;
-    background: transparent;
-    transition: border-color var(--t) var(--ease), background-color var(--t) var(--ease);
-  }
-  .sidebar-filter:focus-within {
-    border-color: color-mix(in oklch, var(--sidebar-foreground) 16%, transparent);
+    border: 1px solid color-mix(in oklch, var(--sidebar-foreground) 16%, transparent);
     background: color-mix(in oklch, var(--sidebar-foreground) 4%, transparent);
+    transition: border-color var(--t) var(--ease), background-color var(--t) var(--ease),
+      box-shadow var(--t) var(--ease);
   }
-  .dark .sidebar-filter:focus-within {
+  .dark .sidebar-filter {
     border-color: color-mix(in oklch, white 14%, transparent);
     background: color-mix(in oklch, white 5%, transparent);
+  }
+  /* Focus needs a signal of its own now that the box no longer IS one.
+     The accent rather than a heavier neutral: DESIGN.md reserves the one
+     pencil for action, selection and focus, and a border stepping from 16% to
+     ~24% of the same ink would be close to invisible against the standing box
+     it has to beat. The ring is the affordance and the input still opts out of
+     the global one below, so there remains exactly one indicator. */
+  .sidebar-filter:focus-within {
+    border-color: color-mix(in oklch, var(--primary) 55%, transparent);
+    box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 22%, transparent);
+  }
+  .dark .sidebar-filter:focus-within {
+    border-color: color-mix(in oklch, var(--primary) 62%, transparent);
+    box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 26%, transparent);
   }
   .sidebar-filter-icon {
     flex: none;
@@ -375,11 +562,13 @@
     outline: none;
     background: transparent;
     color: color-mix(in oklch, var(--sidebar-foreground) 92%, transparent);
-    font-family: "Source Sans 3 Variable", "Source Sans 3", -apple-system, system-ui, sans-serif;
+    font-family: var(--sans);
     /* Tailwind preflight forces `input { font-size: inherit }` from a winning
        layer, so the size needs `!important` to land at the chrome scale rather
        than inheriting the 15.5px reading size. */
-    font-size: 0.82rem !important;
+    /* chrome-sm, matching the tree rows directly below the filter (and inside
+       DESIGN.md's own 0.82–0.95 input range — was a bespoke 0.82). */
+    font-size: 0.875rem !important;
     line-height: 1.2;
   }
   /* The placeholder IS the filter's only label — keep it at AA (≥4.5:1). */
@@ -387,9 +576,10 @@
     color: color-mix(in oklch, var(--sidebar-foreground) 74%, transparent);
     opacity: 1;
   }
-  /* The focus affordance lives on the container box (`:focus-within`), so the
-     input opts out of the global rust focus ring (`* { outline-ring }` reset) —
-     one quiet indicator, not two. `!important` overrides that cross-layer reset. */
+  /* The focus affordance lives on the container (`:focus-within`, which paints
+     the accent ring above), so the input opts out of the global rust focus ring
+     (`* { outline-ring }` reset) — one indicator, not two. `!important`
+     overrides that cross-layer reset. */
   .sidebar-filter-input:focus,
   .sidebar-filter-input:focus-visible {
     outline: none !important;
@@ -401,8 +591,8 @@
     border-radius: 6px;
     border: 1px solid color-mix(in oklch, var(--sidebar-foreground) 16%, transparent);
     color: color-mix(in oklch, var(--sidebar-foreground) 55%, transparent);
-    font-family: "Source Code Pro Variable", "Source Code Pro", monospace;
-    font-size: 0.68rem;
+    font-family: var(--mono);
+    font-size: 0.6875rem; /* micro */
     line-height: 1.4;
   }
   .sidebar-filter-clear {
@@ -427,7 +617,7 @@
   .sidebar-tree-menu [data-sidebar="menu-button"],
   .sidebar-tree-menu [data-sidebar="menu-sub-button"] {
     position: relative;
-    border-radius: 9px;
+    border-radius: 8px; /* md */
     min-height: 34px;
     max-height: 34px;
     margin-bottom: 2px;
@@ -596,14 +786,19 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-width: 0.56rem;
-    width: 0.56rem;
-    height: 0.56rem;
-    border-radius: 999px;
+    /* 12px dot so the count inside can sit at the 10px floor. It was a 9px dot
+       carrying a 7.7px numeral — text that existed to be unreadable. The floor
+       rule (DESIGN.md Typography, ratified 2026-08-08) is that no visible text
+       ships below 10px: either the numeral is legible or it belongs entirely
+       to the title/aria-label, and this badge already carries both. */
+    min-width: 0.75rem;
+    width: 0.75rem;
+    height: 0.75rem;
+    border-radius: 9999px;
     border: 1px solid color-mix(in oklch, var(--background) 86%, white 14%);
     background: var(--peer-avatar-bg-reviewer);
     color: white;
-    font-size: 0.48rem;
+    font-size: 0.625rem; /* badge — the floor */
     font-weight: 800;
     line-height: 1;
     box-shadow:
@@ -636,22 +831,6 @@
     opacity: 0.85;
   }
 
-  .sidebar-tree-meta {
-    flex: 0 0 auto;
-    border-radius: 999px;
-    min-width: 1.9rem;
-    height: 1.15rem;
-    padding: 0 0.4rem;
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 0.56rem;
-    line-height: 1;
-    font-weight: 700;
-    letter-spacing: 0.06em;
-    color: color-mix(in oklch, var(--sidebar-foreground) 78%, transparent);
-    background: color-mix(in oklch, var(--foreground) 9%, transparent);
-  }
 
   .sidebar-outline-list {
     display: flex;
@@ -676,7 +855,7 @@
     gap: 10px;
     width: 100%;
     min-height: 34px;
-    border-radius: 9px;
+    border-radius: 8px; /* md */
     border: 1px solid transparent;
     padding: 0 8px 0 calc(8px + max(0, var(--outline-level) - 1) * 10px);
     text-align: left;
@@ -705,7 +884,7 @@
 
   .sidebar-outline-line {
     flex: 0 0 auto;
-    font-size: 0.62rem;
+    font-size: 0.625rem; /* badge */
     font-weight: 700;
     letter-spacing: 0.05em;
     color: color-mix(in oklch, var(--sidebar-foreground) 66%, transparent);
@@ -715,19 +894,22 @@
     border: 1px dashed color-mix(in oklch, var(--foreground) 16%, transparent);
     border-radius: 10px;
     padding: 12px;
-    margin: 0;
+    /* Inset to the same 10px gutter `.sidebar-outline-wrap` gives its rows, so
+       the card lines up with the filter and the file list instead of running
+       edge to edge. */
+    margin: 0 10px 12px;
     background: color-mix(in oklch, var(--background) 75%, white 25%);
   }
 
   .sidebar-outline-empty-title {
-    font-size: 0.8rem;
+    font-size: 0.78rem; /* meta */
     font-weight: 650;
     color: var(--foreground);
   }
 
   .sidebar-outline-empty-copy {
     margin-top: 4px;
-    font-size: 0.75rem;
+    font-size: 0.75rem; /* chrome-xs */
     line-height: 1.4;
     color: color-mix(in oklch, var(--sidebar-foreground) 88%, transparent);
   }
@@ -760,8 +942,16 @@
      "suggesting mode" surface. Green to read as "added", slightly inset so
      it's visually distinct from the author's own prose. */
   .attn-suggestion-ghost {
-    background-color: color-mix(in oklab, oklch(0.72 0.18 150) 22%, transparent);
-    color: color-mix(in oklab, oklch(0.45 0.16 150) 90%, var(--foreground));
+    /* Derived from the theme-aware suggestion tokens, not literal greens
+       (design-system consolidation, 2026-08-08). The literals were one set of
+       values for both themes: a 0.45-lightness green mixed 90% over
+       --foreground reads as intended on paper, but in Ink --foreground is
+       light and the mix stayed DARK green on a near-black page. Deriving from
+       --review-card-suggestion-accent (0.58 Paper / 0.74 Ink) flips with the
+       theme, and keeps ghost text in the same family as the suggestion cards
+       and inline marks it previews. */
+    background-color: var(--suggestion-bg);
+    color: color-mix(in oklab, var(--review-card-suggestion-accent) 90%, var(--foreground));
     border-radius: 2px;
     padding: 0 2px;
     margin-inline-start: 2px;
@@ -796,10 +986,10 @@
     align-items: center;
     gap: 4px;
     padding: 1px 7px;
-    border-radius: 999px;
+    border-radius: 9999px;
     background: var(--moved-badge-bg);
     color: var(--moved-badge-fg);
-    font-size: 0.68rem;
+    font-size: 0.6875rem; /* micro */
     font-weight: 600;
     line-height: 1.2;
     letter-spacing: 0.02em;
@@ -817,7 +1007,7 @@
       width: 17px;
       height: 17px;
       margin-left: 0.18rem;
-      border-radius: 999px;
+      border-radius: 9999px;
       background: var(--rust);
       color: var(--rust-contrast);
       font: 700 0.58rem var(--sans);
@@ -848,7 +1038,7 @@
   min-height: 36px;
   padding: 0 12px;
   border-radius: 10px;
-  font-family: "Source Sans 3 Variable", "Source Sans 3", -apple-system, system-ui, sans-serif;
+  font-family: var(--sans);
   font-size: 0.95rem;
   line-height: 1.2;
 }
@@ -864,14 +1054,14 @@
   padding-inline-end: 12px;
   gap: 8px;
   align-items: center;
-  font-family: "Source Sans 3 Variable", "Source Sans 3", -apple-system, system-ui, sans-serif;
+  font-family: var(--sans);
 }
 
 .sidebar-project-menu[data-slot="dropdown-menu-content"] [data-slot="command-input"] {
   height: 36px;
   padding-block: 0;
   padding-inline: 2px 0;
-  font-family: "Source Sans 3 Variable", "Source Sans 3", -apple-system, system-ui, sans-serif;
+  font-family: var(--sans);
   font-size: 0.95rem;
   line-height: 1.2;
 }
@@ -880,7 +1070,7 @@
   margin: 2px 6px;
   padding: 8px 12px;
   border-radius: 8px;
-  font-family: "Source Sans 3 Variable", "Source Sans 3", -apple-system, system-ui, sans-serif;
+  font-family: var(--sans);
   font-size: 0.95rem;
   line-height: 1.25;
 }
@@ -936,7 +1126,7 @@
 /* A peer's live selection: translucent band in their color. color-mix keeps
    the underlying text fully readable in both themes. */
 .attn-remote-selection {
-  background: color-mix(in srgb, var(--remote-selection-color, #8a63b8) 22%, transparent);
+  background: color-mix(in srgb, var(--remote-selection-color, var(--peer-avatar-bg-agent)) 22%, transparent);
   border-radius: 2px;
 }
 
@@ -947,8 +1137,8 @@
 .attn-remote-selection-shared {
   background: repeating-linear-gradient(
     135deg,
-    color-mix(in srgb, var(--remote-selection-color, #8a63b8) 24%, transparent) 0 7px,
-    color-mix(in srgb, var(--remote-selection-color-2, #8a63b8) 24%, transparent) 7px 14px
+    color-mix(in srgb, var(--remote-selection-color, var(--peer-avatar-bg-agent)) 24%, transparent) 0 7px,
+    color-mix(in srgb, var(--remote-selection-color-2, var(--peer-avatar-bg-agent)) 24%, transparent) 7px 14px
   );
 }
 
@@ -974,7 +1164,7 @@
   top: calc(-1.15em - var(--attn-caret-stack, 0) * 1.6em);
   left: -2px;
   padding: 1px 4px;
-  border-radius: 3px;
+  border-radius: 2px; /* micro */
   font-size: 10px;
   font-weight: 600;
   line-height: 1.2;
@@ -1031,7 +1221,7 @@
   top: 50%;
   width: 3px;
   height: 16px;
-  border-radius: 999px;
+  border-radius: 9999px;
   background: var(--attn-view-marker-color);
   box-shadow: 0 0 0 1px var(--background);
   opacity: 0.82;
@@ -1053,7 +1243,12 @@
   border-radius: 6px;
   background: var(--popover);
   color: var(--popover-foreground);
-  font-family: var(--font-sans, "Source Sans 3 Variable", "Source Sans 3", sans-serif);
+  /* --sans directly. The old `var(--font-sans, "Source Sans 3 …")` looked like
+     Source Sans with a safety net, but Tailwind's default theme DEFINES
+     --font-sans (a generic ui-sans-serif stack), so that is what actually
+     rendered — the Source Sans fallback was dead text and this label was the
+     one piece of chrome quietly set in the system font. */
+  font-family: var(--sans);
   font-size: 0.7rem;
   font-weight: 600;
   line-height: 1;
@@ -1075,7 +1270,7 @@
   height: 16px;
   align-items: center;
   justify-content: center;
-  border-radius: 999px;
+  border-radius: 9999px;
   background: var(--attn-view-marker-color);
   color: white;
   font-size: 0.7rem;
@@ -1129,26 +1324,28 @@
 /* Inline suggesting mode (track changes, attn-07i.2). Reviewer suggestions
    render as colored, attributed inline marks: green insertions, red
    strikethrough deletions. The owner accepts/rejects; the file stays clean. */
+/* Colours come from the review tokens, not Tailwind's palette (design-system
+   consolidation, 2026-08-08). These marks previously used Tailwind hexes —
+   green-700/#15803d, red-700/#b91c1c and their dark variants — which are COOL
+   greens and reds from a different system. attn's own vocabulary is the
+   150-hue suggestion green and the 27-hue destructive clay, and the product
+   principle is one vocabulary for review marks everywhere: a `del` here must
+   be the same red as `.attn-review-suggestion--deletion`, because they are the
+   same statement made by two renderers. The tokens are theme-aware, so the
+   :root.dark colour overrides that existed only to re-state the hexes are
+   gone rather than migrated. */
 .ProseMirror ins[data-id] {
   text-decoration: none;
-  color: #15803d;
-  background: rgba(34, 197, 94, 0.16);
+  color: var(--review-card-suggestion-accent);
+  background: var(--suggestion-bg);
   border-radius: 2px;
   box-decoration-break: clone;
 }
 .ProseMirror del[data-id] {
   text-decoration: line-through;
   text-decoration-thickness: 1px;
-  color: #b91c1c;
-  background: rgba(239, 68, 68, 0.13);
+  color: var(--destructive);
+  background: var(--suggestion-deletion);
   border-radius: 2px;
   box-decoration-break: clone;
-}
-:root.dark .ProseMirror ins[data-id] {
-  color: #4ade80;
-  background: rgba(34, 197, 94, 0.18);
-}
-:root.dark .ProseMirror del[data-id] {
-  color: #f87171;
-  background: rgba(239, 68, 68, 0.16);
 }

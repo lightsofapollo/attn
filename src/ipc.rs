@@ -38,11 +38,24 @@ pub enum IpcMessage {
     #[serde(rename = "theme_change")]
     ThemeChange { theme: String },
 
+    #[serde(rename = "typeset_change")]
+    TypesetChange { typeset: String },
+
+    /// The user finished dragging the review rail's edge (attn-11g4.2).
+    /// `f64`, not `u32`: a fractional or negative width should reach
+    /// `prefs::normalize_rail_width` and be rejected there, rather than fail
+    /// deserialization and be dropped as an unparseable message.
+    #[serde(rename = "rail_width_change")]
+    RailWidthChange { width: f64 },
+
     #[serde(rename = "open_external")]
     OpenExternal { path: String },
 
     #[serde(rename = "drag_window")]
     DragWindow,
+
+    #[serde(rename = "zoom_window")]
+    ZoomWindow,
 
     #[serde(rename = "open_devtools")]
     OpenDevtools,
@@ -250,6 +263,19 @@ pub struct RoomRuntimeHandle {
 /// would surface. Every other message is privileged and must present the exact
 /// session token. An empty `expected` (e.g. a `getrandom` failure that minted
 /// no token) fails closed: nothing privileged is authorized.
+/// Saturate a wire rail width into whole pixels before the range gate.
+///
+/// NaN/±inf and absurd magnitudes become an obviously-invalid `0` rather than
+/// riding an `as` cast into a plausible-looking number;
+/// `prefs::normalize_rail_width` then rejects it back to the default.
+fn rail_width_px(width: f64) -> u32 {
+    if width.is_finite() {
+        width.round().clamp(0.0, f64::from(u32::MAX)) as u32
+    } else {
+        0
+    }
+}
+
 fn ipc_message_authorized(msg_type: &str, expected: &str, provided: Option<&str>) -> bool {
     const TOKENLESS: &[&str] = &["js_log", "js_error"];
     if TOKENLESS.contains(&msg_type) {
@@ -350,7 +376,26 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
                 }
             }
             IpcMessage::ThemeChange { theme } => {
-                tracing::info!("theme change: {}", theme);
+                // Persist the PREFERENCE (light/dark/system), not the resolved
+                // appearance — so a `system` user keeps following the OS across
+                // restarts instead of freezing at whatever it was that night.
+                tracing::info!("theme preference: {}", theme);
+                if let Err(err) = crate::prefs::set_theme(&theme) {
+                    tracing::warn!("could not persist theme preference: {}", err);
+                }
+            }
+            IpcMessage::TypesetChange { typeset } => {
+                tracing::info!("typeset preference: {}", typeset);
+                if let Err(err) = crate::prefs::set_typeset(&typeset) {
+                    tracing::warn!("could not persist typeset preference: {}", err);
+                }
+            }
+            IpcMessage::RailWidthChange { width } => {
+                let px = rail_width_px(width);
+                tracing::info!("review rail width: {}px", px);
+                if let Err(err) = crate::prefs::set_rail_width(px) {
+                    tracing::warn!("could not persist rail width preference: {}", err);
+                }
             }
             IpcMessage::OpenExternal { path } => {
                 if !path.is_empty()
@@ -361,6 +406,9 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
             }
             IpcMessage::DragWindow => {
                 let _ = proxy.send_event(UserEvent::DragWindow);
+            }
+            IpcMessage::ZoomWindow => {
+                let _ = proxy.send_event(UserEvent::ZoomWindow);
             }
             IpcMessage::OpenDevtools => {
                 let _ = proxy.send_event(UserEvent::OpenDevtools);
@@ -1306,5 +1354,57 @@ mod tests {
         assert!(!ipc_message_authorized("navigate", "", None));
         // Diagnostics remain allowed regardless.
         assert!(ipc_message_authorized("js_error", "", None));
+    }
+
+    /// A rail resize is a write to prefs.json, so it is privileged like every
+    /// other preference message — a sandboxed HtmlViewer iframe must not be
+    /// able to rewrite the user's layout.
+    #[test]
+    fn rail_width_change_is_privileged() {
+        assert!(!ipc_message_authorized("rail_width_change", "secret", None));
+        assert!(!ipc_message_authorized(
+            "rail_width_change",
+            "secret",
+            Some("guess")
+        ));
+        assert!(ipc_message_authorized(
+            "rail_width_change",
+            "secret",
+            Some("secret")
+        ));
+    }
+
+    /// The wire field is `f64` on purpose: a fractional width must *parse* and
+    /// then be normalized, not fail deserialization and vanish silently.
+    #[test]
+    fn rail_width_change_parses_a_fractional_wire_width() {
+        let value: serde_json::Value =
+            serde_json::from_str(r#"{"type":"rail_width_change","width":417.6}"#).expect("json");
+        match serde_json::from_value::<IpcMessage>(value).expect("variant") {
+            IpcMessage::RailWidthChange { width } => {
+                assert_eq!(rail_width_px(width), 418);
+                assert_eq!(crate::prefs::normalize_rail_width(418), 418);
+            }
+            other => panic!("wrong variant: {other:?}"),
+        }
+    }
+
+    /// Degenerate widths saturate to 0, which `normalize_rail_width` then
+    /// rejects back to the default — the pair is what keeps a hostile or buggy
+    /// sender from writing a rail the user cannot see.
+    #[test]
+    fn degenerate_rail_widths_saturate_then_reject() {
+        for width in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, -1e300] {
+            assert_eq!(rail_width_px(width), 0, "width {width}");
+        }
+        assert_eq!(rail_width_px(1e300), u32::MAX);
+        assert_eq!(
+            crate::prefs::normalize_rail_width(0),
+            crate::prefs::RAIL_WIDTH_DEFAULT
+        );
+        assert_eq!(
+            crate::prefs::normalize_rail_width(u32::MAX),
+            crate::prefs::RAIL_WIDTH_DEFAULT
+        );
     }
 }

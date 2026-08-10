@@ -11,10 +11,23 @@
     box-sizing: border-box;
 }
 
-/* Global font scaling (Cmd/Ctrl + / - / 0) */
+/* Global font scaling (Cmd/Ctrl + / - / 0).
+
+   `--attn-base-font-size` is the rem baseline for the WHOLE app — chrome
+   included — so it is deliberately typeset-invariant. A typeset preset that
+   changes it rescales every header, dialog, and control on the page; that is
+   the bug the doc-scoped tokens below exist to prevent. See typeset.css. */
 :root {
     --attn-base-font-size: 15.5px;
     --attn-font-scale: 1;
+
+    /* Document-scoped type tokens — the only surface a typeset preset owns.
+       Defaults here ARE the editorial preset, so an unstamped document (a
+       test harness, a bare embed) renders exactly as the default. */
+    --doc-font: var(--serif);
+    --attn-doc-scale: 1;
+    --doc-leading: 1.72;
+    --doc-tracking: 0.003em;
 }
 
 html {
@@ -75,35 +88,74 @@ nav,
     font-family: var(--sans);
 }
 
+}
+
+/* ---------------------------------------------------------------------------
+   Document typography — `@layer doc` (cascade model, see app.css).
+
+   Everything below (through images) is scoped to .attn-doc — the class the
+   editor's .prosemirror-mount carries. App chrome sharing the same tree gets
+   none of it, which retires the .attn-chrome opt-out whack-a-mole this file
+   used to need.
+
+   The doc tier exists so this grammar can be declared ONCE: it beats the
+   hosted chrome resets (`@layer chrome`) without hiding outside the layers,
+   and loses to editor mechanics (`@layer components`) and Tailwind utilities
+   — so prosemirror.css no longer has to restate the table surface to defend
+   it, and a margin utility on a doc element behaves the way anyone would
+   expect. */
+@layer doc {
+
 /* Reading surface: left-set sheet, one shared content column — prose and
    wide blocks (tables, mermaid, code) all cap at the same edge; oversized
    tables scroll within it (Shared-Column Rule, 2026-07-13). */
-article {
-    max-width: none;
-    margin: 0;
-    padding: 2.5rem clamp(1rem, 2.8vw, 2rem) 6rem;
+/* The document's own type context. Everything inside sizes off THIS element
+   (em), not the root (rem), so a typeset can rescale the reading column
+   without moving a single pixel of app chrome. At `--attn-doc-scale: 1`,
+   1em === 1rem and the rendering is identical to the pre-token layout. */
+.attn-doc {
+    font-family: var(--doc-font);
+    font-size: calc(1rem * var(--attn-doc-scale));
+    line-height: var(--doc-leading);
+    letter-spacing: var(--doc-tracking);
 }
 
-article > :is(p, h1, h2, h3, h4, h5, h6, ul, ol, dl, blockquote, pre, table, .mermaid-container, .prose-scroll-x) {
-    max-width: var(--content-measure);
-    margin-inline: auto;
-}
+/* THERE IS ONE DOCUMENT SURFACE (design-system consolidation, 2026-08-08).
+   It is the editor mount: `div.prosemirror-mount.attn-doc > div.ProseMirror`
+   (Editor.svelte). The static `<article class="attn-doc">` renderer this file
+   originally styled (Viewer.svelte, comrak HTML) had lost every caller — the
+   editor took over all markdown rendering — so the component and the
+   `article.attn-doc` child-combinator rules that could only match its DOM are
+   deleted, not kept "just in case": a selector that can never match is where
+   the next person hides a fix that never applies.
 
-/* Typography scale */
-h1 { font-size: 2rem; line-height: 1.18; margin-top: 2.5rem; margin-bottom: 0.75rem; font-weight: 700; letter-spacing: -0.02em; }
-h2 { font-size: 1.5rem; line-height: 1.24; margin-top: 2.25rem; margin-bottom: 0.5rem; font-weight: 600; letter-spacing: -0.015em; }
-h3 { font-size: 1.25rem; line-height: 1.3; margin-top: 2rem; margin-bottom: 0.4rem; font-weight: 600; letter-spacing: -0.01em; }
-h4 { font-size: 1.1rem; line-height: 1.4; margin-top: 1.75rem; margin-bottom: 0.4rem; font-weight: 600; letter-spacing: -0.005em; }
-h5, h6 { font-size: 1rem; line-height: 1.5; margin-top: 1.5rem; margin-bottom: 0.4rem; font-weight: 600; }
-h6 { font-style: italic; font-weight: 400; }
+   Everything below reaches the live surface by DESCENDANT selectors through
+   the mount's `attn-doc` class. That class is the hinge holding this entire
+   file to the editor; `doc-surface-parity.test.ts` pins it. The direct-child
+   measure/margin discipline lives in prosemirror.css (`.ProseMirror > :is(…)`),
+   which is the only element these rules ever applied to. */
 
-h1:first-child { margin-top: 0; }
+/* Typography scale. Sizes are `em` (relative to the document's own scale);
+   margins stay `rem` so vertical rhythm is anchored to the app baseline and a
+   preset's margin overrides mean the same thing at every doc scale. */
+.attn-doc h1 { font-size: 2em; line-height: 1.18; margin-top: 2.5rem; margin-bottom: 0.75rem; font-weight: 700; letter-spacing: -0.02em; }
+.attn-doc h2 { font-size: 1.5em; line-height: 1.24; margin-top: 2.25rem; margin-bottom: 0.5rem; font-weight: 600; letter-spacing: -0.015em; }
+.attn-doc h3 { font-size: 1.25em; line-height: 1.3; margin-top: 2rem; margin-bottom: 0.4rem; font-weight: 600; letter-spacing: -0.01em; }
+.attn-doc h4 { font-size: 1.1em; line-height: 1.4; margin-top: 1.75rem; margin-bottom: 0.4rem; font-weight: 600; letter-spacing: -0.005em; }
+.attn-doc h5, .attn-doc h6 { font-size: 1em; line-height: 1.5; margin-top: 1.5rem; margin-bottom: 0.4rem; font-weight: 600; }
+.attn-doc h6 { font-style: italic; font-weight: 400; }
 
-p {
+.attn-doc h1:first-child { margin-top: 0; }
+
+.attn-doc p {
     margin-bottom: 1rem;
 }
 
-/* Links */
+/* Links — CHROME anchors (app UI, not prose). Colour plus a hover underline;
+   no rest underline, because these are buttons, breadcrumbs and nav rows whose
+   affordance is their position and shape, not a rule under the words. Prose
+   links are a different treatment and live in the unlayered block at the foot
+   of this file — see the note there for why the split exists. */
 a {
     color: var(--link);
     text-decoration: none;
@@ -125,7 +177,7 @@ a:focus-visible {
 }
 
 /* Code */
-code {
+.attn-doc code {
     font-family: var(--mono);
     font-size: 0.85em;
     background: var(--code-block);
@@ -134,7 +186,7 @@ code {
     border: 1px solid color-mix(in oklch, var(--border) 55%, transparent);
 }
 
-pre {
+.attn-doc pre {
     margin-bottom: 1.25rem;
     padding: 1rem 1.125rem;
     background: var(--code-block);
@@ -146,67 +198,67 @@ pre {
 }
 
 
-pre code {
+.attn-doc pre code {
     display: block;
     background: none;
     border: 0;
     border-radius: 0;
     padding: 0;
-    font-size: 0.85rem;
+    font-size: 0.85em;
 }
 
 /* Lists — markers restored over the Tailwind preflight reset: a small rust
-   point for unordered items, muted numerals for ordered. */
-ul, ol {
+   point for unordered items, muted numerals for ordered. Real ::marker
+   glyphs, not positioned pseudo-elements — a marker can't detach from its
+   line or vanish when the item's positioning context changes. */
+.attn-doc :is(ul, ol):not(.task-list) {
     margin-bottom: 1rem;
     padding-left: 1.5rem;
 }
 
-ul > li:not(.task-list-item):not(:has(> input[type="checkbox"])) {
-    position: relative;
+.attn-doc ul:not(.task-list) {
+    list-style: disc;
 }
 
-ul > li:not(.task-list-item):not(:has(> input[type="checkbox"]))::before {
-    content: '';
-    position: absolute;
-    left: -1.05em;
-    top: 0.72em;
-    width: 5px;
-    height: 5px;
-    border-radius: 50%;
-    background: var(--primary);
-    opacity: 0.75;
+.attn-doc ul ul:not(.task-list) { list-style: circle; }
+.attn-doc ul ul ul:not(.task-list) { list-style: square; }
+
+.attn-doc ul > li:not(.task-list-item)::marker {
+    color: color-mix(in oklch, var(--primary) 80%, transparent);
+    font-size: 0.85em;
 }
 
-ol {
+.attn-doc ol {
     list-style: decimal;
 }
 
-ol > li::marker {
+.attn-doc ol > li::marker {
     color: var(--muted-foreground);
     font-family: var(--sans);
     font-size: 0.9em;
 }
 
-li {
+.attn-doc li {
     margin-bottom: 0.25rem;
 }
 
-li > ul, li > ol {
+.attn-doc li > ul, .attn-doc li > ol {
     margin-bottom: 0;
     margin-top: 0.25rem;
 }
 
 /* Task lists — comrak outputs <li><input type="checkbox"> text</li>
-   without special classes, so we target the structure directly. */
-li:has(> input[type="checkbox"]) {
+   without special classes, so we target the structure directly. (The live
+   ProseMirror editor uses .task-list/.task-checkbox classes styled in
+   prosemirror.css; this covers plain rendered markdown.) */
+.attn-doc li:has(> input[type="checkbox"]) {
     list-style: none;
     position: relative;
     padding-left: 1.75rem;
     margin-left: -1.5rem;
 }
 
-li:has(> input[type="checkbox"]) > input[type="checkbox"] {
+.attn-doc li:has(> input[type="checkbox"]) > input[type="checkbox"] {
     appearance: none;
     -webkit-appearance: none;
     position: absolute;
@@ -227,7 +279,7 @@ li:has(> input[type="checkbox"]) > input[type="checkbox"] {
     100% { transform: scale(1); }
 }
 
-li:has(> input[type="checkbox"]) > input[type="checkbox"]:checked {
+.attn-doc li:has(> input[type="checkbox"]) > input[type="checkbox"]:checked {
     animation: attn-check-pop 200ms var(--ease);
     background: var(--primary);
     border-color: var(--primary);
@@ -235,48 +287,118 @@ li:has(> input[type="checkbox"]) > input[type="checkbox"]:checked {
     background-size: 100% 100%;
 }
 
-/* Tables */
-table {
+/* Tables — the same panel a code block sits on (attn-11g4.3). A table and a
+   fenced block carry the same structural weight, so they get the same
+   surface: --code-block fill, 1px border, 6px radius, the same inset lip.
+
+   `border-collapse: separate` + `border-spacing: 0` is what makes the radius
+   real: a collapsed table merges its cell borders into the table box and
+   squares the corners off. Spacing stays 0 so the row rules read as one
+   continuous line, exactly as they did under `collapse`.
+
+   No cell carries a fill, so nothing paints past the rounded corners and no
+   clipping wrapper is required.
+
+   THIS IS THE ONLY COPY OF THE TABLE SURFACE (cascade model, 2026-08-08). It
+   reaches the editor through the mount's `attn-doc` class in `@layer doc`;
+   prosemirror.css used to carry a full twin because its components layer beat
+   this file's old base layer, and keeps only the editor mechanics now
+   (`position: relative` on cells). `doc-surface-parity.test.ts` fails if the
+   surface is ever restated on the editor side again. */
+.attn-doc table {
     width: 100%;
-    border-collapse: collapse;
-    margin-bottom: 1rem;
-    font-size: 1rem;
+    border-collapse: separate;
+    border-spacing: 0;
+    /* Matches `pre` — a panel needs more tail than running prose. */
+    margin-bottom: 1.25rem;
+    font-size: 1em;
+    background: var(--code-block);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    box-shadow: inset 0 1px 3px oklch(0 0 0 / 4%);
 }
 
-th, td {
+.attn-doc th, .attn-doc td {
     padding: 0.5rem 0.75rem;
     text-align: left;
     border-bottom: 1px solid var(--border);
 }
 
-th {
-    font-family: var(--sans);
-    font-weight: 600;
-    font-size: 0.7rem;
-    text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: var(--muted-foreground);
-    border-bottom-width: 2px;
+/* The panel's own border closes the table, so the last row's rule would
+   double it — and a straight line running across a rounded corner reads as a
+   rendering defect. `> :last-child` is the last row section (tbody in both the
+   comrak thead/tbody shape and ProseMirror's colgroup/tbody one). */
+.attn-doc table > :last-child > tr:last-child > :is(th, td) {
+    border-bottom: 0;
 }
 
-/* Blockquotes */
-blockquote {
+.attn-doc th {
+    font-family: var(--sans);
+    font-weight: 600;
+    font-size: 0.7em;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    /* STAYS MUTED, and this is deliberate — do not "make it consistent" with
+       the blockquote above, which lost exactly this override in attn-evme.2.
+       The two diverge because they are different kinds of text. A blockquote
+       is prose inside the document; muting it is a legibility cost paid for
+       nothing, since the bar and indent already say "quoted". A `th` is a
+       0.7em uppercase small-caps eyebrow at 0.06em tracking — chrome
+       DESCRIBING the table rather than prose inside it, and a member of the
+       same label family the sidebar and the review rail use. Muting a label
+       is a hierarchy decision; muting prose is a legibility one. */
+    color: var(--muted-foreground);
+    /* Rebalanced against the filled surface: 2px of --border was tuned to
+       separate the header from open page, and reads as a bar once the table
+       is a bordered panel. One rule at twice the ink of --border separates
+       just as clearly without competing with the frame. */
+    border-bottom-color: color-mix(in oklch, var(--foreground) 32%, transparent);
+}
+
+/* Inline code inside a cell would otherwise be --code-block on --code-block.
+   Take the second step of the embedded tier so the chip still reads as
+   recessed against the cell it sits in.
+
+   This used to be `var(--background)`, which worked only while --code-block
+   was LIGHTER than the page: dropping to the page value was a step toward the
+   foreground. attn-evme.3 moved the block to the other side of the page, and
+   the same declaration silently inverted — the chip would have become the
+   lightest thing in the table, floating above a recessed panel. --code-block-
+   nested keeps the direction explicit so it cannot invert again. */
+.attn-doc :is(th, td) code {
+    background: var(--code-block-nested);
+}
+
+/* Blockquotes.
+
+   NO COLOUR OVERRIDE (attn-evme.2). A blockquote is prose — quoted prose, and
+   already marked as such twice: the 2.5px accent bar and the indent it brings.
+   Greying the text was a third signal doing the same job, and the only one of
+   the three paid for in legibility. It measured --muted-foreground, L 0.32 on
+   Paper against a 0.14 body and 0.66 in Ink against 0.87, which made it the
+   one block of running prose in a document that was not body ink — the
+   reported "color inconsistency here for text".
+
+   Deliberately inherits rather than re-declaring `color: var(--foreground)`:
+   a blockquote inside a review card or any other surface that legitimately
+   sets its own text colour should follow that surface, not snap back to the
+   document's ink. */
+.attn-doc blockquote {
     margin-bottom: 1rem;
     padding: 0.4rem 1.25rem;
     border-left: 2.5px solid var(--blockquote-bar);
-    color: var(--muted-foreground);
 }
 
-blockquote p {
+.attn-doc blockquote p {
     margin-bottom: 0.45rem;
 }
 
-blockquote p:last-child {
+.attn-doc blockquote p:last-child {
     margin-bottom: 0;
 }
 
 /* Horizontal rules */
-hr {
+.attn-doc hr {
     border: none;
     border-top: 1px solid var(--border);
     /* A small flourish centered on the prose measure, not the full pane.
@@ -286,7 +408,7 @@ hr {
 }
 
 /* Images */
-img {
+.attn-doc img {
     max-width: 100%;
     height: auto;
     border-radius: 6px;
@@ -343,7 +465,7 @@ img {
 
 ::-webkit-scrollbar-thumb {
   background: color-mix(in oklch, var(--foreground) 22%, transparent);
-  border-radius: 999px;
+  border-radius: 9999px;
   border: 3px solid transparent;
   background-clip: padding-box;
 }
@@ -358,34 +480,88 @@ img {
   background: transparent;
 }
 
+/* Document typography is scoped to .attn-doc above, so chrome subtrees no
+   longer need the historical .attn-chrome opt-out rules — chrome markup is
+   untyped by default. */
+
 /* ---------------------------------------------------------------------------
-   Chrome islands.
+   PROSE LINKS (attn-evme.1). Reported: "links are not clearly separated in
+   text."
 
-   This stylesheet types the DOCUMENT — bare p/h1-h6/ul/li get reading-surface
-   margins and the rust list bullet. App chrome (popovers, dropdowns, status
-   cards) rendered inside the same tree inherits all of it: 2rem heading
-   gaps, 1rem paragraph tails, and absolutely-positioned ::before dots
-   escaping the card edge. Mark any chrome subtree with .attn-chrome to opt
-   its semantic HTML out of document typography wholesale, instead of
-   re-fixing each element (the historical div-swap whack-a-mole).
+   THE UNDERLINE AT REST IS NOT OPTIONAL AND NOT A STYLE PREFERENCE. WCAG puts
+   two requirements on a link inside body text, and on this palette they pull
+   against each other:
+     (a) 4.5:1 against the page — it is body-size text;
+     (b) if COLOUR is its only at-rest distinction, also 3:1 against the
+         surrounding body text (technique G183).
 
-   The !important on the bullet is deliberate: the document rule's :not()
-   chain out-specifies any class-scoped override. */
-.attn-chrome :is(p, h1, h2, h3, h4, h5, h6, ul, ol, li) {
-  margin: 0;
+   Measured in real sRGB (OKLCH → linear sRGB → WCAG relative luminance, not
+   the CIE-L* approximation — that shortcut treats OKLCH L as L* and runs
+   several points off, which is why an earlier pass recorded Paper's accent as
+   failing (a) when it does not):
+
+     PAPER  page oklch(0.905) · body oklch(0.14)
+       accent L 0.48   vs page 5.28:1 PASSES (a)   vs body 2.84:1 FAILS (b)
+       sweeping every L at C 0.14 h 28, the ONLY band satisfying both is
+       L 0.505-0.52, peaking at 3.30:1 vs body — a 0.015-wide knife edge, and
+       a different colour from --primary, which would break the One Pencil
+       Rule this link treatment exists to obey.
+     INK    page oklch(0.148) · body oklch(0.87)
+       accent L 0.72   vs page 8.19:1 PASSES (a)   vs body 1.63:1 FAILS (b)
+       sweeping every L: NO value satisfies both. The best vs-body among
+       page-passing lightnesses is 2.92:1 at L 0.570 — still short, and a link
+       that dim on a near-black page is its own legibility problem.
+
+   So colour alone provably cannot carry a link here. The underline is what
+   makes (b) inapplicable rather than merely unmet, and it is the better answer
+   to what was actually reported besides: a rule under the words separates a
+   link at a glance in a way a hue shift inside a wall of serif does not. It is
+   the print and Kindle convention, which is the register this surface is
+   aiming at.
+
+   Hover is still a visible state change — the underline thickens to 2px and
+   goes fully opaque while the colour deepens — so the link never has to
+   announce itself for the first time on hover.
+
+   IN `@layer doc`, no longer hiding outside the layers (2026-08-08). This rule
+   used to be deliberately unlayered because the hosted shell's chrome.css
+   carried an UNLAYERED `a { color: inherit; text-decoration: none }` reset
+   that would otherwise erase document links wholesale on /app. That reset now
+   lives in `@layer chrome`, which the doc tier beats by declared order — the
+   fight this rule was winning by escape hatch, it now wins by architecture.
+
+   Scoped to .attn-doc, not `a`, because the chrome reset is correct for
+   chrome: nav rows, breadcrumbs and buttons-as-links should not grow rules
+   under their labels. */
+@layer doc {
+.attn-doc a {
+  color: var(--link);
+  text-decoration: underline;
+  text-decoration-color: var(--link-underline);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  /* `auto` would let a descender interrupt an already-hairline rule, which
+     reads as a rendering fault rather than as an underline. */
+  text-decoration-skip-ink: none;
+  transition: color 0.12s ease, text-decoration-color 0.12s ease;
 }
 
-.attn-chrome :is(ul, ol) {
-  padding-left: 0;
-  list-style: none;
+.attn-doc a:visited {
+  color: var(--link-visited);
+  text-decoration-color: color-mix(in oklch, var(--link-visited) 38%, transparent);
 }
 
-.attn-chrome :is(ul, ol) > li::before {
-  content: none !important;
+.attn-doc a:hover {
+  color: var(--link-hover);
+  text-decoration-color: currentColor;
+  text-decoration-thickness: 2px;
 }
 
-.attn-chrome :is(ul, ol) > li::marker {
-  content: none;
+.attn-doc a:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
 }
 
 /* ---------------------------------------------------------------------------

@@ -4,8 +4,17 @@
   Per `planning/collab/ui/review-panel-design.md` §1 the right-rail aside
   becomes an overlay container for sticky cards positioned to the y of
   their anchor. Cards walk in document order and push each other down
-  on collision; offset cards get a thin SVG connector back to the
-  highlight in the editor (§1.3).
+  on collision (§1.3).
+
+  §1.3's third step — a thin SVG connector from a collision-displaced
+  card back to its anchor — was removed in attn-bw2h.5: it only ever
+  drew for OFFSET cards, so from the reader's side it appeared on some
+  cards and not others with no discoverable rule ("a weird line going
+  from the currently selected comment to the edge of the comments rail").
+  The card↔anchor association is carried by the inline decoration
+  instead: every anchored thread keeps a persistent highlight in the
+  text (`.attn-review-comment` / `.attn-review-suggestion`), hovering a
+  mark raises its card, and clicking either one focuses the pair.
 
   Orphan tray (§2) is sticky-pinned to the top of the overlay. It hosts
   ambiguous + stale + low-confidence remapped threads that cannot
@@ -481,36 +490,6 @@
     return visibleCards(placed, heights, { viewportTop, viewportHeight, bandPx: 800 });
   });
 
-  // For the SVG connector layer: every offset placement gets a line drawn
-  // from the card's left-mid back to the anchor's viewport y. The anchor
-  // x is taken as the container's left edge (the cards live at right: 0
-  // of the editor; the inline highlight is on the left). Collapsed chips
-  // get no connector — the line-to-midpoint math assumes card heights and
-  // the tiny chips would just add noise.
-  const connectorLines: Array<{
-    id: string;
-    fromX: number;
-    fromY: number;
-    toX: number;
-    toY: number;
-  }> = $derived.by(() => {
-    const out: Array<{ id: string; fromX: number; fromY: number; toX: number; toY: number }> = [];
-    for (const p of visiblePlacements) {
-      if (!p.offset) continue;
-      const t = threadById.get(p.id);
-      if (!t || (t.resolved && t.id !== expandedResolvedId)) continue;
-      const cardH = measuredHeights.get(p.id) ?? DEFAULT_CARD_HEIGHT;
-      out.push({
-        id: p.id,
-        fromX: 0,            // anchor side (left edge of overlay)
-        fromY: p.anchorY,    // ideal y from coordsAtPos
-        toX: 12,             // card edge — small inset so the line ends on the card
-        toY: p.top + cardH / 2,
-      });
-    }
-    return out;
-  });
-
   // ---------------------------------------------------------------------------
   // Resolve a comment thread (attn-zhr). Mints a durable `CommentResolved`
   // event via the daemon; `reconstructThreads` flips `thread.resolved` off it
@@ -975,7 +954,7 @@
 
 <div
   bind:this={containerEl}
-  class="review-margin attn-chrome"
+  class="review-margin"
   data-slot="review-margin"
   data-rail-mode={collapsed ? 'collapsed' : 'expanded'}
 >
@@ -1120,7 +1099,11 @@
                 style="background-color: {authorColorFor(t)};"
                 aria-hidden="true"
               >{avatarGlyphFor(t)}</span>
-              ✓ {authorNameFor(t)} · resolved
+              <!-- Tick only, no "resolved" word (attn-bw2h.3) — the word
+                   restated the glyph. The button's aria-label already
+                   says "Resolved …", so AT is not relying on the tick. -->
+              <span class="rmrc-tick" aria-hidden="true">✓</span>
+              {authorNameFor(t)}
             </button>
           {/if}
         </li>
@@ -1137,29 +1120,6 @@
       </button>
     {/if}
   {:else}
-  <!-- SVG connector layer for offset cards (§1.3 step 3) -->
-  {#if connectorLines.length > 0}
-    <svg
-      class="review-margin-connectors"
-      data-testid="review-margin-connectors"
-      aria-hidden="true"
-      width="100%"
-      height="100%"
-    >
-      {#each connectorLines as line (line.id)}
-        <line
-          x1={line.fromX}
-          y1={line.fromY}
-          x2={line.toX}
-          y2={line.toY}
-          stroke="currentColor"
-          stroke-width="1"
-          opacity="0.35"
-        />
-      {/each}
-    </svg>
-  {/if}
-
   <!-- Anchored cards + resolved chips at their resolved y — one unified
        collision pass, so the three branches share `visiblePlacements`. -->
   {#each visiblePlacements as p (p.id)}
@@ -1230,7 +1190,10 @@
           style="background-color: {authorColorFor(t)};"
           aria-hidden="true"
         >{avatarGlyphFor(t)}</span>
-        ✓ {authorNameFor(t)} · resolved
+        <!-- Tick only, no "resolved" word (attn-bw2h.3) — see the stacked
+             chip above; the aria-label carries the state for AT. -->
+        <span class="rmrc-tick" aria-hidden="true">✓</span>
+        {authorNameFor(t)}
       </button>
     {/if}
   {/each}
@@ -1326,7 +1289,8 @@
   .review-margin-tray {
     position: relative;
     z-index: 2;
-    background: var(--background);
+    /* A card, on whatever the rail is — not a patch of paper. */
+    background: var(--review-card-surface, var(--background));
     border: 1px solid var(--border);
     border-radius: 6px;
     padding: 6px;
@@ -1351,15 +1315,6 @@
     display: flex;
     flex-direction: column;
     gap: 6px;
-  }
-
-  /* SVG connector layer sits behind the cards (z 0 vs cards' z 1). */
-  .review-margin-connectors {
-    position: absolute;
-    inset: 0;
-    pointer-events: none;
-    color: var(--accent-foreground, var(--muted-foreground));
-    z-index: 0;
   }
 
   /* Each absolutely-positioned card slot. `top` is set inline per layout.
@@ -1410,7 +1365,9 @@
     height: 28px;
     max-width: calc(100% - 24px);
     padding: 0 10px;
-    background: var(--muted);
+    /* Backdrop-aware, not `--muted`: the docked rail paints `--panel-surface`,
+       which in ink sits 0.003 off `--muted` and erased this chip's fill. */
+    background: var(--rail-chip-surface, var(--muted));
     border: 1px solid var(--border);
     border-radius: 9999px;
     color: var(--muted-foreground);
@@ -1439,6 +1396,15 @@
     color: var(--monogram);
     font-size: 0.7rem;
     font-weight: 600;
+    line-height: 1;
+  }
+
+  /* Resolution tick in the labeled chip. Slightly larger than the label
+     text so it reads as a mark rather than a character, and never
+     shrinks when the author name ellipsises. */
+  .rmrc-tick {
+    flex-shrink: 0;
+    font-size: 0.78rem;
     line-height: 1;
   }
 
@@ -1475,7 +1441,9 @@
     box-sizing: border-box;
     width: 28px;
     height: 28px;
-    border: 2px solid var(--background);
+    /* Ringed against the surface it actually sits on: the docked panel in the
+       native rail, the paper in the hosted floating margin. */
+    border: 2px solid var(--rail-backdrop, var(--background));
     border-radius: 9999px;
     color: var(--monogram);
     font-size: 0.85rem;
@@ -1500,7 +1468,8 @@
     width: auto;
     box-sizing: border-box;
     padding: 6px 12px;
-    background: var(--muted);
+    /* Same backdrop-aware fill as the resolved chips it summarizes. */
+    background: var(--rail-chip-surface, var(--muted));
     border: 1px solid var(--border);
     border-radius: 9999px;
     font-size: 0.7rem;
@@ -1531,7 +1500,7 @@
     left: 12px;
     right: 12px;
     padding: 10px 12px;
-    background: var(--popover, var(--background));
+    background: var(--review-card-surface, var(--popover, var(--background)));
     border: 1px solid var(--destructive);
     border-radius: 6px;
     box-shadow: 0 6px 18px rgba(0, 0, 0, 0.15);

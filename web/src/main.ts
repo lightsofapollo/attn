@@ -10,6 +10,8 @@ import './app.css';
 import '../styles/base.css';
 import '../styles/prosemirror.css';
 import '../styles/syntax.css';
+// Last: typeset presets redefine tokens set by everything above.
+import '../styles/typeset.css';
 
 type ConsoleLevel = 'debug' | 'log' | 'info' | 'warn' | 'error';
 

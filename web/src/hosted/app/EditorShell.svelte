@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
+  import { SAVE_STATE_AUTOSAVED, SAVE_STATE_SAVING } from '../../lib/save-state-copy';
   import type { EditorView } from 'prosemirror-view';
   import BottomSheet from './BottomSheet.svelte';
   import DegradedBanner from './DegradedBanner.svelte';
@@ -414,6 +415,40 @@
   });
 
   let lightboxClose = $state<HTMLButtonElement | undefined>();
+
+  /* Publish the dock's REAL height as --dock-h (attn-n01r.3).
+     It was a hard-coded `calc(64px + env(safe-area-inset-bottom))` while the
+     rendered dock measured 61px at inset 0 — and the edit bar positions off the
+     token, not off the dock, so the two disagree by whatever the constant is
+     wrong by. On a device with a non-zero safe-area inset that error is
+     compounded, which is the reported gap between the formatting bar and the
+     dock.
+
+     Measuring removes the assumption rather than correcting the guess: it is
+     right at inset 0 and at inset 34, with the keyboard open or closed, and it
+     stays right if the dock's contents ever change height. */
+  function measureDock(node: HTMLElement): { destroy(): void } {
+    const publish = (): void => {
+      const height = node.getBoundingClientRect().height;
+      if (height > 0) {
+        document.documentElement.style.setProperty('--dock-h', `${height}px`);
+      }
+    };
+    publish();
+    const observer = new ResizeObserver(publish);
+    observer.observe(node);
+    // The inset itself can change (rotation, split view), and that resizes the
+    // dock, so the observer covers it — but orientation changes can land a frame
+    // early on iOS.
+    window.addEventListener('orientationchange', publish);
+    return {
+      destroy(): void {
+        observer.disconnect();
+        window.removeEventListener('orientationchange', publish);
+        document.documentElement.style.removeProperty('--dock-h');
+      },
+    };
+  }
 
   // ————— iOS editing (attn-7xl.3.5) —————
   // The formatting bar rides directly above the visual keyboard using
@@ -2875,15 +2910,31 @@
           onblur={() => void commitTitleRename()}
         />
       {:else if editing}
+        <!-- The title is a label; the pencil is the affordance (attn-n01r.4).
+             It used to be a bare button that dropped straight into a text input
+             on a single tap — directly above the document, in the thumb's
+             travel path, for an act performed maybe once per workspace. The
+             name is now inert and rename takes a deliberate, separately-sized
+             target beside it. -->
+        <span class="mobile-workspace-title" data-slot="mobile-workspace-name">
+          {workspace.name}
+        </span>
         <button
-          class="mobile-workspace-title"
+          class="mobile-title-rename"
           type="button"
-          aria-label="Rename workspace"
+          title="Rename workspace"
+          aria-label={`Rename ${workspace.name}`}
           onclick={() => {
             titleValue = workspace.name;
             renamingTitle = true;
           }}
-        >{workspace.name}</button>
+        >
+          <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+               stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 20h9" />
+            <path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z" />
+          </svg>
+        </button>
       {:else}
         <!-- Crossfade stack: the workspace name at rest; the document's own
              h1 once its heading has scrolled under the chrome. Screen readers
@@ -2945,7 +2996,8 @@
     {/if}
     {@render documentSurface()}
   </main>
-  <nav class="thumb-dock" aria-label="Document actions">
+  <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
+  <nav class="thumb-dock" aria-label="Document actions" use:measureDock>
     <button
       type="button"
       aria-haspopup="dialog"
@@ -3012,7 +3064,38 @@
     <button type="button" aria-label="Bullet list" onclick={() => editorRef?.toggleBulletList()}>••</button>
     <button type="button" aria-label="Undo" onclick={() => editorRef?.undoStep()}>↺</button>
     <button type="button" aria-label="Redo" onclick={() => editorRef?.redoStep()}>↻</button>
-    <span class="edit-bar-state" data-save-state={saveState}>{saveState}</span>
+    <!-- Icon, not the sentence (attn-n01r.5). The masthead chip already shows
+         the save state in full; this second copy was capped at 26vw with an
+         ellipsis, so it rendered as "Saved on th…" — a truncated duplicate
+         taking room from the formatting controls. The glyph differs per state,
+         not just the colour (PRODUCT.md: never rely on colour alone), the full
+         wording is on `title` for hover and long-press, and the accessible name
+         still carries the whole sentence. -->
+    <span
+      class="edit-bar-state"
+      data-save-state={saveState}
+      title={saveState}
+      role="status"
+      aria-label={saveState}
+    >
+      {#if saveState === SAVE_STATE_SAVING}
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <path d="M12 3v3M12 18v3M3 12h3M18 12h3M5.6 5.6l2.1 2.1M16.3 16.3l2.1 2.1M5.6 18.4l2.1-2.1M16.3 7.7l2.1-2.1" />
+        </svg>
+      {:else if saveState === SAVE_STATE_AUTOSAVED}
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M20 6 9 17l-5-5" />
+        </svg>
+      {:else}
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M12 8v5M12 16.5v.5" />
+          <circle cx="12" cy="12" r="9" />
+        </svg>
+      {/if}
+    </span>
   </div>
 {/if}
 

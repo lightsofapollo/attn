@@ -1,9 +1,10 @@
 <script lang="ts">
   import { tick, type Snippet } from 'svelte';
   import type { SearchResultItem, TreeNode } from './types';
+  import BrandMark from './BrandMark.svelte';
   import FileTree from './FileTree.svelte';
   import ReviewFileTree from './ReviewFileTree.svelte';
-  import { dragWindow } from './ipc';
+  import { dragWindow, zoomWindow } from './ipc';
   import ChevronsUpDown from '@lucide/svelte/icons/chevrons-up-down';
   import Check from '@lucide/svelte/icons/check';
   import Search from '@lucide/svelte/icons/search';
@@ -68,6 +69,16 @@
     sharedProjects?: Set<string>;
     /** Browser-owned workspaces do not expose an outline until one is derived. */
     showOutline?: boolean;
+    /**
+     * Render the attn mark + wordmark above the project label (attn-64iy.5).
+     *
+     * Opt-in, and only one surface opts in: `App.svelte` in a BROWSER tab,
+     * where there are no traffic lights and the sidebar's top-left corner is
+     * therefore free. The desktop window keeps its brand in the header — that
+     * corner belongs to the OS — and the hosted surfaces carry their own brand
+     * in their own headers. Defaults false so none of them change.
+     */
+    showBrand?: boolean;
   }
 
   let {
@@ -98,6 +109,7 @@
     projectMenuActions = [],
     sharedProjects = new Set<string>(),
     showOutline = true,
+    showBrand = false,
   }: Props = $props();
   let sidebarView: 'files' | 'outline' = $state('files');
   let query = $state('');
@@ -316,10 +328,24 @@
       aria-label="Drag window"
       tabindex="-1"
       onmousedown={dragWindow}
+      ondblclick={zoomWindow}
     ></div>
   {/if}
 
   <div class="sidebar-controls" data-sidebar-controls="true">
+    {#if showBrand}
+      <!-- Product identity, in the corner the browser leaves free
+           (attn-64iy.5). It sits inside `.sidebar-controls`, which is outside
+           the file tree's ScrollArea, so "fixed in position" is structural
+           rather than a `position: fixed` that would have to be unwound at
+           every breakpoint. Above the project label, not merged into its row:
+           the mark says which product this is and the label says which folder
+           is open, and one of those changes while the other never does. -->
+      <div class="sidebar-brand" data-slot="sidebar-brand" aria-label="attn">
+        <BrandMark size={18} />
+        <span class="sidebar-brand-word">attn</span>
+      </div>
+    {/if}
     <!-- Project identity: a quiet small-caps label (editorial furniture), not a
          button. It becomes an interactive switcher only when there is more
          than one project to switch to. -->
@@ -342,7 +368,10 @@
               {#if showProjectFilter}
                 <Command.Input placeholder="Search projects..." />
               {/if}
-              <Command.List class="max-h-[300px]">
+              <!-- The scroll cap lives on the ScrollArea viewport so the list
+                   gets the themed thumb instead of a native gutter. -->
+              <ScrollArea viewportClasses="max-h-[300px]">
+                <Command.List class="max-h-none overflow-visible">
                 <Command.Empty class="px-3 py-5 text-xs text-muted-foreground">
                   No projects found.
                 </Command.Empty>
@@ -380,6 +409,7 @@
                   {/each}
                 </Command.Group>
               </Command.List>
+              </ScrollArea>
             </Command.Root>
             {#if projectMenuActions.length > 0}
               <DropdownMenuSeparator />
@@ -425,8 +455,21 @@
       </div>
     {/if}
 
-    <!-- Filter: borderless furniture that only draws its box on focus; a search
-         glyph, an honest `/` hint, and a clear affordance once typing. -->
+    <!-- Filter: a standing box (attn-64iy.7 — it used to be borderless until
+         focus, which left an input reading as a label), a search glyph, an
+         honest `/` hint, and a clear affordance once typing. Focus promotes the
+         box to the accent ring.
+
+         `size="1"` is load-bearing, not tidiness: an <input> carries an
+         INTRINSIC width from its `size` attribute (default 20 characters,
+         ~130px) which acts as a layout floor that `min-width: 0` on the input
+         cannot remove — that declaration governs flex shrinking inside the
+         filter, not the filter's own min-content contribution to the sidebar
+         grid. With the default, the filter bottomed out at 194px and hung over
+         the document once the sidebar was resized near its 180px minimum
+         (reported on the desktop app, where a narrow window is ordinary). See
+         the matching `min-width: 0` on the controls grid in app.css; both
+         halves are required. -->
     <div class="sidebar-filter" data-has-query={query.length > 0}>
       <Search class="sidebar-filter-icon size-3.5" />
       <input
@@ -434,6 +477,7 @@
         bind:value={query}
         class="sidebar-filter-input"
         type="text"
+        size="1"
         autocomplete="off"
         spellcheck="false"
         placeholder={sidebarView === 'outline' ? 'Filter headings' : 'Filter files'}

@@ -5,6 +5,8 @@
 // injected via the worker's RELAY_ORIGIN var. Everything else stays
 // deliberately closed: no third-party scripts, analytics, or remote assets.
 
+import { THEME_PREFLIGHT_SHA256 } from './theme-preflight';
+
 const HTTPS_ORIGIN = /^https:\/\/[a-z0-9.-]+$/u;
 
 export function buildContentSecurityPolicy(
@@ -30,7 +32,13 @@ export function buildContentSecurityPolicy(
     // The checked-in Rust/comrak anchor index is loaded as WebAssembly when a
     // browser owner publishes Markdown. Permit only Wasm compilation; keep
     // string-to-code JavaScript evaluation disabled.
-    "script-src 'self' 'wasm-unsafe-eval'",
+    //
+    // The one inline script is the pre-paint theme stamp (attn-n01r.22),
+    // admitted by source hash rather than by a nonce: a hash permits exactly
+    // those bytes and nothing else, so it cannot be reused by injected markup.
+    // csp.test.ts recomputes the hash from THEME_PREFLIGHT_SCRIPT and fails if
+    // the two drift.
+    `script-src 'self' 'wasm-unsafe-eval' '${THEME_PREFLIGHT_SHA256}'`,
     "style-src 'self' 'unsafe-inline'",
     "worker-src 'self'",
   ].join('; ');

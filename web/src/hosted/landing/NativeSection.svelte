@@ -2,8 +2,8 @@
   import { getTheme } from '../theme.svelte';
   import CopyCode from './CopyCode.svelte';
   import ResponsiveScreenshot from './ResponsiveScreenshot.svelte';
-  import editorLight from './assets/editor-light.png';
-  import editorDark from './assets/editor-dark.png';
+  import editorLight from './assets/editor-light-fallback.webp';
+  import editorDark from './assets/editor-dark-fallback.webp';
   import editorLight768 from './assets/editor-light-768.avif';
   import editorLight1280 from './assets/editor-light-1280.avif';
   import editorLight1920 from './assets/editor-light-1920.avif';

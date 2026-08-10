@@ -1,13 +1,14 @@
 <script lang="ts">
   import { getTheme } from '../theme.svelte';
+  import { LOCAL_FIRST_CLAIM } from '../../lib/save-state-copy';
   import { readDeskCount } from '../desk-count';
 
   // Returning users lead with their desk (attn-cjn); first-timers keep the
   // zero-friction create. Read once at mount — the count only changes in /app.
   const deskCount = readDeskCount();
   import ResponsiveScreenshot from './ResponsiveScreenshot.svelte';
-  import collabLight from './assets/collab-light.png';
-  import collabDark from './assets/collab-dark.png';
+  import collabLight from './assets/collab-light-fallback.webp';
+  import collabDark from './assets/collab-dark-fallback.webp';
   import collabLight768 from './assets/collab-light-768.avif';
   import collabLight1280 from './assets/collab-light-1280.avif';
   import collabLight1920 from './assets/collab-light-1920.avif';
@@ -30,12 +31,27 @@
 
 <section class="hero">
   <div class="hero-copy">
-    <p class="eyebrow">No account · local by default</p>
-    <h1><span>A private desk</span> <span>for working documents.</span></h1>
+    <!-- The eyebrow is gone (attn-n01r.9): a tracked-caps kicker above an
+         oversized headline is the default AI-SaaS hero shape, and PRODUCT.md
+         lists cloud-SaaS as an anti-reference. Its claim ("no account, local by
+         default") was also restated two lines later, so folding it into the
+         lede loses nothing and drops a whole element from the fold.
+
+         The headline now argues the product's stated positioning rather than a
+         category anyone occupies (attn-n01r.10). PRODUCT.md: "The reviewer for
+         agent-authored docs: the one place where you and your agents review the
+         same document together, human comments and AI suggestions in a single
+         end-to-end-encrypted thread, over files that never leave your machine."
+         The page previously said "agent" and "AI" zero times — it sold a
+         private Markdown editor, which is a category with a dozen occupants,
+         while the one thing that makes attn a new product went unmentioned.
+         Wording is drawn from PRODUCT.md, not invented here; the voice it asks
+         for is "it states, it doesn't sell". -->
+    <h1><span>Review it together.</span> <span>Even when they aren’t human.</span></h1>
     <p class="hero-lede">
-      Write in the browser or open local Markdown in native attn — one file or many, with images
-      and project assets. It stays on this device until you deliberately share an
-      end-to-end-encrypted review room. No account, and no server can read the words.
+      Your comments and your agents’ suggestions land in the same margin, under the same rules —
+      distinguished by who wrote them, not by hierarchy. No account, local by default, and
+      end-to-end encrypted the moment you share. The file never leaves your machine.
     </p>
     <div class="hero-actions">
       {#if deskCount > 0}
@@ -51,13 +67,18 @@
       {/if}
     </div>
     <div class="local-note">
-      <span>Creates untitled.md immediately</span>
+      <span>Humans and agents in one thread</span>
       <span>Encrypted when shared</span>
-      <span>Peer-to-peer when reachable</span>
+      <span>Files stay on your machine</span>
     </div>
   </div>
 
-  <div class="product-stage" aria-label="A real attn review with local and shared state labels">
+  <!-- No aria-label here (attn-n01r.25): `aria-label` is only honoured on
+       elements whose role supports naming, and a bare div maps to `generic`, so
+       the string was discarded — verified absent from the AX tree. Worse than
+       no label, because it read as coverage. The inner <img> alt and the two
+       <aside> labels already carry the meaning. -->
+  <div class="product-stage">
     <div class="window">
       <!-- Responsive AVIF with PNG fallback + intrinsic dimensions — the
            hero is the largest paint on the page, and the landing perf gate
@@ -65,14 +86,21 @@
       <ResponsiveScreenshot
         fallback={collabShot.fallback}
         avifSrcset={collabShot.avifSrcset}
-        sizes="(max-width: 680px) calc(100vw - 2rem), (max-width: 1180px) 72vw, 920px"
+        sizes="(max-width: 680px) calc(100vw - 2rem), (max-width: 1180px) calc(100vw - 5rem), 620px"
         alt="A real attn document with an inline review comment and suggestion"
         loading="eager"
         fetchpriority="high"
       />
     </div>
+    <!-- "Saved on this device" is the local-first claim, and this is one of the
+         two places that still own it (the other is the desk header's
+         persistence badge). It used to double as the save-state literal in the
+         SaveState union; attn-yzsa.2 split the two jobs and moved the save
+         state to "Changes autosaved", so this line is now the claim only. Do
+         not "unify" it with the chip copy — the product would quietly stop
+         saying the thing it is built on. -->
     <aside class="stage-label local">
-      <strong>Source · local</strong><small>Saved on this device</small>
+      <strong>Source · local</strong><small>{LOCAL_FIRST_CLAIM}</small>
     </aside>
     <aside class="stage-label share">
       <strong>Review room · live</strong><small>E2EE · direct connection</small>

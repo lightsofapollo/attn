@@ -358,10 +358,7 @@ pub fn is_valid_identity_color(raw: &str) -> bool {
     if let Some(hex) = raw.strip_prefix('#') {
         return hex.len() == 6 && hex.chars().all(|c| c.is_ascii_hexdigit());
     }
-    let Some(inner) = raw
-        .strip_prefix("oklch(")
-        .and_then(|r| r.strip_suffix(')'))
-    else {
+    let Some(inner) = raw.strip_prefix("oklch(").and_then(|r| r.strip_suffix(')')) else {
         return false;
     };
     let parts: Vec<&str> = inner.split_whitespace().collect();
@@ -3222,6 +3219,11 @@ impl Bootstrapper {
         Ok(published)
     }
 
+    // The identity of a published snapshot IS this argument list — room, file,
+    // snapshot id, owner-facing path, base hash, payload, and mint time are all
+    // independent inputs the caller must state explicitly. Bundling them into a
+    // struct would only move the same list one level away from the call site.
+    #[allow(clippy::too_many_arguments)]
     async fn publish_snapshot_plaintext(
         &self,
         room_id: &RoomId,

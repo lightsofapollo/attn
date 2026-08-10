@@ -8,6 +8,7 @@ mod ipc;
 mod logging;
 mod markdown;
 mod platform;
+mod prefs;
 mod projects;
 mod resident;
 mod review;
@@ -363,8 +364,21 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
     let initial_structure = markdown::PlanStructure::default();
     let (initial_mtime_ms, initial_bytes) = content_metadata_for_path(&initial_ui_path);
 
-    // Determine theme
-    let theme = if cli.dark { "dark" } else { "light" };
+    // Appearance: the durable preference wins unless `--dark` explicitly
+    // overrides it for this launch. `system` is resolved in the page (the
+    // webview tracks the OS appearance live), so it is stamped through as-is.
+    let stored_prefs = prefs::load();
+    let theme = if cli.dark {
+        prefs::THEME_DARK.to_string()
+    } else {
+        stored_prefs.theme.clone()
+    };
+    let typeset = stored_prefs.typeset.clone();
+    // Already range-gated by `prefs::load` (attn-11g4.2), so the page receives
+    // a width it is allowed to render. Unlike theme/typeset this is NOT
+    // stamped into the page HTML pre-paint: the rail only exists inside a
+    // review room, so there is no first frame for a wrong width to flash on.
+    let rail_width = stored_prefs.rail_width;
     let diag_mode = diag_mode_from_env();
 
     // Review profile (onboarding): the user's chosen display name (if any), the
@@ -410,6 +424,8 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
         "knownProjects": &project_registry.known_projects,
         "activeProjectPath": project_registry.active_project,
         "theme": theme,
+        "typeset": typeset,
+        "railWidth": rail_width,
         "diagMode": diag_mode,
         "version": env!("CARGO_PKG_VERSION"),
         "contentMtimeMs": initial_mtime_ms,
@@ -438,7 +454,7 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
         },
     })
     .to_string();
-    let page_html = build_page_html(&init_payload_json, theme);
+    let page_html = build_page_html(&init_payload_json, &theme, &typeset);
     let page_html_bytes = page_html.clone().into_bytes();
     tracing::info!("startup page_html_bytes={}", page_html.len());
     let dev_server_url = dev_server_url_from_env();
@@ -678,16 +694,16 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
             // Only act on the final drop; Enter/Over/Leave keep default so the
             // OS still shows the copy cursor. A dropped directory switches the
             // project root; a dropped file opens it directly.
-            if let wry::DragDropEvent::Drop { paths, .. } = event {
-                if let Some(path) = paths.into_iter().next() {
-                    let user_event = if path.is_dir() {
-                        UserEvent::SwitchProject(path)
-                    } else {
-                        UserEvent::OpenPath(path)
-                    };
-                    let _ = drag_drop_proxy.send_event(user_event);
-                    return true;
-                }
+            if let wry::DragDropEvent::Drop { paths, .. } = event
+                && let Some(path) = paths.into_iter().next()
+            {
+                let user_event = if path.is_dir() {
+                    UserEvent::SwitchProject(path)
+                } else {
+                    UserEvent::OpenPath(path)
+                };
+                let _ = drag_drop_proxy.send_event(user_event);
+                return true;
             }
             false
         })
@@ -1175,6 +1191,12 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
             }
             Event::UserEvent(UserEvent::DragWindow) => {
                 let _ = window.drag_window();
+            }
+            Event::UserEvent(UserEvent::ZoomWindow) => {
+                // Native titlebar double-click gesture. On macOS tao routes
+                // set_maximized through NSWindow zoom:, matching the system
+                // titlebar behavior for the hidden bar.
+                window.set_maximized(!window.is_maximized());
             }
             Event::UserEvent(UserEvent::ResidentLaunchAtLogin { enabled }) => {
                 // launchctl may terminate a daemon that is itself owned by the
@@ -2061,17 +2083,32 @@ fn mime_from_extension(path: &std::path::Path) -> &'static str {
 /// Embedded at compile time from build output in OUT_DIR.
 const APP_HTML: &str = include_str!(concat!(env!("OUT_DIR"), "/attn-index.html"));
 
-fn build_page_html(init_payload_json: &str, theme: &str) -> String {
+fn build_page_html(init_payload_json: &str, theme: &str, typeset: &str) -> String {
     let init_script = format!(
         r#"<script>window.__attn_init__ = {init_payload_json};</script>"#,
         init_payload_json = init_payload_json,
     );
 
-    // Inject into the template
+    // Inject into the template. The theme written here is the stored
+    // PREFERENCE (which may be `system`); the template's inline resolver
+    // script turns it into an effective light/dark before first paint.
     APP_HTML
         .replace("<!-- INIT_SCRIPT -->", &init_script)
         .replace("data-theme=\"system\"", &format!("data-theme=\"{theme}\""))
         .replace("data-theme=\"light\"", &format!("data-theme=\"{theme}\""))
+        // `replacen(.., 1)`, not `replace`: since typeset.css gained an
+        // explicit `[data-typeset='editorial']` rule, this needle is no longer
+        // unique to the <html> tag in principle. It is in practice only
+        // because the CSS minifier emits selectors unquoted
+        // (`[data-typeset=editorial]`) — one minifier-config change away from
+        // this rewriting the default preset's own selector and stripping its
+        // tokens. The <html> tag is the first occurrence in the document, so
+        // bounding the replacement removes the dependency on that accident.
+        .replacen(
+            "data-typeset=\"editorial\"",
+            &format!("data-typeset=\"{typeset}\""),
+            1,
+        )
 }
 
 #[cfg(test)]

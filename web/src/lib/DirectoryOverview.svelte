@@ -95,7 +95,7 @@
     if (node.isDir) {
       return resolveFolderIcon(node.name, false);
     }
-    return resolveFileIcon(node.name, { includeMarkdown: true });
+    return resolveFileIcon(node.name);
   }
 </script>
 
@@ -153,7 +153,7 @@
 
   .directory-overview__eyebrow {
     margin: 0;
-    font-size: 0.72rem;
+    font-size: 0.7rem;
     letter-spacing: 0.08em;
     text-transform: uppercase;
     color: color-mix(in oklch, var(--foreground) 55%, transparent);
@@ -167,7 +167,7 @@
 
   .directory-overview__path {
     margin: 0;
-    font-size: 0.8rem;
+    font-size: 0.78rem;
     color: color-mix(in oklch, var(--foreground) 60%, transparent);
     word-break: break-all;
   }
@@ -217,14 +217,14 @@
     justify-content: center;
     width: 22px;
     height: 22px;
-    font-size: 1.6rem;
+    font-size: 1.5rem;
     line-height: 1;
     color: color-mix(in oklch, var(--foreground) 40%, transparent);
     flex-shrink: 0;
   }
 
   .directory-overview__card-name {
-    font-size: 0.76rem;
+    font-size: 0.75rem;
     line-height: 1.25;
     overflow: hidden;
     text-overflow: ellipsis;
@@ -244,7 +244,7 @@
 
   .directory-overview__empty-title {
     margin: 0;
-    font-size: 0.9rem;
+    font-size: 0.875rem;
     font-weight: 600;
     color: color-mix(in oklch, var(--foreground) 90%, transparent);
   }

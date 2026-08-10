@@ -154,7 +154,7 @@
           />
         </div>
         {#if actionError}
-          <p role="alert" style="color: var(--rust-deep); font: 0.9rem/1.5 var(--sans);">
+          <p class="form-error" role="alert">
             {actionError}
           </p>
         {/if}

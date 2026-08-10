@@ -134,10 +134,12 @@ export type IpcMessageType =
   | 'review_list_shareable_files'
   | 'edit_save'
   | 'theme_change'
+  | 'typeset_change'
   | 'open_external'
   | 'open_devtools'
   | 'resident_launch_at_login'
   | 'drag_window'
+  | 'zoom_window'
   | 'js_log'
   | 'js_error'
   | 'review_share'
@@ -191,6 +193,11 @@ export interface ThemeChangeMessage {
   theme: string;
 }
 
+export interface TypesetChangeMessage {
+  type: 'typeset_change';
+  typeset: string;
+}
+
 export interface OpenExternalMessage {
   type: 'open_external';
   path: string;
@@ -198,6 +205,10 @@ export interface OpenExternalMessage {
 
 export interface DragWindowMessage {
   type: 'drag_window';
+}
+
+export interface ZoomWindowMessage {
+  type: 'zoom_window';
 }
 
 export interface OpenDevtoolsMessage {
@@ -349,10 +360,12 @@ export type IpcMessage =
   | ReviewListShareableFilesMessage
   | EditSaveMessage
   | ThemeChangeMessage
+  | TypesetChangeMessage
   | OpenExternalMessage
   | OpenDevtoolsMessage
   | ResidentLaunchAtLoginMessage
   | DragWindowMessage
+  | ZoomWindowMessage
   | JsLogMessage
   | JsErrorMessage
   | ReviewShareMessage
@@ -373,6 +386,12 @@ export type IpcMessage =
 export type AppMode = 'read' | 'edit';
 
 export type ThemeName = 'light' | 'dark';
+/** The stored user choice; `system` follows the OS appearance live. */
+export type ThemePreference = ThemeName | 'system';
+/** Curated typography presets — see web/src/lib/typeset.ts. Any change here
+ *  must be mirrored in the `TYPESETS` allowlist in src/prefs.rs, which
+ *  normalizes the persisted value before stamping it into the page. */
+export type TypesetName = 'editorial' | 'modern' | 'compact' | 'manuscript' | 'terminal';
 export type DiagMode = 'full' | 'editor_only' | 'minimal';
 
 export interface InitPayload {
@@ -383,7 +402,8 @@ export interface InitPayload {
   rootPath?: string;
   knownProjects?: string[];
   activeProjectPath?: string;
-  theme: ThemeName;
+  theme: ThemePreference;
+  typeset?: TypesetName;
   diagMode?: DiagMode;
   /** The running attn version (CARGO_PKG_VERSION), for the update-available check. */
   version?: string;

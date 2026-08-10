@@ -5,16 +5,52 @@
 
 html {
   scroll-behavior: smooth;
+  /* Anchor targets clear the sticky nav (attn-n01r.21). .chapter had
+     scroll-margin-top: 0 under a 70px sticky header, so every #how / #native
+     jump parked the section's top rule and heading underneath it. A token, so
+     the two cannot drift apart. */
+  scroll-padding-top: calc(var(--nav-h, 70px) + 1rem);
+}
+
+:root {
+  --nav-h: 70px;
+}
+
+/* Visible only on focus (attn-n01r.19). Sits above the sticky nav's z-index: 20
+   so it is not painted behind it when focused. */
+.skip-link {
+  position: absolute;
+  left: 0.75rem;
+  top: -100vh;
+  z-index: 100;
+  padding: 0.7rem 1.05rem;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: var(--sheet);
+  color: var(--ink);
+  font: 600 0.9rem var(--sans);
+  text-decoration: none;
+}
+
+.skip-link:focus-visible {
+  top: 0.75rem;
 }
 
 .site-nav {
   position: sticky;
   top: 0;
   z-index: 20;
-  height: 70px;
+  /* min-height: a fixed height clipped the nav's own contents at 200% text
+     (box 70 vs content 79), and the sticky+backdrop-filter nav then painted
+     the overflowing CTA over the hero (attn-n01r.23). */
+  min-height: var(--nav-h);
   display: flex;
   align-items: center;
   justify-content: space-between;
+  /* Wrap rather than force the page wider than the viewport: at 200% text the
+     brand + links + CTA row exceeds a 768px viewport, and a taller nav is the
+     correct outcome (attn-n01r.23). */
+  flex-wrap: wrap;
   padding: 0 clamp(1rem, 4vw, 4.5rem);
   border-bottom: 1px solid var(--rule);
   background: var(--nav-veil);
@@ -26,28 +62,51 @@ html {
 .brand {
   display: flex;
   align-items: center;
+  min-height: 44px;
   gap: 0.65rem;
   font: 750 1.28rem var(--serif);
 }
 
+/* The mark carries its own tile, radius, and fixed palette (BrandMark.svelte):
+   it is the desktop app icon, so nothing here may repaint it per theme. */
 .mark {
   width: 29px;
   height: 29px;
-  display: grid;
-  place-items: center;
-  border-radius: 8px;
-  background: var(--ink);
-  color: var(--sheet);
-  font: 700 0.75rem var(--mono);
 }
 
 .nav-right {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 1.35rem;
 }
 
+/* Hit-target floor for chrome that does not use .button (attn-n01r.12).
+   .button already carries min-height: 46px and every control using it passed;
+   every miss was a control outside that class — nav links, the brand, the copy
+   buttons, the footer links. Padding rather than min-height so the visual
+   rhythm of the nav is unchanged; the target grows, the type does not move. */
+/* Disclosure trigger — desktop shows the links inline, so it is hidden there
+   and revealed by the <=680px block below (attn-n01r.17). */
+.nav-toggle {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
+  margin-left: auto;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+
 .nav-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
   color: var(--hosted-muted);
   font-size: 0.86rem;
 }
@@ -73,6 +132,11 @@ h2,
 h3,
 p {
   text-wrap: balance;
+  /* Display type is set in clamp()ed rem, so at 200% text a single long word
+     ("documents.") can exceed the column and neither balance nor normal
+     wrapping will break it. Breaking a word is worse typography than a page
+     that scrolls sideways is a usability failure (attn-n01r.23, WCAG 1.4.4). */
+  overflow-wrap: break-word;
 }
 
 .hero h1 {
@@ -95,7 +159,10 @@ p {
 }
 
 .hero-lede {
-  max-width: 610px;
+  /* ch against the column, not a fixed px cap (attn-n01r.47). At 1024 the hero
+     column is 922px and a 610px cap stopped the lede 312px short of the h1's
+     edge — a ragged right margin beside a large empty half. */
+  max-width: 62ch;
   margin: 0;
   color: var(--hosted-muted);
   font: 1.18rem/1.6 var(--sans);
@@ -115,7 +182,7 @@ p {
   max-width: 620px;
   margin-top: 1.35rem;
   color: var(--hosted-muted);
-  font: 0.75rem/1.4 var(--mono);
+  font: 0.75rem/1.5 var(--sans);
 }
 
 .local-note span {
@@ -131,7 +198,7 @@ p {
   height: 6px;
   margin-top: 0.23rem;
   border-radius: 99px;
-  background: var(--green);
+  background: var(--hosted-muted);
 }
 
 .product-stage {
@@ -139,9 +206,20 @@ p {
   min-height: 600px;
 }
 
+/* Sized by the asset's real aspect, not by whatever the stage has left over
+   (attn-n01r.13). Anchored top-left and given 4/3 + the 28px chrome bar, so the
+   frame matches the capture and `contain` has nothing to crop. Previously the
+   inset-driven box measured 1.025 against a 1.333 source and `cover` discarded
+   about 13% off each horizontal edge — the file tree read "-cap-…", "er files",
+   "lan.md" and the review cards were sliced mid-sentence with their badges cut
+   to "CO" and "S". Those cards are the product's whole thesis. */
 .window {
   position: absolute;
-  inset: 24px 0 20px 30px;
+  top: 24px;
+  left: 30px;
+  right: 0;
+  aspect-ratio: 4 / 3;
+  max-height: calc(100% - 44px);
   overflow: hidden;
   border: 1px solid var(--rule);
   border-radius: 12px;
@@ -158,14 +236,19 @@ p {
   background: linear-gradient(var(--window-chrome-top), var(--window-chrome-bottom));
 }
 
+/* Painted, not typed (attn-n01r.25). These were text in a pseudo-element —
+   measured 1.72:1 in PAPER and 1.63:1 in INK — so the decorative-content
+   exemption in WCAG 1.4.3 was arguable rather than airtight, and any scanner
+   would flag them. As background circles they are neither text nor exposed. */
 .window::after {
-  content: '●  ●  ●';
+  content: '';
   position: absolute;
-  top: 8px;
+  top: 11px;
   left: 12px;
-  color: var(--window-dots);
-  font: 0.55rem var(--mono);
-  letter-spacing: 0.2em;
+  width: 38px;
+  height: 7px;
+  background:
+    radial-gradient(circle 3.5px at 3.5px 50%, var(--window-dots) 98%, transparent) 0 0 / 15.5px 100% repeat-x;
 }
 
 .window picture {
@@ -177,7 +260,9 @@ p {
   display: block;
   width: 100%;
   height: 100%;
-  object-fit: cover;
+  /* contain, not cover: the frame now shares the source's ratio, so this only
+     guards against sub-pixel rounding rather than cropping anything. */
+  object-fit: contain;
   object-position: center top;
 }
 
@@ -201,7 +286,7 @@ p {
   display: block;
   margin-top: 0.25rem;
   color: var(--hosted-muted);
-  font: 0.75rem/1.4 var(--mono);
+  font: 0.75rem/1.5 var(--sans);
 }
 
 .stage-label.local {
@@ -237,7 +322,10 @@ p {
   max-width: 1300px;
   margin: 0 auto 8rem;
   display: grid;
-  grid-template-columns: 1.25fr 1fr 1fr;
+  /* minmax(0,…) so tracks can shrink below their content's min-content width.
+     Bare `1fr` floors at min-content, which is what pushed 200% text to 574px
+     inside a 390px viewport (attn-n01r.23). */
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   border: 1px solid var(--rule);
   background: var(--rule);
   gap: 1px;
@@ -260,9 +348,30 @@ p {
   font: 0.75rem var(--sans);
 }
 
-.entry h2 {
+/* The card head is now a flex row so the flag reserves space instead of
+   overlapping the eyebrow (attn-n01r.24). */
+.entry-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+
+.entry-flag {
+  flex: 0 0 auto;
+  color: var(--rust);
+  font: 700 0.75rem var(--sans);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.entry-title {
+  display: block;
   margin: 2.7rem 0 0.35rem;
-  font-size: 1.7rem;
+  font-family: var(--serif);
+  font-size: clamp(1.35rem, 2.1vw, 1.7rem);
+  font-weight: 600;
+  line-height: 1.1;
 }
 
 .entry p {
@@ -271,16 +380,7 @@ p {
   font: 0.84rem/1.45 var(--sans);
 }
 
-.entry.primary-entry::after {
-  content: 'Start here';
-  position: absolute;
-  right: 1.2rem;
-  top: 1.1rem;
-  color: var(--rust);
-  font: 700 0.75rem var(--mono);
-  text-transform: uppercase;
-  letter-spacing: 0.08em;
-}
+
 
 .chapter {
   max-width: 1180px;
@@ -291,21 +391,27 @@ p {
 
 .chapter-head {
   display: grid;
-  grid-template-columns: 0.75fr 1.25fr;
+  grid-template-columns: minmax(0, 0.75fr) minmax(0, 1.25fr);
   gap: 4rem;
   align-items: start;
 }
 
 .chapter-index {
-  color: var(--rust);
-  font: 0.75rem var(--mono);
+  color: var(--hosted-muted);
+  font: 600 0.7rem var(--sans);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
 }
 
 .chapter h2 {
   margin: 0;
   max-width: 820px;
-  font-size: clamp(3rem, 5.7vw, 6rem);
-  line-height: 0.96;
+  /* Below the h1, always (attn-n01r.11). This capped at the same 6rem as the
+     hero h1 but with a steeper vw coefficient, so it overtook the page's own
+     title at wide viewports — measured h1 66.56px against h2 72.96px at 1440,
+     giving four equal mastheads and no summit. */
+  font-size: clamp(2.6rem, 4.4vw, 4.6rem);
+  line-height: 0.98;
   letter-spacing: -0.047em;
 }
 
@@ -319,7 +425,7 @@ p {
 .steps {
   margin-top: 5rem;
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 
 .step {
@@ -337,8 +443,9 @@ p {
 }
 
 .step-num {
-  color: var(--rust);
-  font: 0.75rem var(--mono);
+  color: var(--hosted-muted);
+  font: 600 0.7rem var(--sans);
+  letter-spacing: 0.06em;
 }
 
 .step h3 {
@@ -391,7 +498,7 @@ p {
 .surfaces {
   margin-top: 4.5rem;
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   border: 1px solid var(--rule);
 }
 
@@ -414,22 +521,33 @@ p {
 }
 
 .surface-label {
-  font: 700 0.75rem var(--mono);
+  font: 700 0.7rem var(--sans);
   text-transform: uppercase;
   letter-spacing: 0.1em;
 }
 
+/* Muted, not ledger green (attn-n01r.18). The Quarantine Rule reserves green
+   for the collaboration layer — suggestion and insertion — and this is a
+   category label on base chrome with no such meaning. */
 .surface.browser .surface-label {
-  color: var(--green);
+  color: var(--hosted-muted);
 }
 
+/* The panel inversion carries the browser/native distinction; the label does
+   not need a hue of its own (attn-n01r.37). --native-panel-label was
+   oklch(0.72 0.08 32) in PAPER and oklch(0.75 0.08 32) in INK — warm salmon in
+   both, the only warm hue anywhere in the dark theme, and an orphan next to the
+   accent. */
 .surface.native .surface-label {
-  color: var(--native-panel-label);
+  color: var(--native-panel-muted);
 }
 
 .surface h3 {
+  /* clamp, like the h1 and the section heads (attn-n01r.47). A flat 41.6px in a
+     290px content box at 768 broke 'Your private desk' to two lines while its
+     neighbour stayed on one. */
   margin: 4rem 0 0.8rem;
-  font-size: 2.6rem;
+  font-size: clamp(1.9rem, 3.2vw, 2.6rem);
   letter-spacing: -0.025em;
 }
 
@@ -447,7 +565,7 @@ p {
   margin: 2rem 0 0;
   padding: 0;
   list-style: none;
-  font: 0.84rem/1.8 var(--mono);
+  font: 0.86rem/1.75 var(--sans);
 }
 
 .native-section {
@@ -458,15 +576,18 @@ p {
 
 .native-grid {
   display: grid;
-  grid-template-columns: 0.8fr 1.2fr;
+  grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
   gap: 5rem;
   align-items: center;
 }
 
 .native-section h2 {
   margin: 0.9rem 0 1.1rem;
-  font-size: clamp(3rem, 5vw, 5.2rem);
-  line-height: 0.95;
+  /* Same tier as the chapter heads (attn-n01r.11): this was capping at 5.2rem
+     with a 5vw coefficient and rendering 72px against the h1's 74.9px at 1440,
+     which is not a hierarchy. */
+  font-size: clamp(2.6rem, 4.4vw, 4.6rem);
+  line-height: 0.98;
   letter-spacing: -0.045em;
 }
 
@@ -479,6 +600,11 @@ p {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  /* The install command is one unbreakable token, so at 200% text it widened
+     the page rather than the block. DESIGN.md's Wide-Sheet Rule is explicit
+     that oversized code scrolls inside its container — the copy button stays
+     put and only the command scrolls (attn-n01r.23). */
+  min-width: 0;
   gap: 1rem;
   margin-top: 0.65rem;
   padding: 1rem;
@@ -488,8 +614,23 @@ p {
   font: 0.79rem var(--mono);
 }
 
+/* Only the command scrolls; the copy button holds its place. */
+.code > span {
+  min-width: 0;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.code-copy {
+  flex: 0 0 auto;
+}
+
 .code-copy {
   border: 0;
+  /* 23.4px tall measured — under even the 24px WCAG 2.2 AA floor, and it is the
+     only affordance for the install commands on mobile. */
+  min-height: 44px;
+  min-width: 44px;
   padding: 0.2rem 0.45rem;
   border-radius: 6px;
   background: transparent;
@@ -516,6 +657,39 @@ p {
   height: auto;
 }
 
+/* The closing offer (attn-n01r.20). Weighted like a section head, not like the
+   hero — this is the last word, not a second masthead. Sits on the second
+   neutral layer so it reads as a distinct band rather than more page. */
+.closer {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: clamp(4.5rem, 8vw, 7rem) 1.4rem clamp(4rem, 7vw, 6rem);
+  border-top: 1px solid var(--rule);
+  text-align: left;
+}
+
+.closer h2 {
+  margin: 0;
+  max-width: 20ch;
+  font-size: clamp(2.6rem, 4.4vw, 4.6rem);
+  line-height: 0.98;
+  letter-spacing: -0.045em;
+}
+
+.closer p {
+  max-width: 54ch;
+  margin: 1.2rem 0 0;
+  color: var(--hosted-muted);
+  font: 1.05rem/1.65 var(--sans);
+}
+
+.closer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin-top: 2.2rem;
+}
+
 footer {
   border-top: 1px solid var(--rule);
 }
@@ -533,9 +707,23 @@ footer {
   font: 0.78rem var(--sans);
 }
 
+/* 18px tall measured — 41% of the target, three adjacent small links in a row.
+   They are also the only links on the page distinguished by nothing at rest,
+   so the underline does double duty (attn-n01r.12 / .25). */
 .footer-links {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   gap: 1.3rem;
+}
+
+.footer-links a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 0.25em;
 }
 
 .footer-links a:hover {
@@ -545,7 +733,7 @@ footer {
 @media (max-width: 1180px) {
   .hero {
     min-height: auto;
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     padding-top: 4.5rem;
   }
 
@@ -567,7 +755,7 @@ footer {
 
   .chapter-head,
   .native-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: 2rem;
   }
 
@@ -576,13 +764,55 @@ footer {
   }
 }
 
-@media (max-width: 680px) {
-  .site-nav {
-    height: 64px;
+/* Mid-range tier (attn-n01r.47). landing.css had exactly two breakpoints, 1180
+   and 680, so between them every grid held its desktop track count while the
+   container shed up to 500px: .entry-strip tracks fell to 278/223/223 at 768 and
+   'Import workspace' wrapped while its neighbours did not. */
+@media (max-width: 980px) {
+  .steps {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   }
 
-  .nav-link {
+  .surfaces {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .share-proof {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 680px) {
+  .site-nav {
+    min-height: 64px;
+    --nav-h: 64px;
+  }
+
+  /* The links move into the disclosure rather than disappearing. */
+  .nav-toggle {
+    display: inline-flex;
+  }
+
+  .site-nav {
+    flex-wrap: wrap;
+  }
+
+  .nav-right {
+    order: 3;
+    width: 100%;
     display: none;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.25rem;
+    padding-bottom: 1rem;
+  }
+
+  .nav-right[data-open='true'] {
+    display: flex;
+  }
+
+  .nav-right .nav-link {
+    padding-block: 0.35rem;
   }
 
   .nav-right {
@@ -590,7 +820,11 @@ footer {
   }
 
   .site-nav .button {
-    min-height: 40px;
+    /* 44px, not 40 (attn-n01r.12). This override dropped the nav CTA below
+       .button's own 46px floor at exactly the width where it matters most —
+       mobile, where it is one of only two controls in the header. The 6px
+       saved was not buying anything. */
+    min-height: 44px;
     padding: 0.55rem 0.75rem;
   }
 
@@ -616,7 +850,7 @@ footer {
   }
 
   .local-note {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: 0.45rem;
   }
 
@@ -645,7 +879,7 @@ footer {
   }
 
   .entry-strip {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     margin: 0 1rem 5rem;
   }
 
@@ -653,7 +887,7 @@ footer {
     min-height: 135px;
   }
 
-  .entry h2 {
+  .entry-title {
     margin-top: 1.8rem;
   }
 
@@ -666,7 +900,7 @@ footer {
   }
 
   .steps {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     margin-top: 3.5rem;
   }
 
@@ -677,7 +911,7 @@ footer {
   }
 
   .share-proof {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     gap: 2rem;
   }
 
@@ -686,7 +920,7 @@ footer {
   }
 
   .surfaces {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .surface {
@@ -706,5 +940,124 @@ footer {
   .footer-inner {
     align-items: flex-start;
     flex-direction: column;
+  }
+}
+
+/* The relay-visibility ledger (attn-n01r.16). Two columns because the claim IS
+   the contrast: a reader checking an E2EE promise wants the "cannot" list beside
+   the "can" list, not a paragraph. Set in the reading face — this is prose to be
+   read, not chrome to be operated. */
+.relay-ledger {
+  max-width: 1180px;
+  margin: 4rem auto 0;
+  padding: clamp(2rem, 4vw, 3rem);
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  background: var(--sheet);
+}
+
+.relay-ledger h3 {
+  margin: 0;
+  font-size: clamp(1.5rem, 2.6vw, 2rem);
+  letter-spacing: -0.02em;
+}
+
+.relay-ledger-intro {
+  max-width: 60ch;
+  margin: 0.7rem 0 0;
+  color: var(--hosted-muted);
+  font: 1rem/1.6 var(--sans);
+}
+
+.relay-ledger-cols {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: clamp(1.5rem, 4vw, 3rem);
+  margin-top: 2rem;
+}
+
+.relay-col h4 {
+  margin: 0 0 0.8rem;
+  font: 600 0.7rem var(--sans);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--hosted-muted);
+}
+
+.relay-col ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 0.6rem;
+}
+
+.relay-col li {
+  padding-left: 1.4rem;
+  position: relative;
+  font: 0.95rem/1.5 var(--sans);
+}
+
+/* Shape carries the distinction, not just position: a mark for what is
+   observed, a struck circle for what is not. */
+.relay-col[data-tone='sees'] li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.52em;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--hosted-muted);
+}
+
+.relay-col[data-tone='blind'] li::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.42em;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  border: 1.5px solid var(--green);
+}
+
+.relay-col[data-tone='blind'] li::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0.86em;
+  width: 9px;
+  height: 1.5px;
+  background: var(--green);
+  transform: rotate(-45deg);
+  transform-origin: center;
+}
+
+.relay-ledger-note {
+  max-width: 70ch;
+  margin: 2rem 0 0;
+  padding-top: 1.5rem;
+  border-top: 1px solid var(--rule);
+  color: var(--hosted-muted);
+  font: 0.9rem/1.6 var(--sans);
+}
+
+.relay-ledger-note a {
+  color: var(--ink);
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+.relay-ledger code {
+  padding: 0.1em 0.3em;
+  border-radius: 4px;
+  background: var(--paper-deep);
+  font: 0.9em var(--mono);
+}
+
+@media (max-width: 680px) {
+  .relay-ledger-cols {
+    grid-template-columns: minmax(0, 1fr);
   }
 }

@@ -1,7 +1,6 @@
 <script lang="ts">
   import type { AppRoute } from '../../lib/hosted/routes';
   import DeskHome from './DeskHome.svelte';
-  import EditorShell from './EditorShell.svelte';
   import OpenPage from './OpenPage.svelte';
   import StoragePage from './StoragePage.svelte';
   import type {
@@ -39,7 +38,8 @@
     try {
       health = service.storageHealth();
       if (newIntent) {
-        await createAndOpen();
+        // The URL intent keeps its idempotency (attn-cjn).
+        await createAndOpen(true);
         return;
       }
       if (route?.view === 'workspace') {
@@ -64,11 +64,21 @@
     }
   }
 
-  async function createAndOpen(): Promise<void> {
+  /**
+   * @param reuseEmpty  Reuse an existing untouched workspace rather than
+   *   minting one. True only for the `/app#new` URL intent (attn-n01r.50).
+   */
+  async function createAndOpen(reuseEmpty: boolean): Promise<void> {
     // #new is idempotent (attn-cjn): reuse the most recent empty, untouched
     // Untitled workspace instead of minting another — a bookmarked /app#new
     // or a back-button revisit must not grow the desk.
-    const existing = await service.listWorkspaces();
+    //
+    // That guard is scoped to the URL intent it was written for. It used to run
+    // for the desk's "New workspace" button too, so a control with that label
+    // sometimes reopened an old workspace and said nothing: clicking it three
+    // times returned the same id and left the desk count unchanged. A button
+    // that names an action has to perform it.
+    const existing = reuseEmpty ? await service.listWorkspaces() : [];
     for (const candidate of existing) {
       if (candidate.name !== 'Untitled') continue;
       if (candidate.assetCount > 0 || candidate.markdownCount > 1) continue;
@@ -100,7 +110,8 @@
   async function onCreate(): Promise<void> {
     phase = 'loading';
     try {
-      await createAndOpen();
+      // The desk button always creates (attn-n01r.50).
+      await createAndOpen(false);
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : String(error);
       phase = 'error';
@@ -109,6 +120,36 @@
 
   // Bound EditorShell instance so history navigation can drain its autosave.
   let editorShell = $state<{ flushPendingEdits: () => Promise<void> } | undefined>();
+
+  /* EditorShell is loaded on demand, not statically (attn-n01r.41).
+     A static import put the editor's whole dependency set — bits-ui, the
+     dialog components, BottomSheet: ~150 KB, 46% of the desk route's static
+     JS — into the app entry's modulepreload list, so the desk fetched it at
+     highest priority to render a list of file names. It is only ever needed
+     under `editorMode && detail`, which is the same condition that guards the
+     render below. `editorShell` stays optional-chained at its one call site
+     (flushPendingEdits on history navigation), so the brief window before the
+     chunk resolves is safe. */
+  let EditorShell = $state<typeof import('./EditorShell.svelte').default | undefined>();
+  let editorShellPending = false;
+
+  function loadEditorShell(): void {
+    if (EditorShell || editorShellPending) return;
+    editorShellPending = true;
+    void import('./EditorShell.svelte')
+      .then((module) => {
+        EditorShell = module.default;
+      })
+      .finally(() => {
+        editorShellPending = false;
+      });
+  }
+
+  // Start the fetch as soon as the route resolves to the editor, so the chunk
+  // is in flight while the workspace body is still being read.
+  $effect(() => {
+    if (editorMode) loadEditorShell();
+  });
 
   // Switch the active file WITHOUT a page reload: read the new body, update
   // state, and push the URL. The editor swaps in place (< 100 ms, no flash)
@@ -286,7 +327,7 @@
       </p>
     </main>
   </div>
-{:else if editorMode && detail}
+{:else if editorMode && detail && EditorShell}
   <EditorShell
     bind:this={editorShell}
     {service}
@@ -304,6 +345,16 @@
       );
     }}
   />
+{:else if editorMode && detail}
+  <!-- The editor chunk is in flight (attn-n01r.41). Without this branch the
+       unloaded case would fall through to "That workspace isn't here", which
+       is both wrong and alarming — the workspace is present, its UI is not
+       downloaded yet. -->
+  <div class="app-shell" data-app-view="editor-loading">
+    <main class="desk">
+      <p class="eyebrow" role="status">Opening {detail.name}…</p>
+    </main>
+  </div>
 {:else if route?.view === 'workspace'}
   <div class="app-shell" data-app-view="missing">
     <main class="desk">

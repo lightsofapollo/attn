@@ -252,3 +252,41 @@ export function shareTargetMatches(
   if (p.length === 0 || t.length === 0) return false;
   return t === p || t.startsWith(`${p}/`);
 }
+
+/**
+ * Is `path` one of the files the room actually PUBLISHES?
+ *
+ * Distinct from `ownerRoomForPath`, which resolves a path to a room via the
+ * share ROOT — for a multi-file share that root is the project directory, so
+ * every file in the project resolves to the room whether or not it is in the
+ * review. Exiting review is about the reviewed FILE SET, so it has to be
+ * answered from published snapshots.
+ *
+ * Snapshot `ownerDisplayPath` is relative to the share root ("alpha.md") while
+ * navigation paths are absolute, so compare on both forms — joined against the
+ * known root, else by whole-segment suffix.
+ */
+export function roomPublishesPath(params: {
+  path: string | null | undefined;
+  roomId: RoomId | null;
+  snapshots: ReadonlyArray<RoomPathSnapshot>;
+  rootPath?: string | null;
+}): boolean {
+  if (params.roomId === null) return false;
+  const target = normalizeRoomPath(params.path);
+  if (!target) return false;
+  const root = normalizeRoomPath(params.rootPath);
+
+  for (const snapshot of params.snapshots) {
+    if (snapshot.roomId !== params.roomId) continue;
+    const published = normalizeRoomPath(snapshot.ownerDisplayPath);
+    if (!published) continue;
+    if (published === target) return true;
+    if (published.startsWith('/')) continue;
+    if (root && `${root}/${published}` === target) return true;
+    // Leading slash keeps the match on a segment boundary: "a.md" must not
+    // match "beta.md".
+    if (target.endsWith(`/${published}`)) return true;
+  }
+  return false;
+}

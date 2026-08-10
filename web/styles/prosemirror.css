@@ -81,9 +81,11 @@
   margin: 0;
   padding: 0.35rem clamp(1rem, 2.5vw, 2.25rem) 2rem;
   outline: none;
-  /* The reading column is the document — always serif (Read/Do rule), even
-     when the hosted desktop shell sets its chrome font to sans (attn-vea). */
-  font-family: var(--serif);
+  /* The reading column is the document — it follows the DOCUMENT font, never
+     the chrome font (Read/Do rule), even when the hosted desktop shell sets
+     its chrome to sans (attn-vea). `--doc-font` is the typeset-owned token
+     (typeset.css); it defaults to `--serif`, which is the historical value. */
+  font-family: var(--doc-font, var(--serif));
   white-space: pre-wrap;
   word-wrap: break-word;
   overflow-x: hidden;
@@ -98,7 +100,19 @@
   outline: none !important;
 }
 
-.ProseMirror > :is(p, h1, h2, h3, h4, h5, h6, ul, ol, dl, blockquote, pre, table, .mermaid-container) {
+/* The shared content column, applied by hand-maintained allowlist. Anything a
+   NodeView renders as a top-level block has to be named here or it escapes the
+   measure entirely (`.frontmatter-card`, `.math-container` — attn-vlmz.3.1).
+   Wrapper blocks that also need `min()` clamping and scroll behaviour
+   (`.prose-scroll-x`, `.code-block`, `.tableWrapper`) carry their own rules
+   below instead. This is the ONLY copy of the measure discipline: the static
+   renderer's twin in base.css died with Viewer.svelte (2026-08-08), so there
+   is no other list to keep in step with.
+
+   Note for anything added here whose own rule uses the `margin` shorthand:
+   the shorthand's implicit `margin-inline: 0` beats this rule at equal
+   specificity, so use `margin-block` there. */
+.ProseMirror > :is(p, h1, h2, h3, h4, h5, h6, ul, ol, dl, blockquote, pre, table, .mermaid-container, .math-container, .frontmatter-card) {
   max-width: var(--content-measure);
   margin-inline: auto;
 }
@@ -124,6 +138,130 @@
   transition: color 0.18s ease, box-shadow 0.18s ease, outline-color 0.18s ease;
 }
 
+/* Code block frame: the positioning context for pinned chrome (copy button,
+   language label). The scroller inside moves; the frame never does. */
+.ProseMirror .code-block {
+  position: relative;
+  max-width: min(100%, var(--content-measure));
+  margin-inline: auto;
+}
+
+/* prosemirror-tables' columnResizing installs its own TableView, so a table
+   renders inside `.tableWrapper` and the schema's `.prose-scroll-x` wrapper
+   never applies to it. This stylesheet is hand-rolled (prosemirror-tables'
+   CSS is deliberately not imported), so that wrapper arrives with NO styles:
+   unbounded width, no scrolling, no frame. Give it what every other wide
+   block gets. */
+.ProseMirror .tableWrapper {
+  position: relative;
+  max-width: min(100%, var(--content-measure));
+  margin-inline: auto;
+  overflow-x: auto;
+  overflow-y: hidden;
+  border-radius: 0.6rem;
+  outline: 1px solid color-mix(in oklch, var(--ring) 45%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in oklch, var(--ring) 10%, transparent);
+}
+
+/* Embedded SVG (attn-vlmz.4.2). Moved here from a runtime-injected <style>
+   element in embedded-svg-view.ts: an injected tag is UNLAYERED and would have
+   silently outranked every layered rule in this file.
+
+   Deliberately NOT added to the shared-column allowlist above. Like
+   `.prose-scroll-x`, `.code-block` and `.tableWrapper`, this block needs the
+   `min(100%, ...)` clamp; the allowlist applies a bare `var(--content-measure)`
+   at higher specificity (0,2,0 vs 0,1,0), which would strip the 100% guard and
+   let a wide diagram overflow a narrow viewport. */
+.embedded-svg {
+  max-width: min(100%, var(--content-measure));
+  margin-block: 1.15em;
+  margin-inline: auto;
+}
+
+.embedded-svg > svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: 100%;
+  /* Letterboxes under the default preserveAspectRatio rather than letting a
+     tall diagram take the whole viewport. */
+  max-height: 80vh;
+  margin-inline: auto;
+}
+
+.embedded-svg-note {
+  margin-top: 0.5em;
+  font-family: var(--sans);
+  font-size: 0.72em;
+  letter-spacing: 0.01em;
+  color: var(--muted-foreground);
+  border-left: 2px solid color-mix(in oklch, var(--destructive) 55%, transparent);
+  padding-left: 0.6em;
+}
+
+.embedded-svg-fallback {
+  border: 1px solid color-mix(in oklch, var(--ring) 45%, transparent);
+  border-radius: 0.6rem;
+  padding: 0.6em 0.8em;
+  background: color-mix(in oklch, var(--muted) 40%, transparent);
+}
+
+.embedded-svg-fallback > summary {
+  cursor: pointer;
+  font-family: var(--sans);
+  font-size: 0.78em;
+  color: var(--muted-foreground);
+}
+
+.embedded-svg-fallback > pre {
+  margin: 0.6em 0 0;
+  overflow-x: auto;
+  font-family: var(--mono);
+  font-size: 0.75em;
+  white-space: pre;
+}
+
+.ProseMirror .tableWrapper > table {
+  /* `width: 100%`, not `max-content` (attn-11g4.8 follow-up).
+     Once the schema declares colspan/rowspan/colwidth, prosemirror-tables'
+     column-resize plugin writes an INLINE `min-width: <cols x 100>px` onto the
+     table. An inline declaration beats a stylesheet one, so the `min-width:
+     100%` below stopped applying and `max-content` collapsed a narrow table to
+     its content — a 3-column table sat at 300px inside a 664px wrapper, and
+     the filled surface from attn-11g4.3 visibly stopped reaching the measure.
+
+     `width: 100%` fixes it without fighting the library for the same property:
+     a narrow table fills the wrapper, while a wide one is still forced past it
+     by the library's own larger inline min-width and scrolls inside
+     `.tableWrapper` as before. Deliberately NOT `min-width: 100% !important` —
+     that would override the library's floor and let a genuinely wide table
+     shrink below the width its columns need. */
+  width: 100%;
+  min-width: 100%;
+  margin-bottom: 0;
+}
+
+/* Wide blocks are bordered cards, not running prose, so they need more air
+   than a paragraph's tail — the `pre` inside carries margin:0 and the frame
+   had none, which left code and tables sandwiched against the heading above
+   and the paragraph below. Adjacent margins collapse, so a heading's own
+   smaller bottom margin does not add to this. */
+.ProseMirror .code-block,
+.ProseMirror > .prose-scroll-x,
+.ProseMirror .tableWrapper {
+  margin-block: 1.5rem;
+}
+
+.ProseMirror > :first-child.code-block,
+.ProseMirror > :first-child.prose-scroll-x,
+.ProseMirror > :first-child.tableWrapper {
+  margin-top: 0;
+}
+
+.ProseMirror .code-block > .prose-scroll-x {
+  max-width: 100%;
+}
+
 /* Copy button on code blocks */
 .code-copy-btn {
   position: absolute;
@@ -146,7 +284,8 @@
   transition: opacity 0.15s ease, background 0.14s ease, color 0.14s ease;
 }
 
-.prose-scroll-x:hover > .code-copy-btn {
+.prose-scroll-x:hover > .code-copy-btn,
+.code-block:hover > .code-copy-btn {
   opacity: 1;
 }
 
@@ -180,32 +319,6 @@
   margin-bottom: 0;
 }
 
-
-/* Style bits-ui horizontal scrollbars in code block scroll areas. */
-.ProseMirror .prose-scroll-area-x [data-slot="scroll-area-scrollbar"][data-orientation="horizontal"] {
-  height: 12px;
-  padding: 0 2px 2px;
-  opacity: 1;
-  transition: opacity 0.18s ease;
-}
-
-.ProseMirror .prose-scroll-area-x [data-slot="scroll-area-scrollbar"][data-state="hidden"] {
-  opacity: 0;
-  pointer-events: none;
-}
-
-.ProseMirror .prose-scroll-area-x [data-slot="scroll-area-viewport"] {
-  overflow-y: hidden;
-}
-
-.ProseMirror .prose-scroll-area-x [data-slot="scroll-area-thumb"] {
-  background: var(--border);
-  transition: background-color 0.14s ease;
-}
-
-.ProseMirror .prose-scroll-area-x [data-slot="scroll-area-thumb"]:hover {
-  background: var(--muted-foreground);
-}
 
 /* Hide cursor in read-only mode */
 .ProseMirror:not([contenteditable="true"]) {
@@ -311,32 +424,51 @@
   margin-top: 0;
 }
 
-/* Tables inside ProseMirror */
-.ProseMirror table {
-  width: 100%;
-  border-collapse: collapse;
-  margin-bottom: 1rem;
-  font-size: 1rem;
-}
+/* Tables inside ProseMirror — MECHANICS ONLY (cascade model, 2026-08-08).
 
+   The table SURFACE — fill, border, radius, inset lip, cell padding, the
+   eyebrow header, the `em` sizing that lets a typeset rescale tables with
+   the prose — lives once, in base.css's `.attn-doc table` family, and
+   reaches this editor through the mount's `attn-doc` class in `@layer doc`.
+
+   This file used to carry a full twin of that surface with a comment
+   explaining that `@layer components` beats `@layer base` wholesale, so the
+   restatement was load-bearing. The doc tier retired that: what remains here
+   is only what the EDITOR adds to a table, and `doc-surface-parity.test.ts`
+   fails if the surface ever gets restated on this side again. */
 .ProseMirror th,
 .ProseMirror td {
-  padding: 0.5rem 0.75rem;
-  text-align: left;
-  border-bottom: 1px solid var(--border);
+  /* prosemirror-tables inserts `.column-resize-handle` and `.selectedCell::after`
+     as absolutely-positioned children of the CELL, so the cell has to be their
+     containing block — upstream's own stylesheet (which this file deliberately
+     replaces, so we owe its requirements by hand) carries the same declaration.
+     Without it both overlays resolve against `.tableWrapper` and describe the
+     whole table instead of one cell.
+
+     Latent today: the cell nodes in schema.ts declare no colspan/rowspan/colwidth,
+     so TableMap computes width NaN and both overlays throw before they render
+     (attn-11g4.7). This is the half of the fix that lives in CSS.
+
+     `border-collapse: separate` (on `.attn-doc table` in base.css, whose doc
+     layer paints this editor's tables) is what makes this well-defined — under
+     `collapse`, CSS 2.1 §17.6.2 leaves `position` on a cell undefined. Cells
+     carry no background, so becoming positioned repaints nothing over the
+     table's own fill, radius or inset lip; only the 1px bottom rules move
+     painting phase, in place and over an opaque surface. */
+  position: relative;
 }
 
-.ProseMirror th {
-  font-family: var(--sans);
-  font-weight: 600;
-  font-size: 0.7rem;
-  text-transform: uppercase;
-  letter-spacing: 0.06em;
-  color: var(--muted-foreground);
-  border-bottom-width: 2px;
-}
+/* Last row's rule would double the panel's own bottom border and cut across
+   the rounded corners. `> :last-child` is the trailing row section — tbody,
+   after the colgroup prosemirror-tables' TableView prepends. */
+/* (The last-row border trim and the `th` eyebrow used to be restated here as
+   twins of base.css — deleted with the rest of the surface when the doc layer
+   made the single copy authoritative. See the mechanics-only note above.) */
 
-/* Code block language label */
+/* Code block language label. Inside the .code-block frame it pins to the
+   frame's top-left (matching the pinned copy button) so it can't slide away
+   with horizontal scroll; the in-flow pre::before form remains for code
+   rendered without the NodeView frame. */
 .ProseMirror pre[data-params]::before {
   content: attr(data-params);
   display: block;
@@ -351,6 +483,43 @@
 
 .ProseMirror pre[data-params=""]::before {
   display: none;
+}
+
+.ProseMirror .code-block[data-params]:not([data-params=""])::before,
+.ProseMirror .code-block[data-detected]::before {
+  content: attr(data-params);
+  position: absolute;
+  top: 1rem;
+  left: 1.125rem;
+  z-index: 10;
+  pointer-events: none;
+  font-size: 0.7rem;
+  line-height: 1.2;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  opacity: 0.6;
+  color: var(--muted-foreground);
+  font-family: var(--sans);
+}
+
+/* Detected (not author-declared) languages read as a guess: lowercase
+   italic, quieter. */
+.ProseMirror .code-block[data-detected]::before {
+  content: attr(data-detected);
+  text-transform: lowercase;
+  font-style: italic;
+  opacity: 0.45;
+}
+
+.ProseMirror .code-block > .prose-scroll-x > pre[data-params]::before {
+  content: none;
+}
+
+/* The pinned label needs its lane back: restore the vertical space the
+   in-flow label used to occupy at the top of the pre. */
+.ProseMirror .code-block > .prose-scroll-x > pre[data-params]:not([data-params=""]),
+.ProseMirror .code-block[data-detected] > .prose-scroll-x > pre {
+  padding-top: 2.35rem;
 }
 
 /* Editable indicator — subtle top accent when in edit mode */
@@ -482,7 +651,7 @@
   height: min(94vh, 980px);
   display: flex;
   flex-direction: column;
-  border-radius: 0.75rem;
+  border-radius: 10px; /* lg — matches dialog surfaces */
   overflow: hidden;
   background: var(--background);
   border: 1px solid var(--border);
@@ -517,7 +686,7 @@
   color: var(--foreground);
   cursor: pointer;
   line-height: 1;
-  font-size: 1.1rem;
+  font-size: 1.15rem; /* control-lg */
 }
 
 .mermaid-fullscreen-btn:hover {
@@ -625,33 +794,32 @@
   pointer-events: none;
 }
 
-/* Frontmatter card (folded YAML metadata) — matches the Theme v2 prototype. */
+/* Frontmatter card (folded YAML metadata) — matches the Theme v2 prototype.
+   Structure now comes from the shared accordion primitive
+   (src/lib/components/ui/accordion — attn-vlmz.3.3): a real <button> trigger
+   and a grid-animated panel, NOT the <details>/<summary> this card used to
+   hand-roll. Open/close, the chevron and its rotate, keyboard, focus and
+   reduced-motion all live in the primitive's utility classes, so the rules
+   that used to implement them here are gone:
+     - `summary` (padding/flex/cursor/user-select) → the trigger's utilities
+     - `summary::-webkit-details-marker` → no <details>, no marker
+     - `.frontmatter-chev` + `[open] .frontmatter-chev` rotate → the
+       primitive's chevron and `group-data-[state=open]` rotate
+   What stays here is only the card's identity. */
 .ProseMirror .frontmatter-card {
   border: 1px solid var(--border);
   border-radius: 10px;
   background: var(--code-block);
   box-shadow: inset 0 1px 3px oklch(0 0 0 / 4%);
-  margin: 0 0 1.5rem;
+  /* `margin-block`, never the `margin` shorthand: this selector matches the
+     shared-column rule's specificity and comes later in the file, so a
+     shorthand's implicit `margin-inline: 0` won and pinned the card to the
+     left gutter while every other block sat centered (attn-vlmz.3.1). */
+  margin-block: 0 1.5rem;
   overflow: hidden;
   font-family: var(--sans);
   max-width: var(--content-measure);
 }
-.ProseMirror .frontmatter-card summary {
-  display: flex;
-  align-items: center;
-  gap: 0.6rem;
-  padding: 0.55rem 0.85rem;
-  cursor: pointer;
-  list-style: none;
-  user-select: none;
-}
-.ProseMirror .frontmatter-card summary::-webkit-details-marker { display: none; }
-.ProseMirror .frontmatter-chev {
-  color: var(--muted-foreground);
-  font-size: 0.7rem;
-  transition: transform 140ms var(--ease);
-}
-.ProseMirror .frontmatter-card[open] .frontmatter-chev { transform: rotate(90deg); }
 .ProseMirror .frontmatter-label {
   font: 600 0.7rem/1.2 var(--sans);
   letter-spacing: 0.06em;
@@ -670,7 +838,14 @@
   margin: 0;
   font: 400 0.82rem/1.55 var(--mono);
 }
-.ProseMirror .frontmatter-pairs dt { color: var(--muted-foreground); margin: 0; }
+/* Keys in the accent, values in ink (attn-bw2h.7). This is a sanctioned
+   labelling role under the One Pencil Rule's carve-out (DESIGN.md, added
+   2026-08-07), not decoration: in a two-column key/value grid the key names
+   the content rather than being it, and the tint separates the columns by
+   role so the pairs scan without a rule between them. Measured on the card's
+   own `--code-block` ground, not the page: 6.47:1 in Paper, 7.67:1 in Ink —
+   both clear the 4.5:1 floor these 0.82rem mono keys are held to. */
+.ProseMirror .frontmatter-pairs dt { color: var(--primary); margin: 0; }
 .ProseMirror .frontmatter-pairs dd {
   color: var(--foreground);
   margin: 0;
@@ -678,6 +853,19 @@
   word-break: break-word;
 }
 
+}
+
+/* Frontmatter card focus ring — deliberately unlayered, like the scrollbar
+   rules below.
+   The accordion primitive gives its trigger the app's standard OUTER ring
+   (`focus-visible:ring-[3px]`, a box-shadow). The card sets `overflow: hidden`
+   for its rounded corners, which clips that ring away on three sides and
+   leaves keyboard users with no visible focus. An inset ring is the honest fix
+   here, and it has to sit outside the cascade layers to win: Tailwind's
+   utilities are in `@layer utilities`, which beats the `@layer components`
+   that wraps the rest of this file. */
+.ProseMirror .frontmatter-card [data-slot='accordion-trigger']:focus-visible {
+  box-shadow: inset 0 0 0 2px var(--ring);
 }
 
 /* Horizontal code scrollbars use the global ink-tinted treatment from
@@ -691,4 +879,28 @@
    painting the editor's native selection the moment focus leaves it). */
 .ProseMirror .pending-anchor-highlight {
   background: var(--selection);
+}
+
+/* No native scroll rail inside prose blocks.
+ *
+ * base.css styles `::-webkit-scrollbar` globally, and in WKWebView styling it
+ * at all switches that element from macOS OVERLAY scrollbars to CLASSIC ones —
+ * which reserve layout space permanently. Measured on an overflowing table:
+ * 13px of the block's height carved out for an always-painted grey rail
+ * sitting under the last row, inside the block's own border. That gutter IS
+ * the "weird rail" (attn-rd3j.8); `scrollbar-width: auto` makes it 17px and
+ * there is no value that restores overlay behavior.
+ *
+ * So these blocks hide the bar and scroll by trackpad/shift-wheel, the same
+ * treatment the breadcrumb overflow already uses. Nothing is reserved, so
+ * revealing content causes no layout shift. */
+.ProseMirror .prose-scroll-x,
+.ProseMirror .tableWrapper {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.ProseMirror .prose-scroll-x::-webkit-scrollbar,
+.ProseMirror .tableWrapper::-webkit-scrollbar {
+  display: none;
 }

@@ -1,4 +1,5 @@
 <script lang="ts">
+  import BrandMark from '../../lib/BrandMark.svelte';
   import { getTheme, toggleTheme } from '../theme.svelte';
   import ReviewDemo from './ReviewDemo.svelte';
   import './alternate-landing.css';
@@ -21,7 +22,7 @@
 
   <nav class="alt-nav" aria-label="Main navigation">
     <a class="alt-brand" href="/homepage-alt" aria-label="attn alternate homepage">
-      <span aria-hidden="true">a.</span>attn
+      <BrandMark />attn
     </a>
     <div class="alt-nav-links">
       <a href="#how">How it works</a>
@@ -160,7 +161,7 @@
   </main>
 
   <footer class="alt-footer">
-    <a class="alt-brand" href="#top"><span aria-hidden="true">a.</span>attn</a>
+    <a class="alt-brand" href="#top"><BrandMark />attn</a>
     <p>Markdown review for people and agents.</p>
     <div><a href="/">Current homepage</a><a href="https://github.com/lightsofapollo/attn">GitHub</a></div>
   </footer>

@@ -6,6 +6,7 @@
 // from the static graph.
 
 import { publishDeskCount, readDeskCount } from '../desk-count';
+import { SAVE_STATE_AUTOSAVED } from '../../lib/save-state-copy';
 import type {
   EditingSession,
   ImportFileInput,
@@ -222,7 +223,29 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
   async listWorkspaces(): Promise<WorkspaceSummary[]> {
     const summaries = await this.service.listWorkspaces();
     publishDeskCount(summaries.length);
-    return summaries;
+    return Promise.all(summaries.map(async (summary) => this.withReviewCounts(summary)));
+  }
+
+  /**
+   * Attach review counts to a shared workspace's row (attn-n01r.34).
+   *
+   * Bounded on purpose. Only workspaces whose sharing state is 'shared' are
+   * touched: a local-only workspace has no review log, discoverReviewLogRoom
+   * returns null for it, and paying a replay per row would make listing cost
+   * scale with the desk rather than with the work actually waiting.
+   *
+   * Failure is swallowed and the row simply carries no counts. A desk that
+   * cannot render because a review log is unreadable is worse than a desk
+   * that renders without a badge.
+   */
+  private async withReviewCounts(summary: WorkspaceSummary): Promise<WorkspaceSummary> {
+    if (summary.sharing !== 'shared') return summary;
+    try {
+      const review = await this.service.reviewCountsFor(summary.id);
+      return review ? { ...summary, review } : summary;
+    } catch {
+      return summary;
+    }
   }
 
   async getWorkspace(workspaceId: string): Promise<WorkspaceDetail | undefined> {
@@ -243,7 +266,7 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
         openPath: loaded.workspace.activePath ?? 'untitled.md',
       }),
       entries: loaded.entries.map(toViewEntry),
-      saveState: 'Saved on this device',
+      saveState: SAVE_STATE_AUTOSAVED,
       reviewCards: [],
     };
   }

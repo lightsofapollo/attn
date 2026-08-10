@@ -4,6 +4,7 @@ import { defineConfig, type Connect, type Plugin } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
 import tailwindcss from '@tailwindcss/vite';
 import { entryHtmlPath, hostedEntryForPath } from './src/lib/hosted/routes';
+import { THEME_PREFLIGHT_SCRIPT } from './src/lib/hosted/theme-preflight';
 
 const webRoot = fileURLToPath(new URL('.', import.meta.url));
 const hostedRoot = path.join(webRoot, 'hosted');
@@ -71,6 +72,61 @@ function agentationDevToolbar(): Plugin {
   };
 }
 
+// Stamp the theme onto <html> before the first paint (attn-n01r.22). The
+// hosted entries carry blocking stylesheets, so CSS paints the PAPER ground
+// well before the deferred module bundle runs initTheme() — a dark-mode
+// visitor measured ~1.2 s of full-page paper-white on a slow link. This is the
+// same mechanism the native app uses in web/index.html; it needs a CSP source
+// hash here, which lives beside the script in src/lib/hosted/theme-preflight.ts.
+// Injected at build AND serve so dev matches production.
+function injectThemePreflight(): Plugin {
+  return {
+    name: 'attn-theme-preflight',
+    transformIndexHtml: {
+      order: 'pre',
+      handler() {
+        return [
+          {
+            tag: 'script',
+            children: THEME_PREFLIGHT_SCRIPT,
+            injectTo: 'head-prepend',
+          },
+        ];
+      },
+    },
+  };
+}
+
+// Preload the two faces that paint above the fold (attn-n01r.28). The woff2 are
+// only discovered after index-*.css parses — measured start 786/866 ms against
+// an FCP of 816 ms on Fast 3G + 4x CPU, giving 900 ms and 836 ms of
+// fallback-font text on the 74.88px serif h1. That swap is also the entire
+// source of the page's CLS (the shift entries name #text, DIV.nav-right and
+// A.button). Filenames are content-hashed, so they are read out of the emitted
+// bundle rather than hard-coded — a stale hash here would preload a 404 and
+// quietly make things worse.
+function preloadAboveFoldFonts(): Plugin {
+  const WANTED = [/source-serif-4-latin-wght-normal-.*\.woff2$/u, /source-sans-3-latin-wght-normal-.*\.woff2$/u];
+  return {
+    name: 'attn-preload-above-fold-fonts',
+    apply: 'build',
+    transformIndexHtml: {
+      order: 'post',
+      handler(_html, ctx) {
+        const files = Object.keys(ctx.bundle ?? {});
+        const hrefs = WANTED.map((pattern) => files.find((file) => pattern.test(file))).filter(
+          (file): file is string => Boolean(file),
+        );
+        return hrefs.map((href) => ({
+          tag: 'link',
+          attrs: { rel: 'preload', as: 'font', type: 'font/woff2', crossorigin: '', href: `/${href}` },
+          injectTo: 'head-prepend' as const,
+        }));
+      },
+    },
+  };
+}
+
 // Record which modules land in each emitted chunk so the route bundle gate
 // (scripts/check-route-bundles.mjs) can match forbidden *code* precisely —
 // page copy is allowed to say "ProseMirror" without tripping the gate.
@@ -100,7 +156,15 @@ export default defineConfig({
   envDir: webRoot,
   publicDir: path.join(hostedRoot, 'public'),
   appType: 'mpa',
-  plugins: [hostedEntryRewrites(), agentationDevToolbar(), chunkModulesManifest(), svelte(), tailwindcss()],
+  plugins: [
+    hostedEntryRewrites(),
+    injectThemePreflight(),
+    preloadAboveFoldFonts(),
+    agentationDevToolbar(),
+    chunkModulesManifest(),
+    svelte(),
+    tailwindcss(),
+  ],
   resolve: {
     alias: {
       $lib: path.join(webRoot, 'src/lib'),

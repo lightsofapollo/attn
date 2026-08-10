@@ -6,15 +6,29 @@
 .app-shell {
   min-height: 100dvh;
   display: grid;
-  grid-template-rows: 64px 1fr;
+  /* minmax, not a fixed 64px (attn-n01r.43). A fixed row cannot contain a
+     header whose content grows with text size: at 200% zoom the header's
+     content measured 76px against a 63px box, so the Storage button was
+     clipped at 1280 and the whole layout overflowed to 612px on a 390px
+     viewport. WCAG 1.4.4 / 1.4.10. */
+  grid-template-rows: minmax(64px, auto) 1fr;
+  /* The single column must not be sized by its widest child. Without this the
+     header's unwrapped content set a 612px floor that `main.desk` inherited,
+     so the whole page overflowed a 390px viewport at 200% text
+     (attn-n01r.43). */
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .app-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  /* Wrap rather than force the shell wider than the viewport. At 200% text the
+     brand + badge + Storage row needs more than 390px; the row growing taller
+     is correct, the page scrolling sideways is not (attn-n01r.43). */
+  flex-wrap: wrap;
   gap: 0.8rem;
-  padding: 0 1.4rem;
+  padding: 0.5rem 1.4rem;
   border-bottom: 1px solid var(--rule);
   font-family: var(--sans);
 }
@@ -22,6 +36,8 @@
 .app-header .right {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
   gap: 0.7rem;
 }
 
@@ -29,30 +45,33 @@
   display: flex;
   align-items: center;
   gap: 0.65rem;
-  font: 750 1.28rem var(--serif);
+  font: 750 1.25rem var(--serif);
 }
 
+/* The mark carries its own tile, radius, and fixed palette (BrandMark.svelte):
+   it is the desktop app icon, so nothing here may repaint it per theme. */
 .mark {
   width: 29px;
   height: 29px;
-  display: grid;
-  place-items: center;
-  border-radius: 8px;
-  background: var(--ink);
-  color: var(--sheet);
-  font: 700 0.74rem var(--mono);
 }
 
 .local-badge {
   display: flex;
   align-items: center;
   gap: 0.45rem;
-  font: 0.73rem var(--mono);
+  font: 0.7rem var(--sans);
   color: var(--green);
 }
 
-.local-badge.warn {
-  color: var(--rust-deep);
+/* Caution is its own tier: neither the collaboration green nor the destructive
+   red (attn-n01r.31). Muted ink carries "look at this" without claiming either
+   "you're fine" or "something failed". */
+.local-badge[data-tone='caution'] {
+  color: var(--hosted-muted);
+}
+
+.local-badge[data-tone='warn'] {
+  color: var(--danger-ink);
 }
 
 .local-badge .dot {
@@ -60,6 +79,13 @@
   height: 7px;
   border-radius: 50%;
   background: currentColor;
+}
+
+/* Shape carries the state as well as colour, per PRODUCT.md's "do not rely on
+   color alone": filled for healthy, hollow for caution, filled for failure. */
+.local-badge[data-tone='caution'] .dot {
+  background: transparent;
+  box-shadow: inset 0 0 0 1.5px currentColor;
 }
 
 .degraded-banner {
@@ -72,7 +98,7 @@
   padding: 1rem 1.2rem;
   border: 1px solid var(--rust);
   background: color-mix(in oklch, var(--rust) 6%, var(--sheet));
-  font: 0.9rem/1.5 var(--sans);
+  font: 0.95rem/1.5 var(--sans);
 }
 
 .degraded-banner strong {
@@ -82,7 +108,7 @@
 .degraded-banner p {
   margin: 0.2rem 0 0;
   color: var(--hosted-muted);
-  font-size: 0.84rem;
+  font-size: 0.85rem;
 }
 
 .degraded-banner .actions {
@@ -103,25 +129,33 @@
   justify-content: space-between;
   align-items: end;
   gap: 1rem;
-  border-bottom: 1px solid var(--ink);
+  /* --rule, not solid --ink (attn-n01r.42). DESIGN.md: hairlines are
+     "ink at low alpha, never a solid gray line". At full opacity this
+     rendered oklch(0.87) in INK — the brightest element on the dark page,
+     brighter than the h1 it underlines. */
+  border-bottom: 1px solid var(--rule);
   padding-bottom: 1.3rem;
 }
 
 .desk-title h1 {
   margin: 0;
-  font-size: clamp(2.8rem, 5vw, 5rem);
-  letter-spacing: -0.045em;
+  font-size: 2rem;
+  letter-spacing: -0.02em;
 }
 
 .desk-title p {
   margin: 0;
   color: var(--hosted-muted);
-  font: 0.85rem var(--mono);
+  font: 0.85rem var(--sans);
 }
 
 .quick-actions {
   display: grid;
-  grid-template-columns: 1.6fr 1fr 1fr;
+  /* minmax(0,…) so the tracks can shrink below their content's min-content
+     width. Bare `1fr` is `minmax(auto, 1fr)` and floors at min-content, which
+     is why 200% text forced 612px of layout into a 390px viewport
+     (attn-n01r.43). The rest of this file already uses this idiom. */
+  grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, 1fr);
   gap: 1px;
   border: 1px solid var(--rule);
   background: var(--rule);
@@ -129,6 +163,13 @@
 }
 
 .quick {
+  /* Explicit grid so the box model does not depend on the tag. Two tiles are
+     <button> and one is <a>; Chrome centres a button's anonymous content block
+     and top-aligns an anchor's, which put the third tile 9.5px out of line at
+     every breakpoint (attn-n01r.36). */
+  display: grid;
+  align-content: end;
+  justify-items: start;
   min-height: 155px;
   border: 0;
   padding: 1.4rem;
@@ -136,60 +177,227 @@
   background: var(--sheet);
   color: var(--ink);
   cursor: pointer;
-  display: block;
+}
+
+/* aria-disabled rather than the disabled attribute (attn-n01r.46), so the
+   control keeps its place in the tab order and can carry a reason. Styled to
+   read as unavailable without disappearing. */
+.quick[aria-disabled='true'] {
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .quick:hover {
   background: var(--sheet-raised);
 }
 
-.quick big {
+/* Sans, not serif (attn-n01r.36). DESIGN.md's Read/Do Rule is explicit — "a
+   button never uses the serif" — and these rendered at 400 weight, so the
+   desk's primary actions carried no operative authority either. Label first,
+   note second: <big> was obsolete and put the caption ahead of the label in the
+   accessible name. */
+.quick-label {
   display: block;
-  font-family: var(--serif);
-  font-size: 1.55rem;
-  margin-top: 2.2rem;
+  font-family: var(--sans);
+  font-size: 1.5rem;
+  font-weight: 650;
+  line-height: 1.15;
+  letter-spacing: -0.015em;
+  /* Long action labels must break rather than push the card wider than the
+     viewport at large text sizes (attn-n01r.43). */
+  overflow-wrap: break-word;
+}
+
+.quick-note {
+  display: block;
+  margin-top: 0.5rem;
+  color: var(--hosted-muted);
+  font: 0.85rem/1.45 var(--sans);
+}
+
+/* The accent belongs on the primary action (attn-n01r.36). The One Pencil Rule
+   was inverted: terracotta marked a static "LOCAL WORKSPACES" eyebrow nobody
+   clicks while the button it should mark carried none. */
+.quick[data-action='new-workspace'] .quick-label {
+  color: var(--rust);
 }
 
 .quick span {
   color: var(--hosted-muted);
-  font: 0.82rem var(--sans);
+  font: 0.85rem var(--sans);
 }
 
+/* Owns its own leading space (attn-n01r.1). It used to have no margin at all
+   and borrowed its entire top gap from .quick-actions' 4rem bottom margin via
+   adjacent-sibling collapse. That worked only while .quick-actions was the
+   previous sibling — the moment the join panel opened between them, the
+   collapse resolved 64px ABOVE the panel and left 0px below it, so this label
+   sat exactly on the panel's bottom border. Spacing that belongs to an element
+   has to live on that element, or the next thing inserted here breaks it
+   again. */
 .folio-label {
-  font: 0.72rem var(--mono);
+  font: 600 0.7rem var(--sans);
   color: var(--hosted-muted);
   text-transform: uppercase;
-  letter-spacing: 0.1em;
+  letter-spacing: 0.06em;
+}
+
+/* The rows are a list now (attn-n01r.30); strip the default list presentation
+   without stripping the semantics. */
+/* Filter sits with the section label, not above the list, so the heading and
+   the control that narrows it read as one unit (attn-n01r.29). */
+.folio-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-block-start: 2.5rem;
+}
+
+.folio-filter {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.folio-filter input {
+  min-height: 34px;
+  width: 13rem;
+  max-width: 40vw;
+  padding: 0.3rem 2rem 0.3rem 0.6rem;
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  background: color-mix(in oklch, var(--paper) 84%, transparent);
+  color: var(--ink);
+  font: 0.85rem var(--sans);
+}
+
+.folio-filter kbd {
+  position: absolute;
+  right: 0.55rem;
+  padding: 0.05rem 0.3rem;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  color: var(--hosted-muted);
+  font: 0.7rem var(--mono);
+  pointer-events: none;
+}
+
+.folio-filter input:focus-visible + kbd {
+  opacity: 0;
+}
+
+.workspace-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
 .workspace-row {
+  /* position: relative so .row-open can stretch a hit area over the whole row
+     (attn-n01r.32). The open target used to be the name text alone — about
+     200x28px of an 80,000px² row, a Fitts's-law failure on the single most
+     repeated action in the product. */
+  position: relative;
   display: grid;
-  grid-template-columns: 1.2fr 0.65fr 0.65fr auto;
+  /* name · files · edited · size · review · tail (attn-n01r.34) */
+  grid-template-columns:
+    minmax(0, 1.15fr) minmax(0, 0.4fr) minmax(0, 0.5fr) minmax(0, 0.35fr) minmax(0, 0.75fr) auto;
   align-items: center;
   gap: 1rem;
-  padding: 1.25rem 0.25rem;
+  padding: 1.25rem 0.6rem;
+  border-radius: 8px;
   border-bottom: 1px solid var(--rule);
   font-family: var(--sans);
   color: var(--ink);
 }
 
-a.workspace-row:hover {
-  background: color-mix(in srgb, var(--sheet) 55%, transparent);
+/* The hover rule used to be `a.workspace-row:hover` — the element is a <div>,
+   so it never matched and the row had no hover state at all. Selected state
+   comes from the keyboard model (attn-n01r.29). */
+.workspace-row:hover,
+.workspace-row:focus-within,
+.workspace-row[data-selected='true'] {
+  background: color-mix(in oklch, var(--sheet) 70%, transparent);
+}
+
+.workspace-row[data-selected='true'] {
+  box-shadow: inset 2px 0 0 var(--rust);
+}
+
+/* Stretch the open link across the row, then raise the actions above it so they
+   stay independently clickable. */
+.row-open::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+}
+
+.row-tail {
+  position: relative;
+  z-index: 1;
+}
+
+/* Row admin is not resident chrome (attn-n01r.32). At a realistic workspace
+   count the three most-repeated words on the desk were "Rename, Delete,
+   Rename, Delete…". Revealed on hover or keyboard focus; always available to
+   assistive tech and never hidden from the tab order. */
+.row-action {
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.workspace-row:hover .row-action,
+.workspace-row:focus-within .row-action,
+.workspace-row[data-selected='true'] .row-action,
+.row-action:focus-visible {
+  opacity: 1;
+}
+
+@media (hover: none) {
+  /* No hover on touch: the controls must simply be there. */
+  .row-action {
+    opacity: 1;
+  }
 }
 
 .workspace-row strong {
   font-family: var(--serif);
-  font-size: 1.18rem;
+  font-size: 1.15rem;
 }
 
 .workspace-row span {
   color: var(--hosted-muted);
-  font-size: 0.82rem;
+  font-size: 0.85rem;
+}
+
+/* Re-assert the badge's own colour inside a row (attn-n01r.42). `.workspace-row
+   span` (0,1,1) outranked `.local-badge` (0,1,0), so the same class rendered
+   green in the header and muted grey in the row — "Shared · relay sees only
+   ciphertext" became visually identical to "Local only", and the dot followed
+   because it is painted with currentColor. */
+.workspace-row .local-badge {
+  color: var(--green);
 }
 
 .empty-desk {
-  margin-top: 2.5rem;
+  display: block;
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  color: var(--ink);
+  /* 2.5rem pushed the card's bottom to 916px against a 900px viewport, so the
+     closing line and its caret — the payoff of the whole composition — sat
+     below the fold (attn-n01r.35). */
+  margin-top: 1.5rem;
   max-width: 560px;
+  /* The mono meta line ("UNTITLED.MD · NOT CREATED YET") carries 0.1em
+     tracking and cannot shrink; at 200% text it drove 87px past the card.
+     Let it break instead of widening the page (attn-n01r.43). */
+  overflow-wrap: anywhere;
   border: 1px solid var(--rule);
   background: var(--sheet);
   box-shadow: var(--shadow-soft);
@@ -198,21 +406,24 @@ a.workspace-row:hover {
 }
 
 .empty-desk .meta {
-  font: 0.72rem var(--mono);
+  display: block;
+  font: 0.7rem var(--mono);
   color: var(--hosted-muted);
   border-bottom: 1px solid var(--rule);
   padding-bottom: 0.9rem;
 }
 
-.empty-desk h2 {
+.empty-desk-title {
+  display: block;
   margin: 2rem 0 0.9rem;
-  font-size: 2.2rem;
+  font-size: 2rem;
   letter-spacing: -0.03em;
 }
 
-.empty-desk p {
+.empty-desk-body {
+  display: block;
   margin: 0;
-  font-size: 1.05rem;
+  font-size: 1rem;
   line-height: 1.7;
 }
 
@@ -267,7 +478,7 @@ a.workspace-row:hover {
 
 .editor-top .save-state {
   color: var(--hosted-muted);
-  font: 0.72rem var(--mono);
+  font: 0.7rem var(--mono);
 }
 
 .mobile-workspace-title {
@@ -313,7 +524,7 @@ a.workspace-row:hover {
 .share-live-dot {
   width: 7px;
   height: 7px;
-  border-radius: 999px;
+  border-radius: 9999px;
   background: var(--rust);
   box-shadow: 0 0 0 3px color-mix(in srgb, var(--rust) 18%, transparent);
 }
@@ -332,7 +543,7 @@ a.workspace-row:hover {
 }
 
 .rail-title {
-  font: 0.68rem var(--mono);
+  font: 0.7rem var(--mono);
   text-transform: uppercase;
   color: var(--hosted-muted);
   margin: 0.4rem 0 1.1rem;
@@ -352,8 +563,8 @@ a.workspace-row:hover {
   background: transparent;
   color: var(--ink);
   padding: 0.55rem 0.65rem;
-  border-radius: 5px;
-  font-size: 0.88rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
   margin-bottom: 0.2rem;
   cursor: pointer;
 }
@@ -379,11 +590,6 @@ a.workspace-row:hover {
 
 /* Grouped files sheet (iOS parity): Markdown / Assets sections, badge + name +
    capability subtitle + size rows, and an in-sheet add affordance. */
-/* Suppress the global prose bullet (base.css `ul > li::before`) leaking into
-   the sheet's file list — these rows are chrome, not markdown. */
-.bottom-sheet .file-list > li::before {
-  content: none;
-}
 .file-group {
   padding: 0.45rem 0 0.6rem;
 }
@@ -393,7 +599,7 @@ a.workspace-row:hover {
 .file-group-label {
   margin: 0 0 0.45rem;
   color: var(--hosted-muted);
-  font: 700 0.62rem/1 var(--mono);
+  font: 700 0.7rem/1 var(--mono);
   letter-spacing: 0.08em;
   text-transform: uppercase;
 }
@@ -422,7 +628,7 @@ a.workspace-row:hover {
   border: 1px solid var(--rule);
   border-radius: 6px;
   color: var(--hosted-muted);
-  font: 700 0.6rem/1 var(--mono);
+  font: 700 0.7rem/1 var(--mono);
 }
 .file-row.active .file-badge {
   border-color: var(--rust);
@@ -437,21 +643,21 @@ a.workspace-row:hover {
 }
 .file-row-name strong {
   overflow: hidden;
-  font: 600 0.9rem var(--sans);
+  font: 600 0.95rem var(--sans);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .file-row-name small {
   overflow: hidden;
   color: var(--hosted-muted);
-  font: 0.72rem var(--mono);
+  font: 0.7rem var(--mono);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 .file-row .file-size {
   flex: none;
   color: var(--hosted-muted);
-  font: 0.72rem var(--mono);
+  font: 0.7rem var(--mono);
 }
 .file-add-row {
   width: 100%;
@@ -498,20 +704,20 @@ a.workspace-row:hover {
 }
 
 .writing-sheet h1 {
-  font-size: clamp(2.4rem, 5vw, 3.4rem);
-  line-height: 1;
-  letter-spacing: -0.035em;
+  font-size: 2rem;
+  line-height: 1.18;
+  letter-spacing: -0.02em;
   margin: 1.2rem 0 1.4rem;
 }
 
 .writing-sheet h2 {
-  font-size: 1.8rem;
+  font-size: 2rem;
   margin: 2.2rem 0 0.9rem;
 }
 
 .writing-sheet p,
 .writing-sheet li {
-  font-size: 1.08rem;
+  font-size: 1.15rem;
   line-height: 1.7;
 }
 
@@ -525,7 +731,7 @@ a.workspace-row:hover {
   padding: 2.4rem 1.6rem;
   text-align: center;
   color: var(--hosted-muted);
-  font: 0.9rem/1.5 var(--sans);
+  font: 0.95rem/1.5 var(--sans);
 }
 
 .asset-preview strong {
@@ -548,7 +754,7 @@ a.workspace-row:hover {
 .owner-room-status {
   margin-left: 0.4rem;
   color: var(--hosted-muted);
-  font: 0.68rem var(--mono);
+  font: 0.7rem var(--mono);
   white-space: nowrap;
 }
 
@@ -565,7 +771,7 @@ a.workspace-row:hover {
   padding: 0.65rem;
   border: 1px solid var(--rust);
   color: var(--rust-deep);
-  font-size: 0.75rem;
+  font-size: 0.78rem;
   line-height: 1.35;
 }
 
@@ -578,7 +784,7 @@ a.workspace-row:hover {
   padding: 0.9rem;
   margin-top: 1rem;
   box-shadow: var(--shadow-label);
-  font-size: 0.84rem;
+  font-size: 0.85rem;
   line-height: 1.45;
 }
 
@@ -589,14 +795,14 @@ a.workspace-row:hover {
 .review-card strong {
   display: block;
   color: var(--rust-deep);
-  font-size: 0.75rem;
+  font-size: 0.78rem;
   margin-bottom: 0.4rem;
 }
 
 .review-empty {
   margin-top: 7rem;
   color: var(--hosted-muted);
-  font-size: 0.84rem;
+  font-size: 0.85rem;
   line-height: 1.5;
 }
 
@@ -610,7 +816,7 @@ a.workspace-row:hover {
   overflow: hidden;
   color: var(--foreground);
   background: var(--background);
-  font-family: 'Source Sans 3 Variable', 'Source Sans 3', -apple-system, system-ui, sans-serif;
+  font-family: var(--sans);
 }
 
 .hosted-workspace-frame {
@@ -623,7 +829,7 @@ a.workspace-row:hover {
   place-items: center;
   color: var(--muted-foreground);
   background: var(--background);
-  font: 400 0.85rem/1.55 'Source Code Pro Variable', 'Source Code Pro', monospace;
+  font: 400 0.85rem/1.55 var(--mono);
 }
 
 .hosted-content-viewport {
@@ -680,7 +886,7 @@ a.workspace-row:hover {
   margin: 0 auto;
   padding: 1rem 2.25rem;
   color: var(--muted-foreground);
-  font: 600 0.85rem/1.4 'Source Sans 3 Variable', 'Source Sans 3', sans-serif;
+  font: 600 0.85rem/1.4 var(--sans);
 }
 
 .hosted-header-actions {
@@ -689,7 +895,7 @@ a.workspace-row:hover {
   align-items: center;
   gap: 0.5rem;
   margin-top: -0.75rem;
-  font-family: 'Source Sans 3 Variable', 'Source Sans 3', -apple-system, system-ui, sans-serif;
+  font-family: var(--sans);
 }
 
 .hosted-title-input {
@@ -707,7 +913,7 @@ a.workspace-row:hover {
   max-width: 13rem;
   overflow: hidden;
   color: var(--muted-foreground);
-  font: 500 0.7rem/1.2 'Source Code Pro Variable', 'Source Code Pro', monospace;
+  font: 500 0.7rem/1.2 var(--mono);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -721,7 +927,7 @@ a.workspace-row:hover {
   gap: 6px;
   padding: 3px 9px 3px 8px;
   border: 1px solid color-mix(in oklch, var(--rule) 70%, transparent);
-  border-radius: 999px;
+  border-radius: 9999px;
   font: 500 0.7rem/1.2 var(--sans);
   color: var(--hosted-muted);
   white-space: nowrap;
@@ -784,7 +990,7 @@ a.workspace-row:hover {
   border-radius: var(--radius-lg);
   background: color-mix(in oklch, var(--view-only) 12%, var(--paper));
   color: var(--ink);
-  font: 0.82rem/1.45 var(--sans);
+  font: 0.85rem/1.45 var(--sans);
 }
 .viewing-safely strong { font-weight: 650; }
 
@@ -849,7 +1055,7 @@ a.workspace-row:hover {
   border-left: 1px solid var(--rule);
   background: transparent;
   color: var(--hosted-muted);
-  font-size: 1.1rem;
+  font-size: 1.15rem;
   cursor: pointer;
 }
 .arrival-toast-close:hover { color: var(--ink); }
@@ -867,7 +1073,7 @@ a.workspace-row:hover {
 .hosted-sidebar-footer {
   display: grid;
   gap: 0.25rem;
-  font-family: 'Source Sans 3 Variable', 'Source Sans 3', -apple-system, system-ui, sans-serif;
+  font-family: var(--sans);
 }
 
 /* Quiet picker search (matches app.css's layered rule, which the unlayered
@@ -1060,7 +1266,7 @@ a.workspace-row:hover {
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
-    font: 700 1.02rem/1.3 var(--serif);
+    font: 700 1rem/1.3 var(--serif);
     letter-spacing: -0.01em;
     transition:
       opacity 220ms var(--ease),
@@ -1089,7 +1295,7 @@ a.workspace-row:hover {
     height: 2rem;
     padding: 0 10px;
     gap: 5px;
-    font-size: 0.67rem;
+    font-size: 0.7rem;
     letter-spacing: 0.015em;
     max-width: 45vw;
   }
@@ -1192,7 +1398,7 @@ a.workspace-row:hover {
     border-radius: 12px;
     background: transparent;
     color: var(--ink);
-    font: 650 0.67rem/1 var(--sans);
+    font: 650 0.7rem/1 var(--sans);
     letter-spacing: 0.02em;
     cursor: pointer;
     -webkit-tap-highlight-color: transparent;
@@ -1250,10 +1456,10 @@ a.workspace-row:hover {
   min-width: 16px;
   height: 16px;
   padding: 0 4px;
-  border-radius: 999px;
+  border-radius: 9999px;
   background: var(--ink);
   color: var(--paper);
-  font: 700 0.6rem/1 var(--sans);
+  font: 700 0.7rem/1 var(--sans);
 }
 
 .dock-badge.pop {
@@ -1313,7 +1519,7 @@ a.workspace-row:hover {
 
 .share-head h2 {
   margin: 0;
-  font-size: clamp(1.85rem, 6vw, 2.3rem);
+  font-size: 1.5rem;
 }
 
 .share-body {
@@ -1346,7 +1552,7 @@ a.workspace-row:hover {
 .share-step p {
   margin: 0.25rem 0 0;
   color: var(--hosted-muted);
-  font: 0.87rem/1.45 var(--sans);
+  font: 0.85rem/1.45 var(--sans);
 }
 
 .link-box {
@@ -1355,7 +1561,7 @@ a.workspace-row:hover {
   border: 1px solid var(--rule);
   background: var(--paper);
   padding: 0.85rem;
-  font: 0.75rem/1.5 var(--mono);
+  font: 0.78rem/1.5 var(--mono);
   overflow: hidden;
   overflow-wrap: anywhere;
 }
@@ -1403,7 +1609,7 @@ a.workspace-row:hover {
 
 .share-head-compact h2 {
   margin: 0;
-  font: 700 1.05rem/1.2 var(--sans);
+  font: 700 1rem/1.2 var(--sans);
 }
 
 .share-x {
@@ -1419,7 +1625,7 @@ a.workspace-row:hover {
   border-radius: 8px;
   background: none;
   color: var(--hosted-muted);
-  font: 400 1.2rem/1 var(--sans);
+  font: 400 1.15rem/1 var(--sans);
   cursor: pointer;
 }
 
@@ -1450,7 +1656,7 @@ a.workspace-row:hover {
   max-width: 56ch;
   margin: 0.35rem 0 0;
   color: var(--hosted-muted);
-  font: 0.84rem/1.45 var(--sans);
+  font: 0.85rem/1.45 var(--sans);
 }
 
 .share-body {
@@ -1523,7 +1729,7 @@ a.workspace-row:hover {
 .share-stopped p {
   margin: 0.25rem 0 0;
   color: var(--hosted-muted);
-  font: 0.87rem/1.45 var(--sans);
+  font: 0.85rem/1.45 var(--sans);
 }
 
 .share-choice-grid input,
@@ -1536,7 +1742,7 @@ a.workspace-row:hover {
 .share-error {
   margin: 0.75rem 0 0;
   color: var(--rust-deep);
-  font: 0.82rem/1.45 var(--sans);
+  font: 0.85rem/1.45 var(--sans);
 }
 
 .share-warning {
@@ -1583,14 +1789,14 @@ a.workspace-row:hover {
 
 .share-choice-grid strong,
 .share-advanced strong {
-  font-size: 0.82rem;
+  font-size: 0.85rem;
 }
 
 .share-choice-grid small,
 .share-advanced small {
   margin-top: 0.2rem;
   color: var(--hosted-muted);
-  font: 0.72rem/1.35 var(--sans);
+  font: 0.7rem/1.35 var(--sans);
 }
 
 .share-entry-list {
@@ -1629,10 +1835,10 @@ a.workspace-row:hover {
 .share-entry-name small {
   margin-left: 0.45rem;
   padding: 0.1rem 0.3rem;
-  border-radius: 999px;
+  border-radius: 9999px;
   background: color-mix(in srgb, var(--rust) 10%, transparent);
   color: var(--rust-deep);
-  font: 700 0.56rem/1 var(--sans);
+  font: 700 0.7rem/1 var(--sans);
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
@@ -1649,7 +1855,7 @@ a.workspace-row:hover {
   gap: 0.35rem 1rem;
   margin-top: 0.75rem;
   color: var(--hosted-muted);
-  font: 0.73rem/1.4 var(--mono);
+  font: 0.7rem/1.4 var(--mono);
 }
 
 .share-manifest strong {
@@ -1669,7 +1875,7 @@ a.workspace-row:hover {
 .share-ready-scope strong {
   color: var(--ink);
   font-family: var(--sans);
-  font-size: 0.82rem;
+  font-size: 0.85rem;
 }
 
 .share-ready-scope span {
@@ -1690,12 +1896,12 @@ a.workspace-row:hover {
   gap: 1rem;
   padding: 1rem 0;
   cursor: pointer;
-  font: 700 0.84rem var(--sans);
+  font: 700 0.85rem var(--sans);
 }
 
 .share-advanced > summary span {
   color: var(--hosted-muted);
-  font: 0.72rem var(--mono);
+  font: 0.7rem var(--mono);
 }
 
 .share-advanced-body {
@@ -1713,7 +1919,7 @@ a.workspace-row:hover {
 
 .share-advanced legend {
   margin-bottom: 0.55rem;
-  font: 700 0.76rem var(--sans);
+  font: 700 0.78rem var(--sans);
 }
 
 .share-advanced fieldset > label {
@@ -1770,7 +1976,7 @@ a.workspace-row:hover {
   max-width: 38ch;
   margin: 0;
   color: var(--hosted-muted);
-  font: 0.76rem/1.4 var(--sans);
+  font: 0.78rem/1.4 var(--sans);
 }
 
 .share-progress,
@@ -1813,7 +2019,7 @@ a.workspace-row:hover {
   border-radius: 50%;
   background: var(--ink);
   color: var(--sheet);
-  font: 700 0.82rem var(--mono);
+  font: 700 0.85rem var(--mono);
 }
 
 .share-ready-mark {
@@ -1825,7 +2031,7 @@ a.workspace-row:hover {
   padding: 0;
   list-style: none;
   color: var(--hosted-muted);
-  font: 0.8rem/1.4 var(--sans);
+  font: 0.78rem/1.4 var(--sans);
 }
 
 .share-progress-steps li {
@@ -1869,7 +2075,7 @@ a.workspace-row:hover {
 .share-tier-picker legend {
   margin-bottom: 0.45rem;
   color: var(--ink);
-  font: 650 0.82rem/1.3 var(--sans);
+  font: 650 0.85rem/1.3 var(--sans);
 }
 
 .share-tier-picker label {
@@ -1897,12 +2103,12 @@ a.workspace-row:hover {
 .share-tier-picker label small {
   margin-top: 0.15rem;
   color: var(--hosted-muted);
-  font: 0.72rem/1.35 var(--sans);
+  font: 0.7rem/1.35 var(--sans);
 }
 
 .share-tier-picker label em {
   color: var(--rust);
-  font: 700 0.68rem/1 var(--mono);
+  font: 700 0.7rem/1 var(--mono);
   font-style: normal;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -1912,7 +2118,7 @@ a.workspace-row:hover {
   align-self: start;
   margin: 1.65rem 0 0;
   color: var(--hosted-muted);
-  font: 0.76rem/1.5 var(--sans);
+  font: 0.78rem/1.5 var(--sans);
 }
 
 .share-link-row {
@@ -1933,14 +2139,14 @@ a.workspace-row:hover {
   border: 1px solid var(--rule);
   border-radius: 8px;
   background: var(--paper);
-  font: 0.72rem/1.45 var(--mono);
+  font: 0.7rem/1.45 var(--mono);
 }
 
 /* Permission reads as a sentence with an inline control — the calmest form
    of the choice (Figma-style), not a control panel. */
 .share-sentence {
   margin: 0.35rem 0 0;
-  font: 0.9rem/1.6 var(--sans);
+  font: 0.95rem/1.6 var(--sans);
 }
 
 .share-sentence-meta {
@@ -2000,7 +2206,7 @@ a.workspace-row:hover {
   min-width: 0;
   padding: 0.5rem 0.85rem;
   border: 1px solid var(--rule);
-  border-radius: 999px;
+  border-radius: 9999px;
   background: none;
   text-align: left;
   cursor: pointer;
@@ -2086,7 +2292,7 @@ a.workspace-row:hover {
 .share-secret-note {
   margin: 0.55rem 0 0;
   color: var(--hosted-muted);
-  font: 0.74rem/1.4 var(--sans);
+  font: 0.7rem/1.4 var(--sans);
 }
 
 .share-ready-actions {
@@ -2098,7 +2304,7 @@ a.workspace-row:hover {
 .share-feedback {
   margin: 0.6rem 0 0;
   color: var(--green);
-  font: 0.76rem/1.4 var(--sans);
+  font: 0.78rem/1.4 var(--sans);
 }
 
 .share-invite-options {
@@ -2230,7 +2436,7 @@ a.workspace-row:hover {
 }
 
 .storage-panel {
-  border-top: 1px solid var(--ink);
+  border-top: 1px solid var(--rule);
   padding-top: 1rem;
 }
 
@@ -2279,7 +2485,7 @@ a.workspace-row:hover {
 
 .status-box p {
   color: var(--hosted-muted);
-  font-size: 0.88rem;
+  font-size: 0.85rem;
   line-height: 1.5;
 }
 
@@ -2292,7 +2498,7 @@ a.workspace-row:hover {
   border: 1px solid var(--rust);
   background: var(--sheet);
   padding: 1rem 1.2rem;
-  font: 0.88rem/1.5 var(--sans);
+  font: 0.85rem/1.5 var(--sans);
 }
 
 .confirm-clear .actions {
@@ -2361,20 +2567,60 @@ a.workspace-row:hover {
 /* ————— small screens ————— */
 
 @media (max-width: 900px) {
+  /* Three 155px tiles stacked pushed the first workspace to y=813 in an 844px
+     viewport — the payload was entirely below the fold, roughly 1.7 viewport
+     heights of chrome before a document (attn-n01r.33). Compact them: the
+     labels stay, the empty vertical space goes. */
   .quick-actions {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
+  .quick {
+    min-height: 0;
+    padding: 1rem 1.1rem;
+  }
+
+  .quick-label {
+    font-size: 1.15rem;
+  }
+
+  .quick-note {
+    margin-top: 0.2rem;
+    font-size: 0.78rem;
+  }
+
+  /* Name on its own line with the metadata beneath it, rather than a 1fr/auto
+     split that left the name 118px of a 358px row while the admin controls took
+     the rest. */
   .workspace-row {
-    grid-template-columns: 1fr auto;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 0.35rem 1rem;
+    padding-block: 0.9rem;
   }
 
-  .workspace-row .detail {
-    display: none;
+  /* Reflowed onto a second line, NOT hidden. Dropping file count and
+     last-edited turned three workspaces into byte-identical rows on exactly the
+     device where the name is least likely to be unique — and the list is
+     titled "Recently on this device", so recency was the one thing it could not
+     afford to lose. */
+  /* Each detail is its own grid item, so they blockify onto their own lines —
+     a leading separator would be stranded. Two quiet lines under the name reads
+     fine and keeps both facts. */
+  .workspace-row .detail,
+  .workspace-row .review-pill {
+    grid-column: 1;
+    color: var(--hosted-muted);
+    font-size: 0.78rem;
+    line-height: 1.35;
+  }
+
+  .workspace-row .row-tail {
+    grid-row: 1 / span 2;
+    grid-column: 2;
   }
 
   .storage-grid {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .desk-title {
@@ -2430,7 +2676,7 @@ a.workspace-row:hover {
     width: 34px;
     height: 4px;
     margin: 0.45rem auto -0.6rem;
-    border-radius: 999px;
+    border-radius: 9999px;
     background: var(--rule);
   }
 
@@ -2510,7 +2756,15 @@ a.workspace-row:hover {
   justify-content: flex-end;
 }
 
+/* Icon buttons now: square, centred, and at the touch minimum. The label moved
+   into title/aria-label (attn-n01r.2), and the 27.6px-tall text targets these
+   replace sat well under any target-size floor next to an irreversible action. */
 .row-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 44px;
+  min-height: 44px;
   border: 0;
   background: transparent;
   color: var(--hosted-muted);
@@ -2526,11 +2780,11 @@ a.workspace-row:hover {
 }
 
 .row-action.danger:hover {
-  color: var(--rust-deep);
+  color: var(--danger-ink);
 }
 
 .rename-input {
-  font: 700 1.18rem var(--serif);
+  font: 700 1.15rem var(--serif);
   color: var(--ink);
   background: var(--sheet);
   border: 1px solid var(--rust);
@@ -2549,14 +2803,14 @@ a.workspace-row:hover {
   margin: 1.4rem 0 0;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-  font: 1.02rem/1.7 var(--serif);
+  font: 1rem/1.7 var(--serif);
 }
 
 /* Embedded ProseMirror editing surface (attn-7xl.3.3). */
 .writing-sheet .ProseMirror {
   outline: none;
   min-height: 420px;
-  font: 1.08rem/1.7 var(--serif);
+  font: 1.15rem/1.7 var(--serif);
 }
 
 .writing-sheet .ProseMirror pre {
@@ -2687,15 +2941,15 @@ a.workspace-row:hover {
   background: color-mix(in srgb, var(--sheet) 70%, transparent);
 }
 
+/* An icon now, so the width cap and ellipsis that produced "Saved on th…" are
+   gone (attn-n01r.5). */
 .edit-bar-state {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   margin-left: auto;
   color: var(--hosted-muted);
-  font: 0.7rem var(--mono);
   padding-right: 0.4rem;
-  max-width: 26vw;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .title-button {
@@ -2732,7 +2986,11 @@ a.workspace-row:hover {
 
 /* Join-a-review panel (attn-ri1) */
 .join-panel {
-  margin: 14px 0 0;
+  /* Symmetric, and in rem like the rest of the desk (attn-n01r.1). The old
+     `14px 0 0` declared a top margin and no bottom one, which is half of why
+     this panel collided with the list label below it. */
+  margin-block: 1.5rem;
+  margin-inline: 0;
   padding: 16px;
   border: 1px solid var(--rule);
   border-radius: 10px;
@@ -2791,14 +3049,90 @@ a.workspace-row:hover {
   border-color: var(--rust-deep);
 }
 
+/* The error text three components had copy-pasted inline (attn-n01r.42/.44).
+   Same declaration in DeskHome, OpenPage and StoragePage — a class that was
+   copied instead of created. Uses --danger-ink so it stays red in INK. */
+.form-error {
+  margin-top: 0.75rem;
+  font: 0.95rem/1.5 var(--sans);
+  color: var(--danger-ink);
+}
+
 .join-error {
   margin: 8px 0 0;
   font: 500 0.85rem/1.5 var(--sans);
-  color: var(--rust-deep);
+  color: var(--danger-ink);
 }
 
 .join-hint {
   margin: 8px 0 0;
   font: 500 0.85rem/1.5 var(--sans);
   color: var(--hosted-muted);
+}
+
+/* Rename affordance beside the mobile title (attn-n01r.4). Sized to the touch
+   minimum and visually distinct from the name it acts on, so the name can go
+   back to being a name. */
+.mobile-title-rename {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  min-width: 44px;
+  min-height: 44px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--hosted-muted);
+}
+
+.mobile-title-rename:hover {
+  color: var(--ink);
+}
+
+/* Review counts on the desk row (attn-n01r.34). The collaboration hues are
+   legitimate here — this IS the collaboration layer, which is the one place
+   DESIGN.md's Quarantine Rule allows them: green for suggestions (insertion),
+   amber for comments (a note in the margin), exactly as the review cards use
+   them. Shape carries the distinction too, so it does not rest on colour. */
+.review-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.55rem;
+  font-size: 0.78rem;
+}
+
+.review-suggestions,
+.review-comments {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.3rem;
+  white-space: nowrap;
+}
+
+.review-suggestions::before,
+.review-comments::before {
+  content: '';
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+}
+
+.review-suggestions {
+  color: var(--green);
+}
+
+.review-suggestions::before {
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.review-comments {
+  color: var(--comment-amber, var(--hosted-muted));
+}
+
+/* Square, not round: comments and suggestions differ in shape as well as hue. */
+.review-comments::before {
+  border-radius: 2px;
+  background: currentColor;
 }

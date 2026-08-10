@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { Dialog as DialogPrimitive } from "bits-ui";
 	import DialogPortal from "./dialog-portal.svelte";
+	import { ScrollArea } from "$lib/components/ui/scroll-area/index.js";
 	import XIcon from "@lucide/svelte/icons/x";
 	import type { Snippet } from "svelte";
 	import * as Dialog from "./index.js";
@@ -43,12 +44,26 @@
 		bind:ref
 		data-slot="dialog-content"
 		class={cn(
-			"bg-background fixed top-[50%] left-[50%] z-50 grid max-h-[85vh] w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] gap-4 overflow-y-auto rounded-lg border p-6 shadow-lg transition-opacity duration-150 ease-out starting:opacity-0 sm:max-w-lg",
+			"bg-background fixed top-[50%] left-[50%] z-50 flex max-h-[85vh] w-full max-w-[calc(100%-2rem)] translate-x-[-50%] translate-y-[-50%] flex-col overflow-hidden rounded-lg border shadow-lg transition-opacity duration-150 ease-out starting:opacity-0 sm:max-w-lg",
 			className
 		)}
 		{...restProps}
 	>
-		{@render children?.()}
+		<!-- Overflow scrolls through the shared ScrollArea (thin themed thumb),
+		     never a native gutter; the close affordance stays pinned to the
+		     dialog frame, outside the scrolling body.
+
+		     `min-h-0 flex-1` hands this dialog's `max-h-[85vh]` ceiling to the
+		     scroll area as its height. That only works because the ScrollArea
+		     sizes its viewport by flex — a percentage height cannot resolve
+		     against a max-height-bounded ancestor, which is what left this
+		     modal clipped and unscrollable (attn-11g4.1.1). See the sizing note
+		     in `components/ui/scroll-area/scroll-area.svelte`. -->
+		<ScrollArea class="min-h-0 flex-1">
+			<div data-slot="dialog-content-body" class="grid gap-4 p-6">
+				{@render children?.()}
+			</div>
+		</ScrollArea>
 		{#if showCloseButton}
 			<DialogPrimitive.Close
 				class="ring-offset-background focus:ring-ring absolute end-4 top-4 rounded-xs opacity-70 transition-opacity hover:opacity-100 focus:ring-2 focus:ring-offset-2 focus:outline-hidden disabled:pointer-events-none [&_svg]:pointer-events-none [&_svg]:shrink-0 [&_svg:not([class*='size-'])]:size-4"

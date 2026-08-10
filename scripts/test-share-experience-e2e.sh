@@ -105,7 +105,10 @@ attn_rev --query '[data-slot=shared-file-tree-folder]' 2>/dev/null | grep -q '"c
 attn_owner --query '[data-slot=share-chip-files]' 2>/dev/null | grep -q '"count": *[1-9]' && ok "#5 owner status names the shared file(s)" || bad "#5 owner status does not name shared file(s)"
 
 # #4 screenshots (best-effort; macOS debug builds only).
-attn_owner --eval "document.querySelector('[data-slot=review-bar-peers] button')?.click()" >/dev/null 2>&1 || true
+# `review-bar-peers` was a ReviewBar wrapper div; it is gone (attn-64iy.3) so
+# an empty peer strip stops eating a gap in the header cluster. PeerStrip's own
+# root carries `data-slot=peer-strip`, which is the more accurate anchor anyway.
+attn_owner --eval "document.querySelector('[data-slot=peer-strip] button')?.click()" >/dev/null 2>&1 || true
 shot owner "menu-open"; shot reviewer "shared-view"
 
 echo ""; log "Result: $PASS passed, $FAIL failed"

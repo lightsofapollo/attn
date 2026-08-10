@@ -16,10 +16,27 @@
   --ink: var(--foreground);
   --hosted-muted: var(--muted-foreground);
   --rule: var(--border);
-  --rule-strong: var(--foreground);
+  /* A hairline, not a solid line (attn-n01r.37). DESIGN.md: "Border: hairline
+     dividers — ink at low alpha, never a solid gray line." Aliased straight to
+     --foreground, this rendered .step's top rule at full opacity — oklch(0.87)
+     in INK, the loudest line in the dark theme against 16% hairlines
+     everywhere else. */
+  --rule-strong: color-mix(in oklch, var(--foreground) 45%, transparent);
   --rust: var(--primary);
   --rust-deep: var(--primary-hover);
   --rust-contrast: var(--primary-foreground);
+  /* Radii the hosted routes consume but never received (attn-n01r.42).
+     --radius-md/--radius-lg are declared in src/app.css inside a Tailwind
+     `@theme inline` block, which the hosted entries do not import — so
+     .file-row, .file-add-row, .viewing-safely and .arrival-toast were
+     rendering square against a design that specifies 8px/10px. Undefined
+     custom properties fail silently: no error, no lint, no visual alarm.
+     Derived from the same --radius as app.css so the two cannot drift. */
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  /* Hover wash for selection controls. Consumed by .share-selection-actions
+     and defined nowhere, so that hover had no background at all. */
+  --wash: var(--accent);
   /* Text-safe ledger green + danger ink: the accent-tier hues fail AA at
      small sizes (11px badges measured 3.0-3.3:1). */
   --green: oklch(0.40 0.12 150);
@@ -39,7 +56,6 @@
   --native-panel: var(--foreground);
   --native-panel-ink: var(--background);
   --native-panel-muted: color-mix(in oklch, var(--background) 75%, var(--foreground) 25%);
-  --native-panel-label: oklch(0.72 0.08 32);
 }
 
 .dark {
@@ -52,7 +68,6 @@
   --native-panel: oklch(0.10 0.010 256);
   --native-panel-ink: var(--foreground);
   --native-panel-muted: var(--muted-foreground);
-  --native-panel-label: oklch(0.75 0.08 32);
 }
 
 * {
@@ -79,15 +94,37 @@ body::after {
   background-size: 190px;
 }
 
-button,
-a,
-input {
-  font: inherit;
+/* Bare-tag chrome resets — `@layer chrome` (cascade model, see app.css).
+   These style the hosted shell's OWN anchors and controls; the layer exists
+   so they can never erase document grammar again. The `a` reset used to be
+   unlayered, which beat `.attn-doc a` in every layer and forced the prose-link
+   rule in base.css to hide outside the layers to survive; now `doc` beats
+   `chrome` by declared order and both rules say what they mean. */
+@layer chrome {
+  button,
+  a,
+  input {
+    font: inherit;
+  }
+
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
 }
 
-a {
-  color: inherit;
-  text-decoration: none;
+/* Available to assistive tech, removed from the visual layer. Used by live
+   regions that must announce without occupying space (attn-n01r.2/.19). */
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
 }
 
 :focus-visible {
@@ -95,8 +132,13 @@ a {
   outline-offset: 2px;
 }
 
+/* Muted, not accent (attn-n01r.18/.36). The One Pencil Rule: the accent marks
+   action, selection and focus — "if two things on a screen are terracotta, one
+   of them is wrong". The eyebrow is a static label nobody clicks, and it was
+   taking the pencil while the buttons it sits above went unmarked. Nine of the
+   landing's twelve terracotta marks were decoration of this kind. */
 .eyebrow {
-  color: var(--rust-deep);
+  color: var(--hosted-muted);
   font: 750 0.72rem/1 var(--sans);
   letter-spacing: 0.14em;
   text-transform: uppercase;
@@ -137,14 +179,24 @@ a {
   border-color: var(--rust-deep);
 }
 
+/* Destructive text uses the danger token, not the accent (attn-n01r.42).
+   --rust-deep aliases --primary-hover, so in INK every delete/error surface
+   rendered the same steel blue as the primary Join button — the dark desk had
+   no red anywhere in its destructive vocabulary. --danger-ink is the text-safe
+   tier (the accent tier measures 3.0-3.3:1 on small labels) and it already
+   flips correctly. */
 .button.danger {
-  color: var(--rust-deep);
+  color: var(--danger-ink);
 }
 
 .icon-button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  /* 44x44 (attn-n01r.12). Measured 32.8x32.8 — 75% of the target on both axes,
+     and this is one of only two controls that survive in the mobile header. */
+  min-width: 44px;
+  min-height: 44px;
   padding: 0.4rem;
   border: 0;
   border-radius: 8px;
@@ -157,14 +209,31 @@ a {
   color: var(--ink);
 }
 
+/* Collapse timing, do not erase it (attn-n01r.26).
+   `* { transition: none !important }` worked on today's page — the only
+   transition is .button's 0.18s and its :hover end state still applies
+   instantly — but it is a trap for what comes next: !important on * outranks
+   component CSS, so any FUTURE transition carrying meaning (an opacity fade
+   signalling save state, a colour change signalling validity) is flattened with
+   no per-component escape. It also never touched `animation`, so any keyframe
+   added later would run unsuppressed under `reduce`.
+   PRODUCT.md asks for motion reduced, not globally erased. Near-zero durations
+   preserve end states and cover animation too. Note chrome.css is shared by the
+   landing AND the desk, so this governs both hosted surfaces. */
 @media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+
   html {
     scroll-behavior: auto;
   }
 
-  * {
-    transition: none !important;
-  }
 }
 
 
@@ -187,7 +256,7 @@ a {
 
 ::-webkit-scrollbar-thumb {
   background: color-mix(in oklch, var(--ink) 22%, transparent);
-  border-radius: 999px;
+  border-radius: 9999px;
   border: 3px solid transparent;
   background-clip: padding-box;
 }

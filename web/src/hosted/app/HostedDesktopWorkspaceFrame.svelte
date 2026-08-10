@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import Share2 from '@lucide/svelte/icons/share-2';
+  import BrandMark from '../../lib/BrandMark.svelte';
   import ReviewBar from '../../lib/ReviewBar.svelte';
   import Sidebar from '../../lib/Sidebar.svelte';
   import WorkspaceEditorFrame from '../../lib/WorkspaceEditorFrame.svelte';
@@ -224,18 +225,21 @@
        'make owner match the review'): brand · divider · document name on
        the left, save state + share/review chips inline on the right. This
        replaces the breadcrumb row and the floating ReviewBar dock. -->
+  <!-- Chrome plane, matching App.svelte's native-header and the right rail:
+       `--header-surface` behind a `--panel-border` hairline, so the document
+       reads as a lit sheet between recessed chrome. See the longer note on
+       `data-slot="native-header"` in App.svelte. -->
   <header
-    class="attn-chrome relative z-40 flex h-11 shrink-0 items-center gap-2 border-b border-border bg-background px-3"
+    class="relative z-40 flex h-11 shrink-0 items-center gap-2 border-b border-[var(--panel-border)] bg-[var(--header-surface)] px-3"
     data-slot="owner-header"
   >
-    <span
-      class="select-none font-serif text-sm font-bold leading-none text-foreground"
-      data-slot="owner-brand"
-      aria-label="attn"
-    >attn</span>
+    <span class="flex shrink-0 items-center gap-1.5" data-slot="owner-brand" aria-label="attn">
+      <BrandMark size={18} />
+      <span class="select-none font-serif text-sm font-bold leading-none text-foreground">attn</span>
+    </span>
     <span class="h-3 w-px shrink-0 bg-border" aria-hidden="true"></span>
     <span
-      class="min-w-0 truncate font-sans text-[13px] font-medium text-foreground"
+      class="min-w-0 truncate font-sans text-meta font-medium text-foreground"
       data-slot="owner-doc-name"
     >{activeEntryPath ? activeEntryPath.split('/').at(-1) : workspaceName}</span>
     <div class="ml-auto flex h-full min-w-0 shrink-0 items-center gap-1.5">
@@ -245,7 +249,7 @@
              Once a room is active the ReviewBar's ShareChip owns the slot. -->
         <button
           type="button"
-          class="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+          class="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
           data-slot="owner-header-share"
           aria-label="Share for review"
           title="Share for review"

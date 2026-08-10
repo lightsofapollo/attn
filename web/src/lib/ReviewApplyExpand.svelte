@@ -532,7 +532,7 @@
   .three-way-close {
     background: transparent;
     border: 0;
-    font-size: 1.1rem;
+    font-size: 1.15rem; /* control-lg */
     line-height: 1;
     cursor: pointer;
     color: var(--muted-foreground);

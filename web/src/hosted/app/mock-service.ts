@@ -22,6 +22,7 @@ import type {
 } from './types';
 import type { BrowserOwnerWorkspaceRuntimeState } from '../../lib/review/browser-owner-workspace-runtime';
 import { resolveBrowserReviewBase } from './share-environment';
+import { SAVE_STATE_AUTOSAVED, SAVE_STATE_STORAGE_ATTENTION } from '../../lib/save-state-copy';
 
 const MOCK_SHARE_ID = 'yPJpJifC1HUQgHsJ_7speQ';
 
@@ -64,9 +65,18 @@ const PRODUCT_DIRECTION: WorkspaceDetail = {
   assetCount: 2,
   lastEditedLabel: 'Edited 8 min ago',
   sharing: 'shared',
+  // Only the shared fixture carries review state: a local-only workspace has no
+  // review log at all, which is why the row shows nothing rather than a zero
+  // (attn-n01r.34).
+  review: {
+    openComments: 2,
+    pendingSuggestions: 3,
+    lastAuthorId: 'agent-7',
+    lastActivityAt: Date.now() - 4 * 60_000,
+  },
   sizeLabel: '2.4 MB',
   backupLabel: 'Backed up today',
-  saveState: 'Saved on this device',
+  saveState: SAVE_STATE_AUTOSAVED,
   entries: [
     { path: 'direction.md', kind: 'markdown', presentation: 'editable', sizeBytes: 18_432, sizeLabel: '18 KB' },
     { path: 'principles.md', kind: 'markdown', presentation: 'editable', sizeBytes: 11_264, sizeLabel: '11 KB' },
@@ -93,7 +103,7 @@ const LAUNCH_NOTES: WorkspaceDetail = {
   sharing: 'local-only',
   sizeLabel: '48 KB',
   backupLabel: 'Never backed up',
-  saveState: 'Saved on this device',
+  saveState: SAVE_STATE_AUTOSAVED,
   entries: [{ path: 'launch-notes.md', kind: 'markdown', presentation: 'editable', sizeBytes: 49_152, sizeLabel: '48 KB' }],
   reviewCards: [],
 };
@@ -108,7 +118,7 @@ const RESEARCH_FOLIO: WorkspaceDetail = {
   sharing: 'backed-up',
   sizeLabel: '14.2 MB',
   backupLabel: 'Backed up Jun 28',
-  saveState: 'Saved on this device',
+  saveState: SAVE_STATE_AUTOSAVED,
   entries: [
     { path: 'index.md', kind: 'markdown', presentation: 'editable', sizeBytes: 9_216, sizeLabel: '9 KB' },
     { path: 'interviews/mara.md', kind: 'markdown', presentation: 'editable', sizeBytes: 22_528, sizeLabel: '22 KB' },
@@ -202,7 +212,7 @@ export class MockWorkspaceService implements WorkspaceAppService {
       sharing: 'local-only',
       sizeLabel: '—',
       backupLabel: 'Never backed up',
-      saveState: 'Saved on this device',
+      saveState: SAVE_STATE_AUTOSAVED,
       entries: files.map((file) => ({
         path: file.path,
         kind: file.kind,
@@ -423,7 +433,7 @@ export class MockWorkspaceService implements WorkspaceAppService {
   }
 
   private newWorkspaceDraft(): WorkspaceDetail {
-    const saveState = this.scenario === 'quota' ? 'Storage needs attention' : 'Saved on this device';
+    const saveState = this.scenario === 'quota' ? SAVE_STATE_STORAGE_ATTENTION : SAVE_STATE_AUTOSAVED;
     return {
       id: 'ws-untitled',
       name: 'Untitled',

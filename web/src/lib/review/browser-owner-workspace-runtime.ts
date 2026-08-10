@@ -8,7 +8,6 @@
 
 import type { Node as PmNode } from 'prosemirror-model';
 
-import { markdownSerializer } from '../schema';
 import type { Anchor, ResolvedAnchor, ReviewEvent, SuggestionOperation } from '../types';
 import { boundFetch } from './bound-fetch';
 import { contentHash } from './browser-crypto';
@@ -1239,6 +1238,11 @@ export class BrowserOwnerWorkspaceRuntime {
   ): Promise<void> {
     return this.enqueueMutation(async () => {
       const binding = this.requireBinding(fileId);
+      // Imported at the call site, not at module scope: a static edge here
+      // drags ProseMirror + markdown-it (~307 KB) into every consumer of this
+      // runtime, including the desk route, which only lists workspace names
+      // and never serializes a document (attn-n01r.41).
+      const { markdownSerializer } = await import('../schema');
       const body = new TextEncoder().encode(markdownSerializer.serialize(doc));
       try {
         const entry = await this.options.storage.workspaces.getEntry(

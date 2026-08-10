@@ -1247,12 +1247,12 @@
         <!-- No overflow-hidden here: the status chip's popover overhangs the
              header; the doc-name span truncates itself via min-w-0. -->
         <!-- Chrome plane, matching App.svelte's native-header and the hosted
-             owner-header: `--panel-surface` behind a `--panel-border`
+             owner-header: `--header-surface` behind a `--panel-border`
              hairline. This bar previously painted NOTHING and inherited
              whatever was behind it, so it was the least differentiated of
              the three. See the longer note in App.svelte. -->
         <header
-          class="relative z-40 flex h-11 shrink-0 items-center gap-2 border-b border-[var(--panel-border)] bg-[var(--panel-surface)] px-3"
+          class="relative z-40 flex h-11 shrink-0 items-center gap-2 border-b border-[var(--panel-border)] bg-[var(--header-surface)] px-3"
           data-slot="browser-review-header"
         >
           <span class="flex shrink-0 items-center gap-1.5" data-slot="browser-brand" aria-label="attn review">

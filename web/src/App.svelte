@@ -3375,22 +3375,27 @@
        document on the left; local state, sharing, people, and comments on the
        right. The whole quiet surface remains a native window drag target.
 
-       The bar is CHROME, so it sits on the chrome plane (`--panel-surface`
-       behind a `--panel-border` hairline) alongside the sidebar and the
-       right rail — not on `bg-background`. It used to paint the paper, which
-       made the top of the window one undifferentiated field of colour broken
-       only by a hairline (user-reported). tokens.css picked the panel value
-       so that "with both edges recessed equally the document reads as a lit
-       sheet between two rails"; a header on the paper was the last gap in
-       that story. Same change in HostedDesktopWorkspaceFrame (owner-header)
-       and BrowserReviewApp (browser-review-header) — one grammar, one plane. -->
+       The bar sits on ITS OWN plane — `--header-surface` behind a
+       `--panel-border` hairline — one step darker and warmer than the
+       sidebar/rail chrome. This is the third position the surface has held,
+       and each move was user-reported: it began on the paper, which made the
+       top of the window one undifferentiated field broken only by a hairline;
+       it moved to `--panel-surface` so both edges of the workspace receded
+       equally; and that in turn made the header vanish into the sidebar —
+       "we need to give this a differentiated background color" (2026-08-09).
+       The tint leans toward the accent's hue without spending the accent
+       itself: a tinted ground is furniture, not a mark, so the One Pencil
+       Rule stays intact and the save chip's tinted glyph still reads against
+       it (ratios re-measured in DESIGN.md). Same surface in
+       HostedDesktopWorkspaceFrame (owner-header) and BrowserReviewApp
+       (browser-review-header) — one grammar, one plane. -->
   <!-- svelte-ignore a11y_no_static_element_interactions -->
   <!-- The 6.5rem left indent is traffic-light clearance for the no-sidebar
        case, so it is owed only where traffic lights exist. In a browser tab it
        was 104px of dead inset (attn-64iy.5). Drag/zoom hang off the same
        predicate: both post window commands no daemon is listening for here. -->
   <header
-    class={`relative z-40 flex h-11 shrink-0 items-center gap-2 border-b border-[var(--panel-border)] bg-[var(--panel-surface)] pr-3 ${hasSidebar || !nativeChrome ? 'pl-3' : 'pl-[6.5rem]'}`}
+    class={`relative z-40 flex h-11 shrink-0 items-center gap-2 border-b border-[var(--panel-border)] bg-[var(--header-surface)] pr-3 ${hasSidebar || !nativeChrome ? 'pl-3' : 'pl-[6.5rem]'}`}
     data-slot="native-header"
     data-shell={nativeChrome ? 'native' : 'browser'}
     onmousedown={nativeChrome ? dragWindow : undefined}
@@ -3450,10 +3455,12 @@
                2026-08-07): this chip is the one piece of chrome that reports
                where the user's work lives, which is the product's whole claim.
                Dirty keeps `--amber-deep`. Both states are tinted, so tint is
-               not the signal either way; the glyph is. Contrast on the header's
-               `--panel-surface` plane: saved 4.51:1 in Paper / 7.91:1 in Ink,
-               dirty 7.05:1 / 10.85:1 (a 14px 2px-stroke glyph owes 3:1, so
-               even the thinnest of these has room).
+               not the signal either way; the glyph is. Contrast on the
+               header's own `--header-surface` plane (2026-08-09): saved
+               4.14:1 in Paper / 7.08:1 in Ink, probe-measured — a 14px
+               2px-stroke glyph owes the 1.4.11 non-text 3:1, so both clear
+               with room; the dirty amber sits higher still. Current numbers
+               come from reading-palette.spec.ts, which sweeps the header.
 
                No border and no fill, deliberately: the header's active-control
                convention (attn-11g4.6) is tint + `bg-primary/10` + a

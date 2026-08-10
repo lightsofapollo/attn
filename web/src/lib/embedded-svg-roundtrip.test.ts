@@ -220,18 +220,47 @@ defineCase('SVG next to a task list is recognised', () => {
 // The conditions that keep round-tripping unconditional
 // ---------------------------------------------------------------------------
 
-defineCase('SVG not followed by a blank line is NOT recognised', () => {
-  // Without the blank line the block boundary in the file would not match the
-  // one the serializer re-emits, so the rule declines and the bytes stay in the
-  // ordinary (escaped) paragraph path. Paragraph serialization applies its own
-  // long-standing normalisation to soft line breaks, so this asserts the SVG
-  // text survives rather than byte equality.
+// ---------------------------------------------------------------------------
+// Glued shapes (widened 2026-08-09 — "we should be able to render SVGs")
+//
+// These two are what agents actually write: the SVG hard against the next or
+// previous prose line. They used to be deliberately unrecognised to keep the
+// fired-rule roundtrip byte-exact; the cost was a diagram rendering as a
+// paragraph of escaped source, which is what got reported. The contract now:
+// glued shapes RENDER, and normalise to the blank-separated shape on first
+// serialize — after which they are byte-exact. parse∘serialize is idempotent.
+// ---------------------------------------------------------------------------
+
+defineCase('SVG glued to the FOLLOWING line renders, and normalises stably', () => {
   const md = '<svg viewBox="0 0 1 1"><rect/></svg>\nImmediately following text.';
   const doc = parse(md);
-  assert(countNodes(doc, 'embedded_svg') === 0, 'the rule must not fire without a blank line after');
+  assert(countNodes(doc, 'embedded_svg') === 1, 'the glued-next shape must render');
   const out = serialize(doc);
-  assert(out.includes('<svg viewBox="0 0 1 1">'), `the source text must survive: ${JSON.stringify(out)}`);
-  assert(out.includes('Immediately following text.'), 'the following text must survive');
+  assert(
+    out.includes('</svg>\n\nImmediately following text.'),
+    `first serialize separates the blocks conventionally: ${JSON.stringify(out)}`,
+  );
+  assert(serialize(parse(out)) === out, 'and the separated shape is a fixed point');
+});
+
+defineCase('SVG glued under the PRECEDING line interrupts the paragraph', () => {
+  // Like a heading or a fence: `<svg` at the start of a line terminates a
+  // running paragraph rather than being swallowed as a lazy continuation.
+  const md = 'Lead-in prose.\n<svg viewBox="0 0 1 1"><rect/></svg>\n\nAfter.';
+  const doc = parse(md);
+  assert(countNodes(doc, 'embedded_svg') === 1, 'the glued-prev shape must render');
+  const out = serialize(doc);
+  assert(
+    out.includes('Lead-in prose.\n\n<svg'),
+    `first serialize separates the paragraph from the block: ${JSON.stringify(out)}`,
+  );
+  assert(serialize(parse(out)) === out, 'and the separated shape is a fixed point');
+});
+
+defineCase('blank-line-separated SVG still round-trips byte-exact', () => {
+  // The widening must not have weakened the original guarantee where it held.
+  const md = 'Before.\n\n<svg viewBox="0 0 1 1"><rect/></svg>\n\nAfter.';
+  assert(serialize(parse(md)) === md, 'the separated shape stays byte-exact');
 });
 
 defineCase('trailing content on the </svg> line is NOT recognised', () => {

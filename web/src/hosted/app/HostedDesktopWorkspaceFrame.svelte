@@ -226,11 +226,11 @@
        the left, save state + share/review chips inline on the right. This
        replaces the breadcrumb row and the floating ReviewBar dock. -->
   <!-- Chrome plane, matching App.svelte's native-header and the right rail:
-       `--panel-surface` behind a `--panel-border` hairline, so the document
+       `--header-surface` behind a `--panel-border` hairline, so the document
        reads as a lit sheet between recessed chrome. See the longer note on
        `data-slot="native-header"` in App.svelte. -->
   <header
-    class="relative z-40 flex h-11 shrink-0 items-center gap-2 border-b border-[var(--panel-border)] bg-[var(--panel-surface)] px-3"
+    class="relative z-40 flex h-11 shrink-0 items-center gap-2 border-b border-[var(--panel-border)] bg-[var(--header-surface)] px-3"
     data-slot="owner-header"
   >
     <span class="flex shrink-0 items-center gap-1.5" data-slot="owner-brand" aria-label="attn">

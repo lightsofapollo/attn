@@ -102,6 +102,7 @@ const TOKEN_MAP: Record<string, string> = {
   card: 'card',
   sidebar: 'sidebar',
   'panel-surface': 'panel-surface',
+  'header-surface': 'header-surface',
   'panel-border': 'panel-border',
   'rail-chip-surface': 'rail-chip-surface',
   'code-block': 'code-block',

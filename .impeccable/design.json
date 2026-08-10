@@ -221,6 +221,13 @@
         "canonical": "oklch(0.865 0.010 78)",
         "darkCanonical": "oklch(0.204 0.014 256)",
         "note": "A block inside a block (inline code in a table cell) takes one further step toward the ink."
+      },
+      "header-surface": {
+        "role": "surface-chrome",
+        "displayName": "Header Plane",
+        "canonical": "oklch(0.83 0.025 55)",
+        "darkCanonical": "oklch(0.225 0.024 245)",
+        "note": "The app header's own plane: one step darker/warmer than the panel plane in Paper, lifted and steel-tinted in Ink. Shared by all three headers. A tinted ground is furniture, not a mark — the One Pencil Rule is not in play."
       }
     },
     "typographyMeta": {

@@ -141,6 +141,7 @@ function measureInPage(): Measurement[] {
     { label: 'frontmatter value', selector: '.frontmatter-pairs dd' },
   ];
 
+
   const out: Measurement[] = [];
   for (const { label, selector } of targets) {
     const el = root.querySelector(selector);
@@ -160,6 +161,30 @@ function measureInPage(): Measurement[] {
       m.underlined = decoration.includes('underline');
     }
     out.push(m);
+  }
+
+  // The header is chrome, not prose, but it hosts the OTHER sanctioned accent
+  // exception (the saved save-state glyph) plus the doc name — and its surface
+  // is now its own token (--header-surface, 2026-08-09), so its documented
+  // ratios move whenever that token does. Measured from the real header DOM.
+  const headerTargets: Array<{ label: string; selector: string }> = [
+    { label: 'header doc name', selector: '[data-slot=native-doc-name]' },
+    { label: 'header muted icon', selector: '[data-slot=native-header-settings]' },
+    { label: 'header saved glyph (accent)', selector: '[data-slot=native-save-chip] svg' },
+  ];
+  for (const { label, selector } of headerTargets) {
+    const el = document.querySelector(selector);
+    if (!el) continue;
+    const style = getComputedStyle(el);
+    const bg = effectiveBackground(el);
+    out.push({
+      label,
+      selector,
+      color: style.color,
+      background: bg,
+      vsBackground: contrast(style.color, bg),
+      vsBodyText: contrast(style.color, bodyInk),
+    });
   }
 
   // Every shiki token family actually rendered in the code block, against the
@@ -246,8 +271,14 @@ for (const theme of ['light', 'dark'] as Theme[]) {
       }
 
       const failures = measurements.filter((m) => {
-        // Headings are large text; everything else is body-size.
-        const floor = m.selector.startsWith('h') ? AA_LARGE : AA_TEXT;
+        // Headings are large text. The saved-state glyph is a 14px 2px-stroke
+        // ICON, not text — WCAG 1.4.11 non-text contrast owes 3:1, which is
+        // also the standard DESIGN.md documented for it from the start ("a
+        // 14px 2px-stroke glyph owes 3:1"). Everything else is body-size text.
+        const floor =
+          m.selector.startsWith('h') || m.label.includes('saved glyph')
+            ? AA_LARGE
+            : AA_TEXT;
         return m.vsBackground < floor;
       });
       expect(

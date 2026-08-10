@@ -505,13 +505,32 @@ function findSvgElementEnd(text: string): number {
  * HTML run keeps escaping as it does today — so this rule is the entire
  * embedded-markup surface. See planning/embedded-svg-threat-model.md §D1.
  *
- * Every condition below is also a round-trip guarantee. Because the block must
- * start its own line, close on its own line, and be followed by a blank line or
- * EOF, the boundary in the file always coincides with the block boundary the
- * serializer re-emits — so `serialize(parse(md)) === md` holds unconditionally
- * whenever this rule fires. Anything that does not qualify is simply not
- * recognised and passes through the unchanged paragraph path, which is also
- * byte-exact (just escaped rather than rendered).
+ * RECOGNITION WAS WIDENED (2026-08-09, user report: "we should be able to
+ * render SVGs" against a diagram showing as an escaped-source paragraph).
+ * Originally the rule also demanded a blank line after `</svg>` and never
+ * interrupted a paragraph, which made `serialize(parse(md)) === md` hold
+ * byte-exact whenever it fired — and made the two shapes agents actually
+ * write most, an SVG glued to the following prose line or glued under the
+ * preceding one, render as a paragraph of angle-bracket soup. The contract
+ * is now one notch weaker and is stated exactly:
+ *
+ *   - blank-line-separated sources remain BYTE-EXACT, as before;
+ *   - glued sources render, and NORMALISE to the separated shape on first
+ *     serialize (the conventional blank line materialises) — after which
+ *     they are byte-exact too. `parse ∘ serialize` is idempotent either way,
+ *     and the serializer already normalises list markers, emphasis and
+ *     wrapping on any save, so this is the same class of change a save
+ *     applies everywhere else.
+ *
+ * What still does NOT fire, deliberately: trailing content on the `</svg>`
+ * line (a mid-line SVG is inline content; rendering it would tear the
+ * paragraph and strand any review anchor in it), list items and blockquotes
+ * (the serializer's per-line delimiters would rewrite the source), and 4+
+ * space indents (the indented-code rule owns those lines).
+ *
+ * Security is unchanged by any of this: widening WHERE the rule fires does
+ * not widen WHAT renders — the same sanitiser allowlist and the NodeView's
+ * second gate sit behind the token exactly as before.
  */
 function svgBlockPlugin(md: MarkdownIt): void {
   md.block.ruler.before(
@@ -543,13 +562,11 @@ function svgBlockPlugin(md: MarkdownIt): void {
       }
       if (closeLine < 0) return false;
 
-      // Nothing may follow `</svg>` on its line…
+      // Nothing may follow `</svg>` on its line. (A following NON-BLANK line
+      // is fine as of 2026-08-09 — it simply starts the next block, and the
+      // serializer's conventional blank line normalises the join on first
+      // save. See the rule comment for the exact contract.)
       if (state.src.slice(endOffset, state.eMarks[closeLine]).trim() !== '') return false;
-      // …and the next line must be blank or the end of the document.
-      if (closeLine + 1 < endLine) {
-        const nextStart = state.bMarks[closeLine + 1] + state.tShift[closeLine + 1];
-        if (nextStart < state.eMarks[closeLine + 1]) return false;
-      }
 
       if (silent) return true;
 
@@ -561,7 +578,11 @@ function svgBlockPlugin(md: MarkdownIt): void {
       state.line = closeLine + 1;
       return true;
     },
-    { alt: [] },
+    // `alt: ['paragraph']` is the glued-PREVIOUS-line half of the widening: it
+    // registers this rule as a paragraph terminator, so a `<svg` at the start
+    // of a line can interrupt a running paragraph the way headings and fences
+    // do, instead of being swallowed as a lazy continuation and escaped.
+    { alt: ['paragraph'] },
   );
 }
 

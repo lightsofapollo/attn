@@ -174,18 +174,39 @@
      to float above. */
   --panel-surface: oklch(0.855 0.012 75);
   --panel-border: oklch(0.14 0.008 55 / 16%);
-  /* The app header's own plane (2026-08-09, user report: "we need to give
-     this a differentiated background color"). The header used to sit ON
-     --panel-surface — deliberately the same value as the sidebar, so both
-     edges of the workspace receded equally — but in practice the top of the
-     window read as one undifferentiated chrome field with nothing marking
-     the bar that holds the document's name and actions. One step darker than
-     the panel plane and warmed toward the clay (chroma up, hue pulled from 75
-     toward the accent's 28) so the bar reads as its own surface without
-     spending the accent itself: a tinted ground is furniture, not a mark, so
-     the One Pencil Rule is not in play. Shared by all three headers (native,
-     hosted owner, browser reviewer) — one grammar, one plane. */
-  --header-surface: oklch(0.83 0.025 55);
+  /* The app header IS the accent (2026-08-10, owner-directed). Two requests
+     landed on the same value from different directions: the web header should
+     match the "Choose file" button below it (`bg-primary`), and the desktop
+     header should be "orange/blue" — which is exactly what `--primary` is in
+     the two themes. So the plane is the accent itself, not a tint of it.
+
+     This is the header's fourth surface, and the trajectory is the argument
+     for it: paper (invisible), --panel-surface (vanished into the sidebar),
+     a warm tinted plane (still too quiet), and now the accent.
+
+     `var(--primary)` rather than a copy: declared HERE at :root, the value is
+     computed on the theme-carrying element, so it freezes the real accent and
+     keeps inheriting it even inside the header, where `--primary` is itself
+     re-pointed at the on-accent foreground (see `chrome-on-accent` in
+     app.css). One token, no duplicated literal, no cycle. */
+  --header-surface: var(--primary);
+
+  /* Base chrome values, CAPTURED. Same freezing trick, used deliberately: a
+     `var()` in a custom-property declaration resolves on the element the
+     declaration applies to (here `:root`, which also carries the theme class),
+     so these hold the ROOT values and keep holding them inside subtrees that
+     override their sources. That is what lets the header re-point --foreground
+     and friends at on-accent values while the popovers floating INSIDE it
+     restore the ordinary palette from these. Verified empirically before the
+     design was built on it. */
+  --chrome-foreground: var(--foreground);
+  --chrome-muted-foreground: var(--muted-foreground);
+  --chrome-primary: var(--primary);
+  --chrome-accent: var(--accent);
+  --chrome-accent-foreground: var(--accent-foreground);
+  --chrome-border: var(--border);
+  --chrome-ring: var(--ring);
+  --chrome-amber-deep: var(--amber-deep);
   /* Whatever the margin's cards and chips are actually sitting ON. The native
      rail is a docked panel and overrides this to `--panel-surface`; the hosted
      margin floats over the document, so it keeps the paper. Chips that ring
@@ -309,10 +330,6 @@
      same plane as the sidebar, with the 0.22 cards clearly above it. */
   --panel-surface: oklch(0.172 0.014 257);
   --panel-border: oklch(1 0 0 / 10%);
-  /* Header plane in Ink LIFTS off the rails (matching Ink's whole elevation
-     story — rails lift off a darker ground rather than sinking into it) and
-     leans toward the steel accent's hue the way Paper's leans toward clay. */
-  --header-surface: oklch(0.225 0.024 245);
   /* Ink's `--muted` is 0.175 — it read as a fill against the 0.148 paper, but
      against the 0.172 panel it is a 0.003 delta, i.e. no fill at all. Half a
      step toward the 0.22 cards restores "quiet raised pill" without promoting

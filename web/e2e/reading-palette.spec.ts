@@ -77,9 +77,30 @@ function measureInPage(): Measurement[] {
     return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
   };
 
+  /**
+   * Contrast of `a` against `b`, COMPOSITING `a` over `b` when it is
+   * translucent.
+   *
+   * Without this the alpha is silently dropped and a translucent foreground is
+   * credited with its solid colour's ratio — which over-reports, always in the
+   * flattering direction. It bit here: the header's muted icons are
+   * `--primary-foreground` at 80%, and were scoring identically to the solid
+   * doc name beside them.
+   */
   const contrast = (a: string, b: string): number => {
-    const la = luminance(toRgb(a));
-    const lb = luminance(toRgb(b));
+    const fg = toRgb(a);
+    const bg = toRgb(b);
+    const composited: [number, number, number, number] =
+      fg[3] >= 1
+        ? fg
+        : [
+            fg[0] * fg[3] + bg[0] * (1 - fg[3]),
+            fg[1] * fg[3] + bg[1] * (1 - fg[3]),
+            fg[2] * fg[3] + bg[2] * (1 - fg[3]),
+            1,
+          ];
+    const la = luminance(composited);
+    const lb = luminance(bg);
     const [hi, lo] = la > lb ? [la, lb] : [lb, la];
     return Math.round(((hi + 0.05) / (lo + 0.05)) * 100) / 100;
   };

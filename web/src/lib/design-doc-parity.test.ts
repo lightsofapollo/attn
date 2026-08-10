@@ -132,7 +132,23 @@ defineCase('every frontmatter colour matches its canonical token', () => {
     const actual = tokens[tokenName];
     if (actual === undefined) {
       failures.push(`${name}: mapped token --${tokenName} not found in tokens.css`);
-    } else if (actual !== value) {
+      continue;
+    }
+    // The DESIGN.md format allows `{colors.x}` token references, and a token
+    // whose CSS value is literally `var(--x)` is the same statement in the
+    // other language. Resolve both sides rather than demanding a duplicated
+    // literal — duplicating it is exactly the drift this test exists to stop.
+    const refMatch = /^\{colors\.([a-z0-9-]+)\}$/.exec(value);
+    if (refMatch) {
+      const target = TOKEN_MAP[refMatch[1]!] ?? refMatch[1]!;
+      if (actual !== `var(--${target})`) {
+        failures.push(
+          `${name}: DESIGN.md references {colors.${refMatch[1]}}, but --${tokenName} is "${actual}" (expected var(--${target}))`,
+        );
+      }
+      continue;
+    }
+    if (actual !== value) {
       failures.push(`${name}: DESIGN.md says "${value}", --${tokenName} is "${actual}"`);
     }
   }

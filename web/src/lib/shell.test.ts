@@ -102,8 +102,12 @@ defineCase('the brand takes the free corner only when there is one', () => {
     );
   });
   withWindow(undefined, () => {
-    assert(brandPlacement(true) === 'header', 'desktop keeps the brand in the header');
-    assert(brandPlacement(false) === 'header', 'desktop keeps the brand in the header');
+    // Owner-directed 2026-08-10: the desktop app shows no brand at all. The
+    // OS already supplies identity (Dock icon, window, app menu), so the
+    // header belongs entirely to the document. This is why the answer is
+    // three-way — "nowhere" is a position, not a missing case.
+    assert(brandPlacement(true) === 'none', 'desktop shows no brand');
+    assert(brandPlacement(false) === 'none', 'desktop shows no brand even with no sidebar');
   });
 });
 
@@ -159,8 +163,11 @@ defineCase('the brand is in exactly one place at a time', () => {
   const app = read('../App.svelte');
   const sidebar = read('Sidebar.svelte');
   assert(app.includes('{#if brandInHeader}'), 'the header brand must be conditional');
-  assert(app.includes('showBrand={!brandInHeader}'), 'the sidebar brand takes the other branch');
-  // Mutually exclusive by construction: one boolean, both branches.
+  assert(
+    app.includes("showBrand={brandSlot === 'sidebar'}"),
+    'the sidebar brand must test the slot directly — with three outcomes, the ' +
+      'negation of "header" is no longer "sidebar" (it is also "none")',
+  );
   assert(
     sidebar.includes('showBrand = false'),
     'showBrand must default false so hosted surfaces keep their own brand',

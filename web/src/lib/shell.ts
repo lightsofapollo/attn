@@ -49,15 +49,22 @@ export function reservesWindowControls(): boolean {
 /**
  * Where does the attn brand live?
  *
- * In the browser the top-left corner is free, so the mark belongs there, in the
- * sidebar above the project label. In the desktop window that corner is the
- * traffic lights', so the brand stays in the header beside the document name.
- *
- * With no sidebar to hold it — a browser tab before anything is opened — the
- * header is the only place left; the app must not go unbranded in its own
- * empty state.
+ * - DESKTOP: nowhere (owner-directed, 2026-08-10 — "remove the attn text and
+ *   logo on the desktop app, it's not needed, just show the name of the active
+ *   file instead"). A desktop app does not need to tell you which app it is:
+ *   the Dock icon, the window and the app menu all already say so, and the
+ *   header's job is the document. This is why the placement is a THREE-way
+ *   answer rather than a boolean — "no brand at all" is a real position, and
+ *   it is the right one exactly where the OS supplies identity for free.
+ * - BROWSER WITH A SIDEBAR: the top-left corner, above the project label. A
+ *   tab has no Dock icon and the corner is free because there are no traffic
+ *   lights to clear.
+ * - BROWSER WITHOUT A SIDEBAR: the header, as the only place left. The app
+ *   must not go unbranded in its own empty state — that screen is the file
+ *   picker, where "what is this?" is a question a first-time visitor actually
+ *   has.
  */
-export function brandPlacement(hasSidebar: boolean): 'header' | 'sidebar' {
-  if (reservesWindowControls()) return 'header';
+export function brandPlacement(hasSidebar: boolean): 'header' | 'sidebar' | 'none' {
+  if (reservesWindowControls()) return 'none';
   return hasSidebar ? 'sidebar' : 'header';
 }

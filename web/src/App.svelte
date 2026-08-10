@@ -295,7 +295,11 @@
   const nativeChrome = reservesWindowControls();
   /** Desktop keeps the brand in the header; a browser tab gives it the freed
    *  corner — unless there is no sidebar to put it in. */
-  const brandInHeader = $derived(brandPlacement(hasSidebar) === 'header');
+  /** Three-way now: the desktop app shows no brand at all (the OS supplies
+   *  identity), a browser tab with a sidebar puts it in the freed corner, and
+   *  a browser tab without one falls back to the header. */
+  const brandSlot = $derived(brandPlacement(hasSidebar));
+  const brandInHeader = $derived(brandSlot === 'header');
   let showBreadcrumbShare = $derived(
     (activeFileType === 'markdown' || activeFileType === 'html') &&
       !shareDialogOpen &&
@@ -3402,10 +3406,13 @@
     ondblclick={nativeChrome ? zoomWindow : undefined}
   >
     {#if brandInHeader}
-      <!-- In a browser tab with a sidebar the brand lives in the sidebar's
-           freed top-left corner instead; see `brandPlacement`. The divider
-           travels with it — it separates the brand from the document name and
-           has nothing to separate once the brand is gone. -->
+      <!-- Only in a browser tab that has no sidebar to hold the mark. The
+           desktop app shows NO brand (2026-08-10 — the Dock icon, window and
+           app menu already say which app this is, so the header belongs to the
+           document), and a browser tab with a sidebar puts it in the freed
+           corner. See `brandPlacement` for all three. The divider travels with
+           the brand — it separates the brand from the document name and has
+           nothing to separate once the brand is gone. -->
       <span class="flex shrink-0 items-center gap-1.5" data-slot="native-brand" aria-label="attn">
         <BrandMark size={18} />
         <span class="select-none font-serif text-sm font-bold leading-none text-foreground">attn</span>
@@ -3566,7 +3573,7 @@
     entries={fileTree}
     reviewMode={isReviewerInRoom}
     showWindowDragRegion={nativeChrome}
-    showBrand={!brandInHeader}
+    showBrand={brandSlot === 'sidebar'}
     {activePath}
     {rootPath}
     {knownProjects}

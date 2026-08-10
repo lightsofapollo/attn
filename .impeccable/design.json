@@ -1,6 +1,6 @@
 {
   "schemaVersion": 2,
-  "generatedAt": "2026-08-09T03:01:28.977392+00:00",
+  "generatedAt": "2026-08-10T15:05:13.893673+00:00",
   "title": "Design System: attn",
   "extensions": {
     "colorMeta": {
@@ -223,11 +223,10 @@
         "note": "A block inside a block (inline code in a table cell) takes one further step toward the ink."
       },
       "header-surface": {
-        "role": "surface-chrome",
-        "displayName": "Header Plane",
-        "canonical": "oklch(0.83 0.025 55)",
-        "darkCanonical": "oklch(0.225 0.024 245)",
-        "note": "The app header's own plane: one step darker/warmer than the panel plane in Paper, lifted and steel-tinted in Ink. Shared by all three headers. A tinted ground is furniture, not a mark — the One Pencil Rule is not in play."
+        "role": "surface-accent-plane",
+        "displayName": "Header Plane (the accent)",
+        "canonical": "{colors.primary}",
+        "note": "The app header IS the accent — terracotta on Paper, steel blue in Ink (owner-directed 2026-08-10; the web header was asked to match the bg-primary Choose file button, the desktop header to be 'orange/blue'). The header subtree re-points --foreground/--primary/--accent/--amber-deep at --primary-foreground so on-plane controls invert instead of disappearing; polarity flips between themes, so nothing on it is hard-coded white. Floating cards inside the subtree restore the base palette from the --chrome-* captures."
       }
     },
     "typographyMeta": {
@@ -400,7 +399,7 @@
     "rules": [
       {
         "name": "The One Pencil Rule",
-        "body": "The primary accent is a red pencil, not a highlighter. It appears on primary action, current selection, and focus — nowhere else. If two things on a screen are terracotta, one of them is wrong. Links are action: a prose hyperlink carries the accent plus a load-bearing rest-state underline (no lightness passes AA-vs-page and G183-vs-body at once on this palette).",
+        "body": "The primary accent is a red pencil, not a highlighter. It appears on primary action, current selection, and focus — nowhere else. If two things on a screen are terracotta, one of them is wrong. Links are action: a prose hyperlink carries the accent plus a load-bearing rest-state underline (no lightness passes AA-vs-page and G183-vs-body at once on this palette). PLANE EXCEPTION (2026-08-10): the rule governs marks made ON a surface; the header is a surface made OF the accent. On it the pencil inverts to the on-accent foreground for the whole subtree, so active/muted states survive rather than vanishing accent-on-accent. The count still holds inside the reading column, which is what the rule protects.",
         "section": "colors"
       },
       {

@@ -1,5 +1,10 @@
 target/
-web/node_modules/
+# Unanchored so it matches at ANY depth. `web/node_modules/` alone left the
+# repo ROOT unignored, and a vitest cache file (node_modules/.vite/vitest/…/
+# results.json) was committed through the gap — a stale record of one
+# FAILING test run, which is the kind of artifact that is worse than noise
+# if anything ever reads it.
+node_modules/
 web/dist/
 web/dist-browser/
 web/playwright-report/

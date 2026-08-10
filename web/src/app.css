@@ -232,6 +232,22 @@
     box-shadow: none;
   }
 
+  /* Grid items default to `min-width: auto`, which means they refuse to shrink
+     below their own min-content — and the filter's min-content is dominated by
+     the text input's INTRINSIC width (an <input> is sized from its `size`
+     attribute, 20 characters ≈ 130px, whatever CSS says about `min-width: 0`
+     on the input itself; that declaration governs flex shrinking INSIDE the
+     filter, not the filter's contribution to the grid).
+     The sidebar is user-resizable down to SIDEBAR_MIN_WIDTH (180px), so at the
+     bottom of that range the 194px filter bar simply hung out over the
+     document — reported on the desktop app, where a narrow window is normal.
+     `min-width: 0` lets every control shrink with the column; the input's own
+     `min-width: 0` then does the rest, and `size="1"` (Sidebar.svelte) removes
+     the intrinsic floor so the two agree. */
+  .project-sidebar .sidebar-controls[data-sidebar-controls="true"] > * {
+    min-width: 0;
+  }
+
   /* Brand row (attn-64iy.5) — browser tabs only, where the top-left corner is
      not the traffic lights'. Deliberately quiet: it names the product once, at
      the top of the chrome, and then gets out of the way. The wordmark matches

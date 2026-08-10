@@ -26,6 +26,7 @@ export default defineConfig({
     'native-share.spec.ts',
     'browser-review-chrome.spec.ts',
     'reading-palette.spec.ts',
+    'sidebar-narrow.spec.ts',
   ],
   // The mint deadline is 15s and this suite waits it out on purpose, so the
   // per-test budget has to clear it with room for app boot.

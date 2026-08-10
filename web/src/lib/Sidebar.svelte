@@ -458,7 +458,18 @@
     <!-- Filter: a standing box (attn-64iy.7 — it used to be borderless until
          focus, which left an input reading as a label), a search glyph, an
          honest `/` hint, and a clear affordance once typing. Focus promotes the
-         box to the accent ring. -->
+         box to the accent ring.
+
+         `size="1"` is load-bearing, not tidiness: an <input> carries an
+         INTRINSIC width from its `size` attribute (default 20 characters,
+         ~130px) which acts as a layout floor that `min-width: 0` on the input
+         cannot remove — that declaration governs flex shrinking inside the
+         filter, not the filter's own min-content contribution to the sidebar
+         grid. With the default, the filter bottomed out at 194px and hung over
+         the document once the sidebar was resized near its 180px minimum
+         (reported on the desktop app, where a narrow window is ordinary). See
+         the matching `min-width: 0` on the controls grid in app.css; both
+         halves are required. -->
     <div class="sidebar-filter" data-has-query={query.length > 0}>
       <Search class="sidebar-filter-icon size-3.5" />
       <input
@@ -466,6 +477,7 @@
         bind:value={query}
         class="sidebar-filter-input"
         type="text"
+        size="1"
         autocomplete="off"
         spellcheck="false"
         placeholder={sidebarView === 'outline' ? 'Filter headings' : 'Filter files'}

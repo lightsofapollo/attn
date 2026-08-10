@@ -83,6 +83,15 @@ export const AUTOSAVE_OFF_NOT_EDITING = 'Not editing this document.';
 export const AUTOSAVE_HELD_DISK_CONFLICT =
   'This file changed on disk after you started editing. Autosave is paused so your window does not overwrite the newer version — save to keep yours, or cancel to take the version on disk.';
 
+/**
+ * The buffer these edits came from is no longer on screen. Not shown to the
+ * user — reaching this means a document-replacing code path forgot to flush,
+ * so it is a developer signal, and the interlock's job is to make that a
+ * dropped write rather than a corrupted file.
+ */
+export const AUTOSAVE_OFF_DOCUMENT_CHANGED =
+  'The document changed before these edits could be written.';
+
 /** Short enough for a status chip; the sentence above is for anywhere with room. */
 export const AUTOSAVE_HELD_SHORT = 'Unsaved changes · file changed on disk';
 
@@ -148,6 +157,25 @@ export interface NativeAutosaveOptions {
    * header: the state that matters is the state when the write would land.
    */
   gate: () => AutosaveGate;
+  /**
+   * Which document the editor is showing, as a stable string (the active
+   * path). Snapshotted when a burst of edits becomes pending and re-read when
+   * the write is due; a change between the two means the buffer these edits
+   * came from is gone.
+   *
+   * THIS IS AN INTERLOCK, NOT AN OPTIMISATION, and it exists because of what
+   * the write actually is. `edit_save` carries only `content` — the DAEMON
+   * picks the target from its own `active_path` (src/ipc.rs). So a timer that
+   * fires after the app has moved to another document does not write the old
+   * file late; it writes the OLD BUFFER'S TEXT INTO THE NEW FILE. The frontend
+   * cannot retarget it, because the target was never the frontend's to name.
+   *
+   * Callers are still expected to flush before replacing a document (that is
+   * what makes the edits land at all). This is the backstop for the call site
+   * nobody remembered — and there will be one, because "changes the active
+   * document" is not a thing the type system can see.
+   */
+  identity: () => string;
   /** Observability hook — fired with the gate that refused a due write. */
   onSkipped?: (gate: AutosaveGate) => void;
   schedule?: (fn: () => void, ms: number) => () => void;
@@ -159,6 +187,7 @@ export class NativeAutosave {
   private readonly maxPendingMs: number;
   private readonly commitFn: () => void;
   private readonly gate: () => AutosaveGate;
+  private readonly identity: () => string;
   private readonly onSkipped: ((gate: AutosaveGate) => void) | null;
   private readonly schedule: (fn: () => void, ms: number) => () => void;
   private readonly now: () => number;
@@ -166,6 +195,8 @@ export class NativeAutosave {
   private cancelTimer: (() => void) | null = null;
   private hasPending = false;
   private pendingSince: number | null = null;
+  /** The document the pending edits belong to. Null when nothing is pending. */
+  private pendingIdentity: string | null = null;
   private disposed = false;
 
   constructor(options: NativeAutosaveOptions) {
@@ -173,6 +204,7 @@ export class NativeAutosave {
     this.maxPendingMs = options.maxPendingMs ?? NATIVE_AUTOSAVE_CEILING_MS;
     this.commitFn = options.commit;
     this.gate = options.gate;
+    this.identity = options.identity;
     this.onSkipped = options.onSkipped ?? null;
     this.schedule =
       options.schedule ??
@@ -203,6 +235,7 @@ export class NativeAutosave {
     if (!this.hasPending) {
       this.hasPending = true;
       this.pendingSince = this.now();
+      this.pendingIdentity = this.identity();
     }
     this.arm();
   }
@@ -232,6 +265,7 @@ export class NativeAutosave {
     this.clearTimer();
     this.hasPending = false;
     this.pendingSince = null;
+    this.pendingIdentity = null;
   }
 
   dispose(): void {
@@ -251,6 +285,25 @@ export class NativeAutosave {
 
   private fire(): boolean {
     if (this.disposed || !this.hasPending) return false;
+
+    // Identity first, before the gate: a mismatch is not a refusal to write
+    // now, it is the discovery that the thing we were going to write no
+    // longer exists. Writing would put one document's text in another's file
+    // (see `identity` in the options for why the frontend cannot retarget it),
+    // so drop the pending state and say so.
+    const identityNow = this.identity();
+    if (this.pendingIdentity !== null && identityNow !== this.pendingIdentity) {
+      const stranded: AutosaveGate = {
+        status: 'off',
+        reason: AUTOSAVE_OFF_DOCUMENT_CHANGED,
+      };
+      this.onSkipped?.(stranded);
+      this.hasPending = false;
+      this.pendingSince = null;
+      this.pendingIdentity = null;
+      return false;
+    }
+
     const gate = this.gate();
     if (gate.status === 'armed') {
       // Clear BEFORE committing: `commit` runs the app's save function, which
@@ -259,6 +312,7 @@ export class NativeAutosave {
       // would throw away that legitimately-new pending state.
       this.hasPending = false;
       this.pendingSince = null;
+      this.pendingIdentity = null;
       this.commitFn();
       return true;
     }
@@ -278,6 +332,7 @@ export class NativeAutosave {
     this.onSkipped?.(gate);
     this.hasPending = false;
     this.pendingSince = null;
+    this.pendingIdentity = null;
     return false;
   }
 

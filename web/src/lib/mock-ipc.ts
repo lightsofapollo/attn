@@ -25,10 +25,12 @@ import type {
 } from './types';
 import type { InviteTierV3 } from './review/browser-invite';
 import {
+  activeLocalPath,
   deliverLocalPath,
   hasLocalFiles,
   localMarkdown,
   localShareableFiles,
+  writeLocalMarkdown,
 } from './local-file-source';
 // The real thing, not a mock: see `publishMockSnapshots`. A snapshot is the one
 // payload in this file whose content has to be genuine, so it borrows the same
@@ -1053,6 +1055,19 @@ export function installMockIpc(): void {
       // Serve it out of whatever the user picked or dropped this session.
       if (parsed.type === 'navigate') {
         void deliverLocalPath(parsed.path);
+      }
+      // `edit_save` carries CONTENT ONLY — the real daemon resolves the target
+      // from its own active_path (src/ipc.rs). Mirroring that here is not
+      // pedantry: it is the semantic the frontend's autosave interlock is
+      // written against, so the browser loop exercises the same rule the
+      // desktop one does, including the mistargeting it prevents.
+      if (parsed.type === 'edit_save') {
+        const target = activeLocalPath();
+        if (!target || !writeLocalMarkdown(target, parsed.content)) {
+          // The sample document has no backing file. Say so rather than
+          // letting the app's chip claim a save that went nowhere.
+          console.warn('[attn] edit_save dropped: no local file for', target || '(none)');
+        }
       }
     },
   };

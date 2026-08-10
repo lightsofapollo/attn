@@ -2,7 +2,16 @@
 //
 //   cd web && npx tsx src/lib/local-file-source.test.ts
 
-import { buildTree, openLocalFiles, resetLocalFiles, type PickedPath } from './local-file-source';
+import {
+  activeLocalPath,
+  buildTree,
+  deliverLocalPath,
+  localMarkdown,
+  openLocalFiles,
+  resetLocalFiles,
+  writeLocalMarkdown,
+  type PickedPath,
+} from './local-file-source';
 import type { ContentPayload, TreeNode } from './types';
 
 let failed = 0;
@@ -100,6 +109,49 @@ const run = async (): Promise<void> => {
   resetLocalFiles();
   result = await openLocalFiles([pick('big.md', '# big', 9 * 1024 * 1024)]);
   assert(result.opened === 0 && result.skippedLimit === 1, 'a file past the size cap is refused');
+
+  /* ---------------------------------------------------------------------- *
+   * Edits to picked files survive (Codex review, 2026-08-10).
+   *
+   * THE BUG: `edit_save` was accepted by the mock IPC and never applied. The
+   * store holds immutable `File` objects, so the app reported a successful
+   * save and the next read of that path returned the ORIGINAL bytes —
+   * switching tabs, sharing, or reopening silently reverted the user's work,
+   * with the save chip having already told them it was safe.
+   * ---------------------------------------------------------------------- */
+  resetLocalFiles();
+  await openLocalFiles([pick('/w/a.md', '# original a'), pick('/w/b.md', '# original b')]);
+
+  assert(activeLocalPath() === '/w/a.md', 'the first delivered file is the active one');
+
+  assert(writeLocalMarkdown('/w/a.md', '# edited a'), 'an edit to a picked file is accepted');
+  assert((await localMarkdown('/w/a.md')) === '# edited a', 'and the next read returns the EDIT');
+
+  // The failure end-to-end: leave the file, come back, and the edit must still
+  // be there rather than the bytes off the user's disk.
+  await deliverLocalPath('/w/b.md');
+  assert(activeLocalPath() === '/w/b.md', 'navigating moves the write target');
+  await deliverLocalPath('/w/a.md');
+  assert(
+    delivered()?.markdown === '# edited a',
+    'returning to the edited file redelivers the edit, not the original',
+  );
+
+  assert(!writeLocalMarkdown('/w/missing.md', 'x'), 'a write to an unknown path is refused');
+
+  // mtime must move forward, or the app reads its own save back as someone
+  // else's concurrent write and raises a disk conflict against itself.
+  const mtimeBefore = delivered()?.contentMtimeMs ?? 0;
+  writeLocalMarkdown('/w/a.md', '# edited again');
+  await deliverLocalPath('/w/a.md');
+  assert((delivered()?.contentMtimeMs ?? 0) > mtimeBefore, 'each write advances lastModified');
+  assert(
+    delivered()?.contentBytes === new Blob(['# edited again']).size,
+    'the delivered size matches the edited bytes, not the original',
+  );
+
+  resetLocalFiles();
+  assert(activeLocalPath() === '', 'reset clears the write target');
 
   if (failed > 0) {
     console.error(`\n${failed} failed`);

@@ -72,6 +72,19 @@ interface DirectoryEntryLike {
 
 /** Session store of picked files, keyed by the synthetic path in the tree. */
 const store = new Map<string, File>();
+
+/** Indirected so tests can pin it; `File.lastModified` needs a real clock. */
+const nowMs = (): number => Date.now();
+
+/**
+ * Which of these files the app is currently showing.
+ *
+ * This module is the one that DELIVERS content, so it is the one that knows.
+ * It exists because `edit_save` names no target — the real daemon writes to its
+ * own `active_path`, and the browser loop has to answer the same question the
+ * same way or a save lands in the wrong file (or, as it did before, nowhere).
+ */
+let activePath = '';
 let storeRootPath = '';
 
 export interface OpenLocalResult {
@@ -306,9 +319,41 @@ export async function localMarkdown(path: string): Promise<string | null> {
 }
 
 /** Read one stored file and push it to the app as the daemon would. */
+/**
+ * Record an edit against a file the user picked this session.
+ *
+ * The store holds `File` objects, which are IMMUTABLE — the bytes belong to
+ * the user's disk, and the browser will not let us write back to them. So the
+ * session copy is replaced with a new `File` carrying the edited text. That is
+ * the honest model for this loop: the edits live for as long as the tab does,
+ * and they are what every subsequent read of this path returns.
+ *
+ * Without this, `edit_save` was accepted and dropped: the app reported a
+ * successful save, then switching tabs or sharing re-read the ORIGINAL bytes
+ * and the edits were gone with no error anywhere (Codex review, 2026-08-10).
+ *
+ * `lastModified` is advanced past the previous value so the app's
+ * external-change detection reads this as a newer version of the file rather
+ * than as a conflicting write by someone else.
+ */
+export function writeLocalMarkdown(path: string, text: string): boolean {
+  const existing = store.get(path);
+  if (!existing) return false;
+  const name = path.split('/').pop() || existing.name;
+  store.set(
+    path,
+    new File([text], name, {
+      type: existing.type || 'text/markdown',
+      lastModified: Math.max(existing.lastModified + 1, nowMs()),
+    }),
+  );
+  return true;
+}
+
 export async function deliverLocalPath(path: string): Promise<boolean> {
   const file = store.get(path);
   if (!file) return false;
+  activePath = path;
 
   const markdown = await file.text();
   bridge()?.setContent({
@@ -362,6 +407,7 @@ export async function openLocalFiles(input: Iterable<PickedPath>): Promise<OpenL
 
   const first = paths[0];
   result.activePath = first;
+  activePath = first;
 
   const markdown = await store.get(first)!.text();
   const single = candidates.length === 1;
@@ -388,4 +434,10 @@ export async function openLocalFiles(input: Iterable<PickedPath>): Promise<OpenL
 export function resetLocalFiles(): void {
   store.clear();
   storeRootPath = '';
+  activePath = '';
+}
+
+/** The path `edit_save` resolves against — see `activePath`. */
+export function activeLocalPath(): string {
+  return activePath;
 }

@@ -10,6 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   AUTOSAVE_HELD_DISK_CONFLICT,
+  AUTOSAVE_OFF_DOCUMENT_CHANGED,
   AUTOSAVE_OFF_NOT_EDITING,
   AUTOSAVE_OFF_NOT_MARKDOWN,
   AUTOSAVE_OFF_NO_FILE,
@@ -198,6 +199,8 @@ interface Harness {
   commits: () => number;
   skipped: () => AutosaveGate[];
   setGate: (gate: AutosaveGate) => void;
+  /** Move the editor to another document, the way a tab switch does. */
+  setIdentity: (id: string) => void;
 }
 
 function harness(over: Partial<{ debounceMs: number; maxPendingMs: number }> = {}): Harness {
@@ -205,12 +208,14 @@ function harness(over: Partial<{ debounceMs: number; maxPendingMs: number }> = {
   let gate: AutosaveGate = { status: 'armed' };
   let commits = 0;
   const skipped: AutosaveGate[] = [];
+  let identity = 'a.md';
   const autosave = new NativeAutosave({
     ...over,
     commit: () => {
       commits += 1;
     },
     gate: () => gate,
+    identity: () => identity,
     onSkipped: (g) => skipped.push(g),
     now: clock.now,
     schedule: clock.schedule,
@@ -222,6 +227,9 @@ function harness(over: Partial<{ debounceMs: number; maxPendingMs: number }> = {
     skipped: () => skipped,
     setGate: (g) => {
       gate = g;
+    },
+    setIdentity: (id) => {
+      identity = id;
     },
   };
 }
@@ -359,6 +367,7 @@ defineCase('a save that re-enters noteChange keeps the new edit', () => {
       if (commits === 1) inner!.noteChange();
     },
     gate: () => ({ status: 'armed' }),
+    identity: () => 'a.md',
     now: clock.now,
     schedule: clock.schedule,
   });
@@ -400,6 +409,94 @@ defineCase('App.svelte drives one autosave path, not two', () => {
     !appSource.includes('collabSaveTimer'),
     'the collab-only save timer must be gone, not running beside autosave',
   );
+});
+
+defineCase('a write is never fired against a different document', () => {
+  // THE CORRUPTION CASE (Codex review, 2026-08-10). `edit_save` carries only
+  // content — the daemon writes it to ITS active_path — so a timer that
+  // outlives a tab switch does not save the old file late, it saves the OLD
+  // BUFFER'S TEXT INTO THE NEW FILE. The frontend cannot retarget the write,
+  // so the only safe move is to not make it.
+  const h = harness();
+  h.autosave.noteChange();
+  h.setIdentity('b.md');
+  h.advance(NATIVE_AUTOSAVE_DEBOUNCE_MS * 4);
+  assert(h.commits() === 0, 'the stranded write must NOT land in the new document');
+  assert(!h.autosave.pending, 'and it must not linger to fire again later');
+  const last = h.skipped().at(-1);
+  assert(
+    last?.status === 'off' && last.reason === AUTOSAVE_OFF_DOCUMENT_CHANGED,
+    'the drop is reported as a document change, not as an ordinary surface refusal',
+  );
+});
+
+defineCase('flush is subject to the same interlock', () => {
+  // A caller that flushes AFTER swapping the document has already lost the
+  // buffer; the flush must not turn that mistake into a cross-file write.
+  const h = harness();
+  h.autosave.noteChange();
+  h.setIdentity('b.md');
+  assert(h.autosave.flush() === false, 'flush must refuse a stranded write');
+  assert(h.commits() === 0, 'nothing written');
+});
+
+defineCase('identity is snapshotted per burst, not per keystroke', () => {
+  // The snapshot is taken when a burst BEGINS pending. Later keystrokes in the
+  // same burst belong to the same document, and re-snapshotting on each one
+  // would quietly re-point a burst that began elsewhere.
+  const h = harness();
+  h.autosave.noteChange();
+  h.advance(10);
+  h.autosave.noteChange();
+  h.setIdentity('b.md');
+  h.autosave.noteChange();
+  h.advance(NATIVE_AUTOSAVE_DEBOUNCE_MS * 4);
+  assert(h.commits() === 0, 'the burst still belongs to the document it started in');
+});
+
+defineCase('returning to the original document does not resurrect a dropped write', () => {
+  const h = harness();
+  h.autosave.noteChange();
+  h.setIdentity('b.md');
+  h.advance(NATIVE_AUTOSAVE_DEBOUNCE_MS * 4);
+  h.setIdentity('a.md');
+  h.advance(NATIVE_AUTOSAVE_DEBOUNCE_MS * 4);
+  assert(h.commits() === 0, 'the pending state was dropped at the mismatch, not parked');
+});
+
+defineCase('a normal edit still writes once the identity holds', () => {
+  // The interlock must not be so eager that ordinary editing stops working.
+  const h = harness();
+  h.autosave.noteChange();
+  h.advance(NATIVE_AUTOSAVE_DEBOUNCE_MS * 4);
+  assert(h.commits() === 1, 'unchanged document writes exactly once');
+});
+
+defineCase('every document-replacing call site funnels through replaceDocument', () => {
+  // The buffer belongs to one path, and `edit_save` carries only content — the
+  // daemon writes it to ITS active_path. So a code path that swaps the open
+  // document without discharging the pending write either strands the edits or
+  // lands them in the file being opened.
+  //
+  // Grepping source is a blunt instrument, and it is used here on purpose:
+  // "this function changes which document is open" is not a property the type
+  // system can see, so the alternative is remembering. This is the list Codex
+  // found unguarded on 2026-08-10.
+  assert(appSource.includes('function replaceDocument('), 'the funnel must exist');
+  for (const site of [
+    'switchTabNow',
+    'closeTabNow',
+    'openPathNow',
+    'handleProjectSwitch',
+    'applySetContent',
+  ]) {
+    const at = appSource.indexOf(`function ${site}(`);
+    assert(at !== -1, `${site} still exists (rename? then update this list)`);
+    // The guard belongs at the TOP of the function — after the buffer has been
+    // replaced there is nothing left to flush.
+    const head = appSource.slice(at, at + 900);
+    assert(head.includes('replaceDocument()'), `${site} must guard the document swap`);
+  }
 });
 
 defineCase('the save chip says the thing this epic made true', () => {

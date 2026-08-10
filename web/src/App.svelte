@@ -1086,6 +1086,11 @@
   // This file spends the decision; it does not make it.
   const nativeAutosave = new NativeAutosave({
     commit: () => saveEdits(),
+    // The daemon resolves `edit_save` against its OWN active_path, so a write
+    // that fires after the app has moved on lands in the wrong file. This is
+    // the interlock that makes that impossible; `replaceDocument` below is
+    // what makes the edits land at all.
+    identity: () => activePath,
     // Re-asked at fire time, deliberately. The disk-conflict state can appear
     // DURING the debounce window (an agent rewrites the file mid-sentence), and
     // the decision that governs a write is the one true when it lands.
@@ -1102,6 +1107,32 @@
           : false,
       }),
   });
+
+  /**
+   * Call before ANYTHING replaces the document in the editor.
+   *
+   * The buffer belongs to exactly one path, and a pending autosave is a
+   * promise to write that buffer to that path. Replacing the document without
+   * discharging the promise is data loss in one of two flavours: the write
+   * fires later against a different active_path (corruption — now blocked by
+   * the controller's identity interlock), or it is dropped and the edits are
+   * simply gone.
+   *
+   * Returns false when a pending write could NOT be discharged, which today
+   * means only one thing: a disk conflict is held. Callers that own a
+   * user-initiated navigation abort on false and leave the person on the file
+   * whose edits are at stake — they already have both resolutions in front of
+   * them (⌘S keeps theirs, Escape takes the disk's) and the chip is already
+   * explaining the state. Callers that cannot abort (the daemon pushing a new
+   * document) proceed; the daemon is authoritative about what is on screen.
+   */
+  function replaceDocument(): boolean {
+    if (!nativeAutosave.pending) return true;
+    if (nativeAutosave.flush()) return true;
+    // Pending but unflushable. `flush` consults the gate, so this is the held
+    // disk-conflict case rather than anything we can retry our way out of.
+    return !nativeAutosave.pending;
+  }
 
   /** Reactive mirror of the autosave hold, for the save chip (see below). */
   let autosaveHeld = $derived(
@@ -2075,7 +2106,7 @@
     // edits belong to. Firing after the switch would write one document's text
     // over another's. `flush()` still consults the gate, so a held disk
     // conflict is not force-written by the act of navigating away.
-    nativeAutosave.flush();
+    if (!replaceDocument()) return;
     const ft = fileType ?? detectFileType(path);
 
     // For directories, always (re-)load children so DirectoryOverview shows the full listing.
@@ -2133,6 +2164,11 @@
 
   function switchTabNow(id: string): void {
     if (id === activeTabId) return;
+    // Discharge the autosave promise while `activePath` — and therefore the
+    // daemon's active_path — still points at the file being left. Without
+    // this, a debounce that outlives the switch writes THIS buffer's text into
+    // the tab being opened.
+    if (!replaceDocument()) return;
     saveScrollPosition();
     activeTabId = id;
     const tab = tabs.find((t) => t.id === id);
@@ -2165,6 +2201,10 @@
   }
 
   function closeTabNow(id: string, idx: number): void {
+    // Closing the ACTIVE tab replaces the document too — and if it is the last
+    // tab there is no next path at all, so the gate turns `off` and the pending
+    // write is dropped rather than landing anywhere.
+    if (id === activeTabId && !replaceDocument()) return;
     tabs = tabs.filter((t) => t.id !== id);
     if (tabs.length === 0) {
       activeTabId = '';
@@ -2403,6 +2443,15 @@
 
   function registerIpcHandlers(): void {
     function applySetContent(data: ContentPayload): void {
+      // The daemon can replace the open document without the frontend asking
+      // (`attn other.md` from a second terminal targets the running window).
+      // Flush while the old path is still current — but do NOT abort on a
+      // refusal the way user-initiated navigation does: the daemon is
+      // authoritative about what is on screen, and refusing here would leave
+      // the app showing a file the daemon believes it has already replaced.
+      // The identity interlock still prevents the stranded write from landing
+      // in the wrong file.
+      if (data.filePath && data.filePath !== activePath) replaceDocument();
       if (data.rootPath) {
         rootPath = data.rootPath;
       }
@@ -3065,6 +3114,9 @@
 
   function handleProjectSwitch(path: string): void {
     if (!path || path === activeProjectPath) return;
+    // A project switch tears down the whole tab scope, so it replaces the
+    // document as surely as clicking another file does.
+    if (!replaceDocument()) return;
     pendingFrontendNav = false;
     switchProject(path);
   }

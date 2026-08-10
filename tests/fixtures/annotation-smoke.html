@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Q3 Latency Investigation — draft</title>
+    <!--
+      Smoke-test fixture for HTML annotation (attn-61t / attn-mz25).
+
+      Deliberately shaped to exercise the parts of the feature that automated
+      tests cannot judge:
+
+        * long enough to SCROLL, so margin cards can be watched tracking their
+          anchors;
+        * a real <table> with a header row, so the cell < row < table scope
+          breadcrumb has something to walk;
+        * a sentence REPEATED VERBATIM in two places, so prefix/suffix
+          disambiguation can be seen doing its job (comment on both copies —
+          they must stay on their own paragraphs, not collapse onto the first);
+        * a list, a code block, and a blockquote, which are each their own
+          scope in the gutter flyout;
+        * inline script + CSS, because a real agent-authored report has them
+          and the frame runs with scripts enabled.
+
+      Self-contained on purpose: no remote fonts or assets, so the smoke test
+      never depends on the network.
+    -->
+    <style>
+      :root { color-scheme: light dark; }
+      body {
+        margin: 0;
+        padding: 3rem 1.5rem 6rem;
+        font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+        line-height: 1.65;
+        color: #1c1917;
+        background: #faf9f7;
+      }
+      main { max-width: 46rem; margin: 0 auto; }
+      h1 { font-size: 2rem; line-height: 1.2; margin: 0 0 0.25rem; }
+      h2 { font-size: 1.25rem; margin: 2.5rem 0 0.75rem; }
+      .meta { color: #78716c; font-size: 0.875rem; margin: 0 0 2rem; }
+      table { border-collapse: collapse; width: 100%; margin: 1.25rem 0; font-size: 0.9375rem; }
+      th, td { border: 1px solid #d6d3d1; padding: 0.5rem 0.75rem; text-align: left; }
+      thead th { background: #f5f5f4; font-weight: 600; }
+      tbody tr:nth-child(even) { background: #fdfdfc; }
+      code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+      pre {
+        background: #f5f5f4;
+        border: 1px solid #e7e5e4;
+        border-radius: 0.5rem;
+        padding: 0.875rem 1rem;
+        overflow-x: auto;
+        font-size: 0.875rem;
+      }
+      blockquote {
+        margin: 1.25rem 0;
+        padding: 0.5rem 0 0.5rem 1rem;
+        border-left: 3px solid #c9a227;
+        color: #57534e;
+      }
+      .regressed { color: #b91c1c; font-weight: 600; }
+      @media (prefers-color-scheme: dark) {
+        body { background: #1c1917; color: #e7e5e4; }
+        thead th { background: #292524; }
+        tbody tr:nth-child(even) { background: #232020; }
+        pre { background: #232020; border-color: #3f3b39; }
+        .meta, blockquote { color: #a8a29e; }
+        th, td { border-color: #44403c; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Q3 Latency Investigation</h1>
+      <p class="meta">Draft prepared by an agent · <span id="generated">generating…</span></p>
+
+      <p>
+        This report summarises the p99 latency regression observed across the
+        API fleet during the third quarter. The numbers below are drawn from
+        the request-tracing pipeline and have not yet been reconciled against
+        the billing export.
+      </p>
+
+      <blockquote>
+        Every figure in this section should be treated as provisional until the
+        reconciliation job has run against the full quarter.
+      </blockquote>
+
+      <h2>Regression summary</h2>
+
+      <p>
+        Three services account for nearly all of the increase. The remaining
+        services stayed within their historical envelope and are excluded from
+        the table for brevity.
+      </p>
+
+      <table>
+        <thead>
+          <tr>
+            <th>Service</th>
+            <th>p50 (ms)</th>
+            <th>p99 (ms)</th>
+            <th>Change</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>checkout-api</td>
+            <td>42</td>
+            <td>1,180</td>
+            <td class="regressed">+340%</td>
+          </tr>
+          <tr>
+            <td>search-index</td>
+            <td>18</td>
+            <td>640</td>
+            <td class="regressed">+120%</td>
+          </tr>
+          <tr>
+            <td>media-transcode</td>
+            <td>310</td>
+            <td>4,900</td>
+            <td class="regressed">+88%</td>
+          </tr>
+          <tr>
+            <td>auth-edge</td>
+            <td>9</td>
+            <td>72</td>
+            <td>+4%</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <p>
+        The reconciliation job has not yet been run against the full quarter.
+      </p>
+
+      <h2>Probable causes</h2>
+
+      <ul>
+        <li>Connection-pool exhaustion during the 14:00 UTC batch window.</li>
+        <li>A cache key change shipped in week 6 that halved the hit rate.</li>
+        <li>Cross-region failover that was never reverted after the June test.</li>
+      </ul>
+
+      <p>
+        The second item is the most likely primary cause. The cache key change
+        was shipped without a migration, so every warm key was orphaned at
+        deploy time rather than expiring gradually.
+      </p>
+
+      <pre><code>// The offending change — note the missing version prefix.
+- cacheKey = `v2:${tenant}:${query}`
++ cacheKey = `${tenant}:${query}`</code></pre>
+
+      <h2>Recommended next steps</h2>
+
+      <p>
+        Restore the version prefix and backfill the orphaned keys before the
+        next batch window. The connection-pool ceiling should be raised only
+        after the cache hit rate has recovered, otherwise the two changes
+        cannot be told apart in the traces.
+      </p>
+
+      <p>
+        The reconciliation job has not yet been run against the full quarter.
+      </p>
+
+      <p>
+        Once both changes are in place, a follow-up pass over the same tracing
+        window will confirm whether the regression is fully resolved or whether
+        the failover path is contributing an independent share.
+      </p>
+    </main>
+
+    <script>
+      // Inline script: a real agent-authored report ships with them, and the
+      // annotating frame runs with scripts enabled (html-annotation.md §4).
+      document.getElementById('generated').textContent =
+        'rendered ' + new Date().toLocaleTimeString();
+    </script>
+  </body>
+</html>

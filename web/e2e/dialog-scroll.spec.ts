@@ -163,6 +163,86 @@ test('the close button stays pinned to the frame while the body scrolls', async 
   await expect(close).toBeInViewport();
 });
 
+// ---------------------------------------------------------------------------
+// Horizontal axis (attn-mz25)
+//
+// The vertical bug above was fixed and guarded; the SAME dialog then shipped
+// the mirror-image bug on the other axis, unguarded, and reached a user. A
+// bare `grid` has one implicit column sized `auto` = `minmax(auto,
+// max-content)`. Inside a scroll container that resolves to the widest child's
+// max-content width rather than the dialog's own, so one unbreakable string —
+// a `font-mono` filesystem path in the share modal — laid every row out wider
+// than the dialog, where `overflow-hidden` silently CLIPPED it. Measured on
+// the pre-fix bundle in the real app: a 542px column inside a 446px content
+// box, 32 elements up to 70px past the right edge, buttons cut in half.
+//
+// `grid-cols-[minmax(0,1fr)]` resolves against the dialog instead. These two
+// tests are the guard the first fix should have come with.
+// ---------------------------------------------------------------------------
+
+/** Every descendant laid out past either vertical edge of the dialog. */
+async function horizontalOverflow(page: Page) {
+  return page.evaluate(() => {
+    const dialog = document.querySelector('[role="dialog"][data-state="open"]');
+    if (!dialog) throw new Error('no open dialog');
+    const rect = dialog.getBoundingClientRect();
+    const offenders: { tag: string; classes: string; pastRight: number; pastLeft: number }[] = [];
+    for (const el of dialog.querySelectorAll('*')) {
+      const r = el.getBoundingClientRect();
+      if (r.width === 0) continue;
+      // 1px of slack: subpixel layout, not a real escape.
+      if (r.right > rect.right + 1 || r.left < rect.left - 1) {
+        offenders.push({
+          tag: el.tagName,
+          classes: String((el as HTMLElement).className).slice(0, 60),
+          pastRight: Math.round(r.right - rect.right),
+          pastLeft: Math.round(rect.left - r.left),
+        });
+      }
+    }
+    return { dialogWidth: Math.round(rect.width), offenders };
+  });
+}
+
+for (const width of [480, 760, 1200]) {
+  test(`no dialog content escapes horizontally at a ${width}px window`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await openDialog(page);
+    const { offenders } = await horizontalOverflow(page);
+    expect(offenders).toEqual([]);
+  });
+}
+
+test('an unbreakable string truncates instead of widening the dialog', async ({ page }) => {
+  // The share modal's real trigger, reduced: a long token with no break
+  // opportunity has an enormous max-content width. It must be the CHILD that
+  // gives (truncate/ellipsis), never the dialog that grows. Pre-fix this
+  // widened the implicit grid column and pushed every sibling off the edge,
+  // so it fails loudly on the old bundle.
+  await page.setViewportSize({ width: 900, height: 900 });
+  await openDialog(page);
+
+  const widthBefore = (await horizontalOverflow(page)).dialogWidth;
+
+  await page.evaluate(() => {
+    const body = document.querySelector('[data-slot="dialog-content-body"]');
+    if (!body) throw new Error('dialog body missing');
+    const row = document.createElement('div');
+    row.setAttribute('data-testid', 'unbreakable-probe');
+    row.className = 'flex items-center gap-3 text-xs';
+    const label = document.createElement('span');
+    label.className = 'min-w-0 truncate font-mono';
+    label.textContent = `/Users/someone/${'a-very-long-path-segment/'.repeat(12)}document.md`;
+    row.appendChild(label);
+    body.appendChild(row);
+  });
+
+  const after = await horizontalOverflow(page);
+  expect(after.offenders).toEqual([]);
+  // And the dialog itself must not have been stretched by the intruder.
+  expect(after.dialogWidth).toBeLessThanOrEqual(widthBefore + 1);
+});
+
 test('no ScrollArea viewport outgrows its own root', async ({ page }) => {
   // Blast-radius guard. The fix changed the SHARED ScrollArea, so assert the
   // invariant generically across every ScrollArea the app has mounted, not just

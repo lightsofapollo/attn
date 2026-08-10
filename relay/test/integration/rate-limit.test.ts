@@ -450,6 +450,27 @@ describe("rate limit — per-IP room-create cap (Worker edge)", () => {
 // "room not found" with POST. Use GET /v2/rooms/:roomId/devices instead
 // (5.6) which returns 404 ATTN_ROOM_NOT_FOUND on unknown rooms.
 
+// Every case below is budgeted at 30s rather than the 15s default, because the
+// anti-enum cap (DEFAULT_RATE_LIMIT_CONFIG.antiEnumPerFiveMin = 30) can only be
+// exercised by 30+ SEQUENTIAL SELF.fetch calls, and a SELF.fetch is ~150x more
+// expensive once the whole suite is sharing one workerd isolate.
+//
+// Measured, running the full integration suite locally: a GET on an unknown
+// room costs 1.6ms when this file runs alone and ~250ms when it does not. That
+// is NOT the limiter — a `/health` request, which touches no Durable Object, no
+// quota and no rate limiter at all, costs ~217ms under the same load. The cost
+// is per-round-trip harness overhead in the shared isolate, so it scales with
+// the number of sequential calls a test makes and with total suite activity.
+// These four cases make the most sequential calls in the repo, so they are the
+// first to exhaust a budget; at 15s they were failing in CI and passing locally.
+//
+// Concurrency is not an escape: Promise.all over 20 probes measured 1.0x
+// against the sequential loop both loaded and idle, so the pool serializes them
+// regardless. Lowering the cap via config would be the real speed fix, but the
+// limiter is a module-level singleton shared with every other test in the
+// isolate — and other files, which have no RATE_LIMIT_TEST_IP wrapper, still
+// share the "unknown" bucket — so a smaller global cap would make unrelated
+// cases 429 instead.
 describe("rate limit — anti-enumeration (GET /devices probes)", () => {
   it("applies the same anti-enumeration budget to unsafe legacy blob paths", async () => {
     const enumIp = `10.98.${(counter * 19) & 0xff}.1`;
@@ -473,7 +494,7 @@ describe("rate limit — anti-enumeration (GET /devices probes)", () => {
     expect(overflow.status).toBe(429);
     const body = (await overflow.json()) as { error?: { code?: string } };
     expect(body.error?.code).toBe("ATTN_ENUM_LIMITED");
-  });
+  }, 30_000);
 
   it("31 distinct unknown roomIds from one IP → 31st returns 429 ATTN_ENUM_LIMITED", async () => {
     const enumIp = `10.99.${(counter * 17) & 0xff}.1`;
@@ -507,7 +528,7 @@ describe("rate limit — anti-enumeration (GET /devices probes)", () => {
     expect(body.error.code).toBe("ATTN_ENUM_LIMITED");
     expect(body.error.retryAfterMs).toBeGreaterThan(0);
     expect(overflowRes.headers.get("Retry-After")).not.toBeNull();
-  });
+  }, 30_000);
 
   it("existing rooms do NOT count against the anti-enum bucket", async () => {
     const ip = `10.77.${(counter * 23) & 0xff}.1`;
@@ -548,9 +569,14 @@ describe("rate limit — anti-enumeration (GET /devices probes)", () => {
     });
     expect(createRes.status).toBe(201);
 
-    // Hit GET /devices on the *existing* room 50 times — none should count
-    // toward the anti-enum bucket.
-    for (let i = 0; i < 50; i++) {
+    // Hit GET /devices on the *existing* room a few times — none should count
+    // toward the anti-enum bucket. Five is deliberate: the property under test
+    // is that a KNOWN room never calls recordUnknownRoom, which is a per-request
+    // branch, so it either holds on the first hit or not at all. The repeat only
+    // guards against an accumulator, and five catches that as surely as fifty
+    // did while dropping 45 sequential round-trips (plus 45 admission-header
+    // signings) that cost ~11s of this case's ~19s runtime under suite load.
+    for (let i = 0; i < 5; i++) {
       const adm = await admissionHeaderFor({
         method: "GET",
         url: `${URL_BASE}/v2/rooms/${roomId}/devices`,
@@ -563,7 +589,7 @@ describe("rate limit — anti-enumeration (GET /devices probes)", () => {
       expect(res.status).toBe(200);
     }
 
-    // After 50 hits to a known room, we should still have a full 30-id
+    // After those hits to a known room, we should still have a full 30-id
     // anti-enum budget. Probe 30 distinct unknown rooms — all should 404
     // (NOT 429).
     for (let i = 0; i < 30; i++) {
@@ -599,7 +625,7 @@ describe("rate limit — anti-enumeration (GET /devices probes)", () => {
       { method: "GET", headers: { "CF-Connecting-IP": ipB } },
     );
     expect(freshB.status).toBe(404);
-  });
+  }, 30_000);
 });
 
 // --- response shape ------------------------------------------------------

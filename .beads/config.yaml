@@ -40,3 +40,5 @@
 # - linear.api-key
 # - github.org
 # - github.repo
+
+sync.remote: "git+ssh://git@github.com/lightsofapollo/attn.git"

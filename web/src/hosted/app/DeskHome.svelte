@@ -398,8 +398,8 @@
             </a>
           {/if}
           <span class="detail">
-            {workspace.markdownCount + workspace.assetCount}
-            {workspace.markdownCount + workspace.assetCount === 1 ? 'file' : 'files'}
+            {workspace.markdownCount + workspace.htmlCount + workspace.assetCount}
+            {workspace.markdownCount + workspace.htmlCount + workspace.assetCount === 1 ? 'file' : 'files'}
           </span>
           <span class="detail">{workspace.lastEditedLabel}</span>
           <!-- sizeLabel is computed in toSummary and was never rendered

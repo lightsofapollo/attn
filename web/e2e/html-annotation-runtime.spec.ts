@@ -528,4 +528,40 @@ test.describe('HtmlAnnotationBridge (shell side)', () => {
     const results = (await resolutions.jsonValue()) as { anchorId: string; status: string }[];
     expect(results[0]).toMatchObject({ anchorId: 'early', status: 'exact' });
   });
+
+  test('replays the full anchor state after an in-place frame reload', async ({ page }) => {
+    await bootBridge(page);
+    await page.evaluate(() => {
+      (window as unknown as { __render: (a: unknown[]) => void }).__render([
+        {
+          anchorId: 'reload-pin',
+          html: {
+            v: 1,
+            target: 'element',
+            cssSelector: '#title',
+            context: { tagName: 'h1', scopePreview: 'Quarterly report' },
+          },
+          state: 'default',
+        },
+      ]);
+    });
+    await page.waitForFunction(() =>
+      (window as unknown as { __resolutions: { anchorId: string }[] }).__resolutions
+        .some((result) => result.anchorId === 'reload-pin'),
+    );
+
+    await page.evaluate(() => {
+      const target = window as unknown as { __resolutions: unknown[] };
+      target.__resolutions = [];
+      const frame = document.getElementById('doc') as HTMLIFrameElement;
+      frame.srcdoc = frame.srcdoc;
+    });
+
+    await page.waitForFunction(() =>
+      (window as unknown as { __resolutions: { anchorId: string }[] }).__resolutions
+        .some((result) => result.anchorId === 'reload-pin'),
+      undefined,
+      { timeout: 15_000 },
+    );
+  });
 });

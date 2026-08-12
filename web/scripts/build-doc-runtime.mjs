@@ -23,6 +23,10 @@ const here = dirname(fileURLToPath(import.meta.url));
 const webRoot = resolve(here, '..');
 const entry = resolve(webRoot, 'src/doc-runtime/index.ts');
 const outFile = resolve(webRoot, 'src/lib/review/doc-runtime.generated.ts');
+// Native path-mode documents need the same exact runtime as srcdoc documents.
+// Keep a raw, script-safe artifact alongside the TypeScript string so Rust can
+// splice it at the attn:// response boundary without having to parse TS.
+const nativeOutFile = resolve(webRoot, 'src/doc-runtime/runtime.generated.js');
 
 const checkOnly = process.argv.includes('--check');
 
@@ -79,6 +83,7 @@ const contents = `${banner}\nexport const DOC_RUNTIME_SOURCE = ${JSON.stringify(
 
 if (checkOnly) {
   let current = '';
+  let nativeCurrent = '';
   try {
     current = readFileSync(outFile, 'utf8');
   } catch {
@@ -91,8 +96,21 @@ if (checkOnly) {
     );
     process.exit(1);
   }
+  try {
+    nativeCurrent = readFileSync(nativeOutFile, 'utf8');
+  } catch {
+    console.error('build-doc-runtime: native runtime artifact missing; run `npm run build:doc-runtime`');
+    process.exit(1);
+  }
+  if (nativeCurrent !== scriptSafe) {
+    console.error(
+      'build-doc-runtime: native runtime artifact is stale; run `npm run build:doc-runtime` and commit the result',
+    );
+    process.exit(1);
+  }
   console.log(`doc-runtime artifact is current (${output.text.length} bytes)`);
 } else {
   writeFileSync(outFile, contents);
-  console.log(`doc-runtime bundled: ${output.text.length} bytes → ${outFile}`);
+  writeFileSync(nativeOutFile, scriptSafe);
+  console.log(`doc-runtime bundled: ${output.text.length} bytes → ${outFile}, ${nativeOutFile}`);
 }

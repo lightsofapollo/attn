@@ -16,6 +16,7 @@ export type ShareScopeChoice = 'file' | 'entries' | 'workspace';
 export interface ShareManifestSummary {
   entryCount: number;
   markdownCount: number;
+  htmlCount: number;
   previewableAssetCount: number;
   downloadOnlyAssetCount: number;
   totalBytes: number;
@@ -88,6 +89,7 @@ export function summarizeEntries(entries: readonly WorkspaceEntry[]): ShareManif
   const summary: ShareManifestSummary = {
     entryCount: entries.length,
     markdownCount: 0,
+    htmlCount: 0,
     previewableAssetCount: 0,
     downloadOnlyAssetCount: 0,
     totalBytes: 0,
@@ -95,6 +97,7 @@ export function summarizeEntries(entries: readonly WorkspaceEntry[]): ShareManif
   for (const entry of entries) {
     summary.totalBytes += entry.sizeBytes;
     if (entry.kind === 'markdown') summary.markdownCount += 1;
+    else if (entry.kind === 'html') summary.htmlCount += 1;
     else if (entry.presentation === 'preview') summary.previewableAssetCount += 1;
     else summary.downloadOnlyAssetCount += 1;
   }

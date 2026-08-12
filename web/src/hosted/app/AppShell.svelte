@@ -81,7 +81,7 @@
     const existing = reuseEmpty ? await service.listWorkspaces() : [];
     for (const candidate of existing) {
       if (candidate.name !== 'Untitled') continue;
-      if (candidate.assetCount > 0 || candidate.markdownCount > 1) continue;
+      if (candidate.assetCount > 0 || candidate.htmlCount > 0 || candidate.markdownCount > 1) continue;
       const candidateDetail = await service.getWorkspace(candidate.id);
       if (!candidateDetail) continue;
       const body = await service.readBodyText(candidate.id, candidateDetail.openPath);

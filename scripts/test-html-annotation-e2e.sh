@@ -156,6 +156,34 @@ else
     cleanup; echo; echo "RESULT: $FAILURES failure(s)"; exit 1
 fi
 
+# The owner stays on their local path-mode document after sharing. Its source
+# must ask the native protocol handler for the runtime rather than switching to
+# srcdoc (which would discard the local base URL and break ./assets). The Rust
+# injection helper has direct unit coverage; this is the shell-observable E2E
+# half that guards the owner wiring.
+OWNER_MODE="$(attn_owner --eval \
+    "document.querySelector('[data-slot=\"html-viewer\"]')?.getAttribute('data-annotation-mode') ?? ''" \
+    2>/dev/null | jq -r . 2>/dev/null || echo 'err')"
+OWNER_SRC="$(attn_owner --eval \
+    "document.querySelector('[data-slot=\"html-viewer\"] iframe')?.getAttribute('src') ?? ''" \
+    2>/dev/null | jq -r . 2>/dev/null || echo 'err')"
+case "$OWNER_MODE:$OWNER_SRC" in
+    path:*attn-annotate=1*) pass "owner path-mode frame requests the annotation runtime" ;;
+    *) fail "owner did not retain an annotatable local HTML path (mode='$OWNER_MODE', src='$OWNER_SRC')" ;;
+esac
+OWNER_SANDBOX="$(attn_owner --eval \
+    "document.querySelector('[data-slot=\"html-viewer\"] iframe')?.getAttribute('sandbox') ?? ''" \
+    2>/dev/null | jq -r . 2>/dev/null || echo 'err')"
+case "$OWNER_SANDBOX" in
+    *allow-same-origin*) fail "owner frame escaped its opaque origin (sandbox='$OWNER_SANDBOX')" ;;
+    *allow-scripts*) pass "owner annotating frame retains opaque-origin scripts" ;;
+    *) fail "owner frame has unexpected sandbox ('$OWNER_SANDBOX')" ;;
+esac
+
+__attn_dual_wait_one "$ATTN_DUAL_OWNER" '[data-slot="review-margin"]' 15000 \
+    && pass "owner has a comment rail after sharing" \
+    || fail "owner never mounted the comment rail"
+
 log "Reviewer joining"
 attn_reviewer review join "$INVITE" >/dev/null 2>&1 \
     || fail "reviewer 'review join' command failed"

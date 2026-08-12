@@ -15,10 +15,10 @@ import { BROWSER_OWNER_OFFLINE_STATUS } from '../../lib/review/browser-review-co
 
 /** How an entry may be presented. Safe raster types render inline; unknown or
  * active types are download-only. */
-export type EntryPresentation = 'editable' | 'preview' | 'download-only';
+export type EntryPresentation = 'editable' | 'html' | 'preview' | 'download-only';
 
 /** Entry kinds mirror the storage schema without importing it. */
-export type WorkspaceEntryKind = 'markdown' | 'asset';
+export type WorkspaceEntryKind = 'markdown' | 'html' | 'asset';
 
 export interface WorkspaceEntry {
   /** Normalized relative path within the workspace, e.g. `docs/notes.md`. */
@@ -64,6 +64,7 @@ export interface WorkspaceSummary {
   id: string;
   name: string;
   markdownCount: number;
+  htmlCount: number;
   assetCount: number;
   lastEditedLabel: string;
   sharing: SharingState;
@@ -108,6 +109,7 @@ export interface StorageHealth {
 export interface ShareScope {
   kind: 'workspace' | 'current-file' | 'selected';
   markdownCount: number;
+  htmlCount: number;
   assetCount: number;
   label: string;
 }

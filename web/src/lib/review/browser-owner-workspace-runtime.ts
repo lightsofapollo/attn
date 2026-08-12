@@ -44,6 +44,7 @@ import {
 } from './browser-snapshot-publisher';
 import type { BrowserStorage } from './browser-storage';
 import { BrowserStorageError, StorageConflictError } from './browser-storage-errors';
+import type { WorkspaceEntryRecord } from './browser-workspace-schema';
 import type { InviteCapability, ShareRecordView } from './browser-workspace-share';
 import type { CommittedRevision, CommitRevisionInput } from './browser-workspace-store';
 import type { LeaseHandle, WorkspaceLeaseManagerOptions } from './browser-workspace-lease';
@@ -58,6 +59,12 @@ import {
   type BrowserWorkspaceShareView,
   type BrowserWorkspaceSharingDependencies,
 } from './browser-workspace-sharing';
+
+const HTML_MEDIA = /^text\/html(?:;\s*charset=[^;]+)?$/iu;
+
+function entryIsHtml(entry: WorkspaceEntryRecord): boolean {
+  return entry.kind === 'html' || (entry.kind === 'asset' && HTML_MEDIA.test(entry.mediaType ?? ''));
+}
 
 export type BrowserOwnerWorkspaceRuntimeStatus =
   | 'starting'
@@ -272,7 +279,7 @@ export class BrowserOwnerWorkspaceRuntime {
     path: string,
   ): Promise<{ fileId: string; epoch: string; markdown: string } | null> {
     const binding = this.getBinding(path);
-    if (!binding) return null;
+    if (!binding || binding.docType === 'html') return null;
     const bytes = await this.options.storage.workspaces.getRevisionBody(
       this.options.workspaceId,
       binding.path,
@@ -1021,19 +1028,20 @@ export class BrowserOwnerWorkspaceRuntime {
         } finally {
           bytes.fill(0);
         }
-        if (entry.kind === 'markdown') {
+        if (entry.kind === 'markdown' || entryIsHtml(entry)) {
           bindings.push({
             fileId: published.fileId,
             path: published.path,
             revisionId: published.revisionId,
             contentHash: published.contentHash,
             epoch: published.snapshotId,
+            docType: entryIsHtml(entry) ? 'html' : 'markdown',
           });
         }
         if (entry.headRevisionId !== published.revisionId) localHeadsMoved = true;
       }
       if (bindings.length === 0) {
-        throw new StorageConflictError('published share has no Markdown authority binding');
+        throw new StorageConflictError('published share has no document authority binding');
       }
       return {
         share,
@@ -1182,7 +1190,15 @@ export class BrowserOwnerWorkspaceRuntime {
           entry.path,
           entry.headRevisionId,
         );
-        if (entry.kind === 'asset') {
+        if (entryIsHtml(entry)) {
+          entries.push({
+            path: entry.path,
+            docType: 'html',
+            bytes,
+            fileId: published.fileId,
+            revisionId: entry.headRevisionId,
+          });
+        } else if (entry.kind === 'asset') {
           if (!entry.mediaType) {
             bytes.fill(0);
             throw new BrowserStorageError('shared asset is missing its media type');
@@ -1474,7 +1490,7 @@ export class BrowserOwnerWorkspaceRuntime {
 
   private requireBinding(pathOrFileId: string): BrowserOwnerAuthorityFile {
     const binding = this.getBinding(pathOrFileId);
-    if (!binding) throw new StorageConflictError('path is not part of the active Markdown share');
+    if (!binding) throw new StorageConflictError('path is not part of the active document share');
     return binding;
   }
 

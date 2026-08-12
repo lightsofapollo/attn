@@ -40,6 +40,16 @@
   import { scrollViewToPos } from '../../lib/scroll-viewport';
   import { peerJumpPosition } from '../../lib/peer-strip-format';
   import { attachCollabPresenceSinks } from '../../lib/prosemirror/collab-presence-sinks';
+  import HtmlViewer from '../../lib/HtmlViewer.svelte';
+  import HtmlCommentComposer from '../../lib/HtmlCommentComposer.svelte';
+  import type {
+    AnnotationBridgeEvents,
+    HtmlAnnotationBridge,
+  } from '../../lib/review/html-annotation-bridge';
+  import type {
+    AnchorProposal,
+    RenderableAnchor,
+  } from '../../lib/review/doc-protocol';
 
   interface Props {
     service: WorkspaceAppService;
@@ -838,6 +848,116 @@
   let ownerToolbarSelection = $state<{ from: number; to: number } | null>(null);
   let ownerCommentComposer = $state<OwnerComposerState | null>(null);
 
+  // HTML uses the same review store and margin as Markdown, but its selection
+  // and geometry live inside an opaque-origin document frame. The frame may
+  // only propose anchors; this shell remains the sole comment author.
+  let htmlBridge = $state<HtmlAnnotationBridge | null>(null);
+  let htmlAnchorTops = $state<Record<string, number>>({});
+  let htmlComposer = $state<{
+    proposal: AnchorProposal;
+    position: { top: number; left: number };
+    fileId: string;
+    snapshotId: string;
+    baseHash: string;
+  } | null>(null);
+  const ownerHtmlSnapshot = $derived.by(() => {
+    const store = reviewStoreRef;
+    const path = activeEntry?.path;
+    if (!store || !path || activeEntry?.presentation !== 'html') return null;
+    const candidates = store.snapshots.filter(
+      (snapshot) => snapshot.docType === 'html' && snapshot.ownerDisplayPath === path,
+    );
+    if (candidates.length === 0) return null;
+    return candidates.reduce((latest, snapshot) =>
+      snapshot.createdAt > latest.createdAt ? snapshot : latest,
+    );
+  });
+  const htmlAnnotatable = $derived(
+    durableReviewAvailable && ownerHtmlSnapshot?.annotation === 'html_selectors_v1',
+  );
+  const htmlRenderableAnchors = $derived.by(() => {
+    const store = reviewStoreRef;
+    if (!store || activeEntry?.presentation !== 'html') return [] as RenderableAnchor[];
+    return store.threadsForCurrentFile.flatMap((thread) => {
+      if (!thread.anchor?.html) return [];
+      return [{
+        anchorId: thread.id,
+        html: thread.anchor.html,
+        state: (thread.resolved ? 'resolved' : 'default') as RenderableAnchor['state'],
+        quote: thread.anchor.quote?.exact,
+        prefix: thread.anchor.context?.prefix,
+        suffix: thread.anchor.context?.suffix,
+        label: String(1 + thread.replies.length),
+      }];
+    });
+  });
+
+  $effect(() => {
+    const store = reviewStoreRef;
+    const snapshot = ownerHtmlSnapshot;
+    if (!store || !snapshot) return;
+    // HTML has a signed authority binding for publication and durable review,
+    // but no live co-typing seed. It still needs to become the focused review
+    // file for its rail cards and comment events to scope correctly.
+    if (store.currentFileId !== snapshot.fileId) store.setCurrentFile(snapshot.fileId);
+  });
+
+  $effect(() => {
+    const bridge = htmlBridge;
+    if (bridge) bridge.renderAnchors(htmlRenderableAnchors);
+  });
+
+  $effect(() => {
+    const snapshotId = ownerHtmlSnapshot?.snapshotId;
+    if (htmlComposer && htmlComposer.snapshotId !== snapshotId) {
+      htmlComposer = null;
+      htmlBridge?.dismissSelection();
+    }
+  });
+
+  const htmlAnnotationEvents: AnnotationBridgeEvents = {
+    onProposal: (proposal, rects, caret) => {
+      const snapshot = ownerHtmlSnapshot;
+      if (!htmlAnnotatable || !snapshot) return;
+      const near = caret ?? rects.at(-1);
+      htmlComposer = {
+        proposal,
+        position: { top: (near?.y ?? 0) + (near?.height ?? 0) + 8, left: near?.x ?? 0 },
+        fileId: snapshot.fileId,
+        snapshotId: snapshot.snapshotId,
+        baseHash: snapshot.baseHash,
+      };
+      if (reviewStoreRef) reviewStoreRef.panelOpen = true;
+    },
+    onProposalCleared: () => undefined,
+    onResolved: (results, toShellRects) => {
+      const next: Record<string, number> = {};
+      for (const result of results) {
+        const first = toShellRects(result.rects)[0];
+        if (first) next[result.anchorId] = first.y;
+      }
+      htmlAnchorTops = next;
+    },
+    onGeometry: (results) => {
+      const next: Record<string, number> = {};
+      for (const result of results) {
+        const first = result.rects[0];
+        if (first) next[result.anchorId] = first.y;
+      }
+      htmlAnchorTops = next;
+    },
+    onAnchorActivated: (anchorId) => {
+      const thread = reviewStoreRef?.threadsForCurrentFile.find((item) => item.id === anchorId);
+      if (thread) reviewStoreRef?.setFocusEventId(thread.rootEvent.meta.eventId);
+    },
+  };
+
+  async function createHtmlComment(anchor: ReviewAnchor, body: string): Promise<void> {
+    const granted = session;
+    if (!granted) throw new Error('The editing session is unavailable.');
+    await granted.createComment(anchor, body);
+  }
+
   function ownerComposeSnapshot() {
     const store = reviewStoreRef;
     const roomId = store?.currentRoomId ?? null;
@@ -1258,6 +1378,11 @@
       unsubscribe?.();
       projection?.close();
     };
+  });
+
+  $effect(() => {
+    if (activeEntry?.presentation !== 'html' || !reviewRoomActive) return;
+    untrack(() => { void ensureEditorGraph(true); });
   });
 
   // Dev-only drift guard (attn-73xq): every hosted tab broadcasts a
@@ -2159,9 +2284,11 @@
   }
 
   // Files-sheet grouping (attn-7xl / iOS parity): a monospace badge, the file
-  // basename, a capability subtitle, and the size — grouped Markdown vs Assets.
+  // basename, a capability subtitle, and the size — grouped Markdown, HTML,
+  // and Assets so a read-only document never disappears from mobile nav.
   function entryBadge(entry: WorkspaceEntry): string {
     if (entry.kind === 'markdown') return 'MD';
+    if (entry.kind === 'html') return 'HTML';
     return entry.presentation === 'preview' ? 'IMG' : 'BIN';
   }
   function entryBasename(entry: WorkspaceEntry): string {
@@ -2171,9 +2298,10 @@
     if (entry.presentation === 'preview') return 'Preview inline';
     if (entry.presentation === 'download-only') return 'Download only';
     const slash = entry.path.lastIndexOf('/');
-    return slash > 0 ? entry.path.slice(0, slash) : 'Markdown';
+    return slash > 0 ? entry.path.slice(0, slash) : entry.kind === 'html' ? 'HTML document' : 'Markdown';
   }
   const markdownEntries = $derived(workspace.entries.filter((e) => e.kind === 'markdown'));
+  const htmlEntries = $derived(workspace.entries.filter((e) => e.kind === 'html'));
   const assetEntries = $derived(workspace.entries.filter((e) => e.kind === 'asset'));
 
   function openShare(trigger: HTMLButtonElement | undefined): void {
@@ -2564,6 +2692,21 @@
   />
 {/if}
 
+{#if htmlComposer}
+  <HtmlCommentComposer
+    proposal={htmlComposer.proposal}
+    position={htmlComposer.position}
+    fileId={htmlComposer.fileId}
+    snapshotId={htmlComposer.snapshotId}
+    baseHash={htmlComposer.baseHash}
+    onCreateComment={createHtmlComment}
+    onClose={() => {
+      htmlComposer = null;
+      htmlBridge?.dismissSelection();
+    }}
+  />
+{/if}
+
 {#if arrivalToasts.length > 0}
   <div class="arrival-toasts" aria-live="polite">
     {#each arrivalToasts as toast (toast.id)}
@@ -2666,6 +2809,16 @@
       </div>
     {:else if desktopLayout && activeEntry?.presentation === 'editable'}
       <div class="hosted-editor-loading" role="status">Opening editor…</div>
+    {:else if activeEntry?.presentation === 'html'}
+      <div class="hosted-html-surface" data-slot="hosted-html-document">
+        <HtmlViewer
+          content={bodyText ?? displayText ?? ''}
+          allowScripts={false}
+          annotate={htmlAnnotatable}
+          annotationEvents={htmlAnnotationEvents}
+          onBridge={(bridge) => (htmlBridge = bridge)}
+        />
+      </div>
     {:else if isNewDraft && (displayText === null || displayText.length === 0)}
       <div class="eyebrow">New workspace</div>
       <h1>Untitled</h1>
@@ -2842,7 +2995,8 @@
       </div>
     {/if}
     <ReviewMarginComponent
-      view={pmViewForReview}
+      view={activeEntry?.presentation === 'html' ? undefined : pmViewForReview}
+      anchorTops={activeEntry?.presentation === 'html' ? htmlAnchorTops : undefined}
       readOnly={reviewFollowerTab ? false : !ownerState?.liveEditingAvailable}
       reviewerAuthoring={durableReviewAvailable || reviewFollowerTab}
       suggestionActions={ownerState?.liveEditingAvailable
@@ -3139,10 +3293,14 @@
 {#if filesSheetOpen}
   <BottomSheet
     title="Files"
-    subtitle={`${markdownEntries.length} Markdown · ${assetEntries.length} ${assetEntries.length === 1 ? 'asset' : 'assets'}`}
+    subtitle={`${markdownEntries.length} Markdown · ${htmlEntries.length} HTML · ${assetEntries.length} ${assetEntries.length === 1 ? 'asset' : 'assets'}`}
     onclose={closeFilesSheet}
   >
-    {#each [{ label: 'Markdown', items: markdownEntries }, { label: 'Assets', items: assetEntries }] as group (group.label)}
+    {#each [
+      { label: 'Markdown', items: markdownEntries },
+      { label: 'HTML', items: htmlEntries },
+      { label: 'Assets', items: assetEntries },
+    ] as group (group.label)}
       {#if group.items.length > 0}
         <div class="file-group">
           <div class="file-group-label">{group.label}</div>
@@ -3201,7 +3359,8 @@
     {#if reviewRoomActive && ReviewMarginComponent}
       <div class="review-sheet-margin">
         <ReviewMarginComponent
-          view={pmViewForReview}
+          view={activeEntry?.presentation === 'html' ? undefined : pmViewForReview}
+          anchorTops={activeEntry?.presentation === 'html' ? htmlAnchorTops : undefined}
           layout="stacked"
           readOnly={reviewFollowerTab ? false : !ownerState?.liveEditingAvailable}
           reviewerAuthoring={durableReviewAvailable || reviewFollowerTab}

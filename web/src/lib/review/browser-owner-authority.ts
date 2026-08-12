@@ -53,6 +53,8 @@ export interface BrowserOwnerAuthorityFile {
   revisionId: string;
   contentHash: string;
   epoch: string;
+  /** HTML is a review-only document: it has durable anchors but no PM collab. */
+  docType?: 'markdown' | 'html';
 }
 
 export interface BrowserOwnerAuthorityStorage {
@@ -246,6 +248,7 @@ export class BrowserOwnerAuthorityService {
   private readonly seeds = new Map<FileId, CollabAuthoritySeed>();
   private readonly bindings = new Map<FileId, BrowserOwnerAuthorityFile>();
   private readonly authorityFileIds: readonly FileId[];
+  private readonly docTypeByFileId = new Map<FileId, 'markdown' | 'html'>();
   private readonly inFlightAuthorityOperations = new Set<AuthorityOperation>();
   private transitionCollabBarrier: TransitionCollabBarrier | null = null;
   private lease: LeaseHandle | null = null;
@@ -280,6 +283,7 @@ export class BrowserOwnerAuthorityService {
         throw new Error('authority files must have complete unique published bindings');
       }
       fileIds.add(file.fileId);
+      this.docTypeByFileId.set(file.fileId, file.docType ?? 'markdown');
     }
     this.authorityFileIds = options.files.map((file) => file.fileId);
     this.options = options;
@@ -675,7 +679,7 @@ export class BrowserOwnerAuthorityService {
         throw new StorageConflictError('authority lease expired while loading binding set');
       }
       bindings.set(file.fileId, { ...file });
-      seeds.set(file.fileId, seed);
+      if (seed) seeds.set(file.fileId, seed);
     }
     if (bindings.size !== this.authorityFileIds.length) {
       throw new Error('promoted manifest does not cover the complete authority file set');
@@ -686,7 +690,7 @@ export class BrowserOwnerAuthorityService {
   private async loadVerifiedBinding(
     file: BrowserOwnerAuthorityFile,
     manifest: PublishedManifestPointer,
-  ): Promise<CollabAuthoritySeed> {
+  ): Promise<CollabAuthoritySeed | null> {
     const promoted = manifest.entries.find((entry) => entry.fileId === file.fileId && entry.path === file.path);
     if (
       !promoted ||
@@ -705,11 +709,14 @@ export class BrowserOwnerAuthorityService {
       bytes.fill(0);
       throw new StorageConflictError('authority lease expired while loading revision');
     }
-    let doc: PmNode;
+    let doc: PmNode | null = null;
     try {
       if (contentHash(bytes) !== file.contentHash) {
         throw new Error('authority revision bytes do not match the published content hash');
       }
+      // HTML participates in the same fenced publication and durable review
+      // session, but it deliberately has no ProseMirror collaboration seed.
+      if (file.docType === 'html') return null;
       const markdown = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
       // Imported at the call site so the desk route does not pull the parser
       // (attn-n01r.41); this method is already async.
@@ -718,6 +725,7 @@ export class BrowserOwnerAuthorityService {
     } finally {
       bytes.fill(0);
     }
+    if (!doc) throw new Error('Markdown authority binding did not produce a document');
     const stored = await this.options.storage.getCollabCheckpoint(
       this.options.workspaceId,
       this.options.roomId,
@@ -759,6 +767,7 @@ export class BrowserOwnerAuthorityService {
         revisionId: promoted.revisionId,
         contentHash: promoted.contentHash,
         epoch: promoted.snapshotId,
+        docType: this.docTypeByFileId.get(fileId) ?? 'markdown',
       };
     });
   }

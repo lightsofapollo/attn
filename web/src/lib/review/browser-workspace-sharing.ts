@@ -74,13 +74,19 @@ import {
   type ShareRecordView,
 } from './browser-workspace-share';
 import { compareManifestPathsUtf8 } from './browser-workspace-manifest';
-import { normalizeEntryPath, type ShareScopeKind } from './browser-workspace-schema';
+import { normalizeEntryPath, type ShareScopeKind, type WorkspaceEntryRecord } from './browser-workspace-schema';
 import type { LeaseHandle } from './browser-workspace-lease';
 import type { MailboxEnvelope } from './browser-ws';
 
 export const BROWSER_SHARE_TTL_ONE_HOUR = 60 * 60 * 1000;
 export const BROWSER_SHARE_TTL_ONE_DAY = 24 * BROWSER_SHARE_TTL_ONE_HOUR;
 export const BROWSER_SHARE_TTL_SEVEN_DAYS = 7 * BROWSER_SHARE_TTL_ONE_DAY;
+const HTML_MEDIA = /^text\/html(?:;\s*charset=[^;]+)?$/iu;
+
+/** Read-time compatibility for HTML imported before it had its own kind. */
+function entryIsHtml(entry: WorkspaceEntryRecord): boolean {
+  return entry.kind === 'html' || (entry.kind === 'asset' && HTML_MEDIA.test(entry.mediaType ?? ''));
+}
 
 export type BrowserWorkspaceShareMode = RoomPolicy['mode'];
 export type BrowserWorkspaceShareTtlMs =
@@ -775,8 +781,11 @@ export class BrowserWorkspaceSharingCoordinator {
     if (paths.length === 0) throw new BrowserStorageError('share scope cannot be empty');
     if (new Set(paths).size !== paths.length) throw new BrowserStorageError('share scope contains duplicate paths');
     for (const path of paths) if (!live.has(path)) throw new StorageConflictError('share scope contains a stale path');
-    if (!paths.some((path) => live.get(path)?.kind === 'markdown')) {
-      throw new BrowserStorageError('share scope must contain at least one Markdown file');
+    if (!paths.some((path) => {
+      const entry = live.get(path);
+      return entry?.kind === 'markdown' || (entry !== undefined && entryIsHtml(entry));
+    })) {
+      throw new BrowserStorageError('share scope must contain at least one Markdown or HTML document');
     }
     return [...paths].sort(compareManifestPathsUtf8);
   }
@@ -790,7 +799,9 @@ export class BrowserWorkspaceSharingCoordinator {
         const bytes = await this.storage.workspaces.getRevisionBody(this.workspaceId, path, entry.headRevisionId);
         sources.push(entry.kind === 'markdown'
           ? { path, docType: 'markdown', bytes, revisionId: entry.headRevisionId }
-          : { path, docType: 'asset', mediaType: entry.mediaType ?? 'application/octet-stream', bytes, revisionId: entry.headRevisionId });
+          : entryIsHtml(entry)
+            ? { path, docType: 'html', bytes, revisionId: entry.headRevisionId }
+            : { path, docType: 'asset', mediaType: entry.mediaType ?? 'application/octet-stream', bytes, revisionId: entry.headRevisionId });
       }
       return sources;
     } catch (error) {

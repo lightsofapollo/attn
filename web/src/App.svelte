@@ -494,7 +494,22 @@
 
   const htmlAnnotationEvents: AnnotationBridgeEvents = {
     onProposal: (proposal, rects, caret) => {
-      if (!htmlAnnotatable) return;
+      if (!htmlAnnotatable) {
+        // The runtime reports a proposal once on selection and once when the
+        // person activates its Comment pill. Only the latter has a caret, so
+        // we can explain an unshared/pending owner document without spraying a
+        // toast for every ordinary text selection.
+        if (caret && commentAvailability.status !== 'ready') {
+          toast.info(
+            commentAvailability.status === 'absent'
+              ? 'Share this HTML file to start a review before commenting.'
+              : commentAvailability.status === 'pending'
+                ? commentAvailability.reason
+                : commentAvailability.reason,
+          );
+        }
+        return;
+      }
       const snapshot = reviewSnapshot;
       if (!snapshot) return;
       const near = caret ?? rects[rects.length - 1];
@@ -1545,7 +1560,10 @@
       roomHasSnapshot:
         roomId !== null && reviewStore.snapshots.some((s) => s.roomId === roomId),
       fileHasSnapshot: snapshot !== null,
+      // Markdown anchors use the canonical index; HTML anchors are resolved
+      // inside the document frame and advertise that capability instead.
       fileSnapshotHasAnchors: Boolean(snapshot?.anchorIndex),
+      fileSnapshotHasHtmlSelectors: snapshot?.annotation === 'html_selectors_v1',
       grantTier: reviewStore.localGrantTier,
     };
   });
@@ -3521,7 +3539,16 @@
     {:else if activeFileType === 'video' || activeFileType === 'audio'}
       <MediaPlayer src={markdownSourceUrl(activePath)} fileType={activeFileType} />
     {:else if activeFileType === 'html'}
-      <HtmlViewer path={activePath} mtime={htmlMtimeByPath.get(activePath)} />
+      <!-- Owner path mode is runtime-augmented by the attn:// handler. It
+           preserves the file base URL, so sibling CSS/images continue working
+           while the shell can honestly explain that the file needs sharing. -->
+      <HtmlViewer
+        path={activePath}
+        mtime={htmlMtimeByPath.get(activePath)}
+        annotate={true}
+        annotationEvents={htmlAnnotationEvents}
+        onBridge={(bridge) => (htmlBridge = bridge)}
+      />
     {:else if activeFileType === 'directory'}
       <DirectoryOverview
         path={activePath}
@@ -4029,4 +4056,3 @@
 <!-- closeButton: every toast (update nudge, file-changed, etc.) gets a
      dismiss ✕ instead of forcing the user to wait out the timeout. -->
 <Toaster closeButton />
-

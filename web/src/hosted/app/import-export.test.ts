@@ -79,6 +79,8 @@ function picked(name: string, bytes: Uint8Array, relativePath?: string, type = '
 defineCase('kind and name mapping', () => {
   assertEqual(kindForFile('notes.md'), 'markdown', 'md');
   assertEqual(kindForFile('README.markdown'), 'markdown', 'markdown ext');
+  assertEqual(kindForFile('report.html'), 'html', 'html document');
+  assertEqual(kindForFile('report.HTM'), 'html', 'htm document');
   assertEqual(kindForFile('image.png'), 'asset', 'png');
   assertEqual(importName([picked('direction.md', new Uint8Array(1))]), 'direction', 'single md name');
   assertEqual(

@@ -413,11 +413,11 @@ export class BrowserWorkspaceService {
           body: file.bytes,
         });
       }
-      // Open on the first Markdown entry: an import that happens to lead
-      // with an asset should still land the reader in prose.
-      const firstMarkdown = files.find((file) => file.kind === 'markdown');
-      if (firstMarkdown && firstMarkdown.path !== first!.path) {
-        await this.storage.workspaces.selectEntry({ workspaceId, path: firstMarkdown.path });
+      // Open on the first document: imports that lead with a binary should
+      // land in readable content, whether that is Markdown or HTML.
+      const firstDocument = files.find((file) => file.kind === 'markdown' || file.kind === 'html');
+      if (firstDocument && firstDocument.path !== first!.path) {
+        await this.storage.workspaces.selectEntry({ workspaceId, path: firstDocument.path });
       }
       const loaded = await this.loadWorkspace(workspaceId);
       if (!loaded) throw new BrowserStorageError('imported workspace vanished');
@@ -518,6 +518,23 @@ export class BrowserWorkspaceService {
         path,
         kind: 'asset',
         ...(mediaType === undefined ? {} : { mediaType }),
+        body: bytes,
+        ...(fence === undefined ? {} : { fence }),
+      }),
+    );
+  }
+
+  async addHtml(
+    workspaceId: string,
+    path: string,
+    bytes: Uint8Array,
+    fence?: WorkspaceFence,
+  ): Promise<CommittedRevision> {
+    return run(() =>
+      this.storage.workspaces.createEntry({
+        workspaceId,
+        path,
+        kind: 'html',
         body: bytes,
         ...(fence === undefined ? {} : { fence }),
       }),
@@ -666,12 +683,20 @@ export function toSummary(
   sharing: WorkspaceSummary['sharing'] = 'local-only',
 ): WorkspaceSummary {
   const markdownCount = entries.filter((entry) => entry.kind === 'markdown').length;
+  // Read-time migration mirrors real-service.ts: old HTML uploads were sealed
+  // as assets, so counting their raw kind would make the desk/share sheet
+  // contradict the document view.
+  const htmlCount = entries.filter((entry) =>
+    entry.kind === 'html'
+      || (entry.kind === 'asset' && /^text\/html(?:;\s*charset=[^;]+)?$/iu.test(entry.mediaType ?? '')),
+  ).length;
   const totalBytes = entries.reduce((sum, entry) => sum + entry.sizeBytes, 0);
   return {
     id: workspace.workspaceId,
     name: workspace.name,
     markdownCount,
-    assetCount: entries.length - markdownCount,
+    htmlCount,
+    assetCount: entries.length - markdownCount - htmlCount,
     lastEditedLabel: relativeTimeLabel(workspace.updatedAt, now),
     sharing,
     sizeLabel: sizeLabel(totalBytes),

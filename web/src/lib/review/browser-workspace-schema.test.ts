@@ -251,6 +251,7 @@ defineCase('records: valid fixtures pass every validator', () => {
   validateWorkspaceEntryRecord(
     entryRecord({ path: 'images/desk.png', kind: 'asset', mediaType: 'image/png' }),
   );
+  validateWorkspaceEntryRecord(entryRecord({ path: 'report.html', kind: 'html' }));
   validateWorkspaceRevisionRecord(revisionRecord());
   validateWorkspaceRevisionRecord(
     revisionRecord({ body: { location: 'opfs', nonce: 'bm9uY2U', sealedBytes: 2_048_000 } }),

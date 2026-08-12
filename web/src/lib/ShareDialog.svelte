@@ -567,7 +567,7 @@
                 />
                 <span class="min-w-0 truncate font-mono text-xs text-foreground">{relativePath(file.path)}</span>
                 <span class="text-micro text-muted-foreground">
-                  {file.path === filePath ? 'Current · ' : ''}{file.fileType === 'html' ? 'Read-only' : 'Markdown'}
+                  {file.path === filePath ? 'Current · ' : ''}{file.fileType === 'html' ? 'HTML · comments available after sharing' : 'Markdown'}
                 </span>
               </label>
             {/each}

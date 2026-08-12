@@ -30,12 +30,7 @@
     mtime?: number;
     /** Native/local pages retain script support; hosted snapshots disable it. */
     allowScripts?: boolean;
-    /**
-     * Turn on commenting. Requires `content` — annotation injects a runtime
-     * into the document source, which is only possible when the shell holds
-     * the bytes. That is always true for a shared document, and annotation is
-     * only meaningful for one.
-     */
+    /** Turn on commenting for either a shared source or a local path. */
     annotate?: boolean;
     /** Wired up once the frame exists, so a parent can drive the rail. */
     annotationEvents?: AnnotationBridgeEvents;
@@ -82,9 +77,10 @@
   // "Open in browser" button) is shared app chrome rendered by App.svelte.
   // `content` (reviewer/srcdoc) wins when provided; otherwise load the local
   // file via the attn:// protocol (owner/path mode).
-  // Annotation implies content mode: the runtime has to be spliced into the
-  // document source, which the shell can only do to bytes it holds.
-  let annotating = $derived(annotate && content !== undefined);
+  // Source documents are spliced here. Local path documents request a runtime-
+  // augmented attn:// response instead, preserving their normal base URL so
+  // `./chart.png` and `style.css` keep resolving from disk.
+  let annotating = $derived(annotate);
   let isContentMode = $derived(content !== undefined);
   // The injected runtime needs `allow-scripts`, so annotating a snapshot turns
   // scripts on even where the hosted reviewer would otherwise disable them.
@@ -97,13 +93,14 @@
   let renderedContent = $derived(
     annotating && content !== undefined ? injectDocRuntime(content) : content,
   );
-  let src = $derived(
-    !isContentMode && path !== undefined
-      ? mtime !== undefined
-        ? `${markdownSourceUrl(path)}?v=${mtime}`
-        : markdownSourceUrl(path)
-      : undefined,
-  );
+  let src = $derived.by(() => {
+    if (isContentMode || path === undefined) return undefined;
+    const params = new URLSearchParams();
+    if (mtime !== undefined) params.set('v', String(mtime));
+    if (annotating) params.set('attn-annotate', '1');
+    const query = params.toString();
+    return `${markdownSourceUrl(path)}${query ? `?${query}` : ''}`;
+  });
   let fileName = $derived(
     path !== undefined ? path.split('/').pop() || path : 'shared document',
   );
@@ -116,9 +113,9 @@
     loading = true;
   });
 
-  // The bridge is torn down and rebuilt whenever the frame or the document
-  // changes: a reload destroys the frame's runtime, so the old port is dead and
-  // the handshake has to run again.
+  // Content changes rebuild the bridge. Path-mode reloads keep this bridge
+  // attached: the reloaded frame sends hello again, which replaces its dead
+  // port and replays the shell's retained anchor state.
   $effect(() => {
     const frame = frameEl;
     const shouldAnnotate = annotating;
@@ -146,7 +143,11 @@
   });
 </script>
 
-<div class="relative h-full w-full overflow-hidden" data-slot="html-viewer">
+<div
+  class="relative h-full w-full overflow-hidden"
+  data-slot="html-viewer"
+  data-annotation-mode={annotating ? (isContentMode ? 'content' : 'path') : 'off'}
+>
   {#if loading}
     <div
       class="pointer-events-none absolute inset-0 flex items-center justify-center text-sm text-muted-foreground"
@@ -181,7 +182,7 @@
       title={fileName}
       class="block h-full border-0 bg-white"
       style="width: calc(100% + {scrollbarWidth}px);"
-      sandbox="allow-scripts"
+      {sandbox}
       referrerpolicy="no-referrer"
       onload={() => (loading = false)}
     ></iframe>

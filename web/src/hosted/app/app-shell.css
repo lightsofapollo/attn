@@ -876,6 +876,19 @@
   display: contents;
 }
 
+/* HTML is a read-only document surface, not an asset card. Keep its frame in
+   the same generous reading canvas as the editor while the iframe owns its
+   own document scrolling and annotation geometry. */
+.hosted-html-surface {
+  min-height: 720px;
+  height: calc(100vh - 9rem);
+}
+
+.hosted-native-document > .hosted-html-surface {
+  height: 100%;
+  min-height: 0;
+}
+
 .hosted-document-banner {
   width: min(760px, calc(100% - 2rem));
   margin: 0.75rem auto 0;
@@ -1347,6 +1360,7 @@
      between the last line and the thumb dock): the editor surface chain
      stretches so the ProseMirror IS the whole visible writing canvas. */
   .writing-sheet > .hosted-editor-surface,
+  .writing-sheet > .hosted-html-surface,
   .writing-sheet .editor-container,
   .writing-sheet .prosemirror-mount {
     display: flex;

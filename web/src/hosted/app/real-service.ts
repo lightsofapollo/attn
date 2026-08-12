@@ -38,6 +38,16 @@ import type { LeaseHandle } from '../../lib/review/browser-workspace-lease';
 
 /** Safe raster types that may render inline (epic scope note 2026-07-10). */
 const INLINE_SAFE_MEDIA = /^image\/(?:png|jpeg|gif|webp|avif)$/iu;
+const HTML_MEDIA = /^text\/html(?:;\s*charset=[^;]+)?$/iu;
+
+/**
+ * Read-time migration for pre-z64t uploads. Their sealed bytes remain intact;
+ * only the local view interpretation changes, avoiding an expensive rewrite
+ * of every encrypted revision just to promote text/html from "asset".
+ */
+function isHtmlRecord(entry: WorkspaceEntryRecord): boolean {
+  return entry.kind === 'html' || (entry.kind === 'asset' && HTML_MEDIA.test(entry.mediaType ?? ''));
+}
 
 const TAB_HOLDER_STORAGE_KEY = 'attn:browser-tab-holder:v1';
 const TAB_IDENTITY_CHANNEL = 'attn:browser-tab-identity:v1';
@@ -258,6 +268,7 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
         id: workspaceId,
         name: loaded.workspace.name,
         markdownCount: 0,
+        htmlCount: 0,
         assetCount: 0,
         lastEditedLabel: 'Just now',
         sharing: 'local-only' as const,
@@ -274,7 +285,7 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
   async readBodyText(workspaceId: string, path: string): Promise<string | null> {
     const loaded = await this.service.loadWorkspace(workspaceId);
     const entry = loaded?.entries.find((candidate) => candidate.path === path);
-    if (!entry || entry.kind !== 'markdown') return null;
+    if (!entry || (entry.kind !== 'markdown' && !isHtmlRecord(entry))) return null;
     return this.service.readHeadText(workspaceId, path);
   }
 
@@ -531,6 +542,8 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
             new TextDecoder().decode(file.bytes),
             fence,
           );
+        } else if (file.kind === 'html') {
+          await this.service.addHtml(workspaceId, file.path, file.bytes, fence);
         } else {
           await this.service.addAsset(workspaceId, file.path, file.bytes, file.mediaType, fence);
         }
@@ -593,6 +606,7 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
     return {
       kind: 'workspace',
       markdownCount: workspace.markdownCount,
+      htmlCount: workspace.htmlCount,
       assetCount: workspace.assetCount,
       label: `Share the whole workspace · ${entryCount} ${entryCount === 1 ? 'entry' : 'entries'}`,
     };
@@ -600,12 +614,15 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
 }
 
 function toViewEntry(entry: WorkspaceEntryRecord): WorkspaceEntry {
+  const html = isHtmlRecord(entry);
   return {
     path: entry.path,
-    kind: entry.kind,
+    kind: html ? 'html' : entry.kind,
     presentation:
       entry.kind === 'markdown'
         ? 'editable'
+        : html
+          ? 'html'
         : entry.mediaType !== undefined && INLINE_SAFE_MEDIA.test(entry.mediaType)
           ? 'preview'
           : 'download-only',

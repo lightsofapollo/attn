@@ -159,6 +159,24 @@ content inside the viewer), which it could already do with static HTML and CSS.
 Scripts are enabled **only when annotating**. A shared HTML document being viewed
 read-only keeps today's script-free rendering.
 
+### Surface-by-surface posture (attn-z64t, 2026-08-12)
+
+The same opaque-origin sandbox and shell-owned comment boundary apply in all three
+places; the person must share first, exactly as Markdown does, before they can post a
+comment. Script policy intentionally differs by surface: native local-file HTML has
+always run on open, while hosted HTML enables scripts only when an annotatable share
+needs the injected runtime.
+
+| Surface | Decision | Reasoning / guard rail |
+|---|---|---|
+| Native owner opening their own file | **Allowed on open (existing behavior)** | This is the least expansive case: the person already chose to open the local file and native HTML rendering already runs its scripts. Sharing unlocks the durable comment flow, while the native `attn://` handler injects the runtime into that response without changing the URL, so relative CSS/images continue loading. The iframe still omits `allow-same-origin`; its effective origin is opaque and the handshake remains bound to `event.source`. |
+| Hosted author opening their own upload | **Allowed after sharing** | Uploading now executes code where the previous download card executed none, but only after the author explicitly creates a review share. The HTML runs as `srcdoc` in the same opaque-origin sandbox and cannot access app storage, session data, or privileged APIs. This explicit share action is the guard rail; no extra confirmation is required because it is the user-selected file and the feature would otherwise promise a comment surface that cannot function. |
+| Hosted reviewer opening somebody else's share | **Allowed after joining an annotatable share** | This is the sharpest case and retains the original attn-kio6 boundary: scripts execute only inside the opaque-origin frame; the shell validates all proposals and owns the typed body and submission. A hostile document can mislead a preview, never forge a review event. |
+
+`attn-kio6` remains the security review of the reviewer case; this section records
+that its opaque-origin, shell-owned boundary also covers the native-owner and
+hosted-author applications. No separate product confirmation is needed.
+
 ---
 
 ## 5. postMessage protocol surface

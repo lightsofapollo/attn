@@ -95,8 +95,12 @@ export class HtmlAnnotationBridge {
   #events: AnnotationBridgeEvents;
   #port: MessagePort | null = null;
   #onWindowMessage: ((event: MessageEvent) => void) | null = null;
-  /** Queued until the port exists, so callers need not await the handshake. */
-  #pending: RenderableAnchor[] | null = null;
+  /**
+   * The full desired overlay state. Keeping it after the first send matters:
+   * a watched path-mode document can reload in place, replacing its runtime
+   * and port while the shell's review threads have not changed.
+   */
+  #rendered: RenderableAnchor[] | null = null;
 
   constructor(frame: HTMLIFrameElement, events: AnnotationBridgeEvents) {
     this.#frame = frame;
@@ -137,9 +141,12 @@ export class HtmlAnnotationBridge {
     // carries no secret; its only payload is the port itself.
     target.postMessage({ type: SHELL_INIT, v: DOC_PROTOCOL_VERSION }, '*', [channel.port2]);
 
-    if (this.#pending) {
-      this.renderAnchors(this.#pending);
-      this.#pending = null;
+    if (this.#rendered) {
+      this.#port.postMessage({
+        type: 'renderAnchors',
+        v: DOC_PROTOCOL_VERSION,
+        anchors: this.#rendered,
+      });
     }
   }
 
@@ -224,10 +231,13 @@ export class HtmlAnnotationBridge {
   // Shell → document
   // -------------------------------------------------------------------------
 
-  /** Full desired state; the frame diffs. Queued if the port is not up yet. */
+  /**
+   * Full desired state; the frame diffs. It is retained and replayed after
+   * every successful hello, so a frame reload never drops existing pins.
+   */
   renderAnchors(anchors: RenderableAnchor[]): void {
+    this.#rendered = anchors;
     if (!this.#port) {
-      this.#pending = anchors;
       return;
     }
     this.#port.postMessage({ type: 'renderAnchors', v: DOC_PROTOCOL_VERSION, anchors });
@@ -270,6 +280,6 @@ export class HtmlAnnotationBridge {
     }
     this.#port?.close();
     this.#port = null;
-    this.#pending = null;
+    this.#rendered = null;
   }
 }

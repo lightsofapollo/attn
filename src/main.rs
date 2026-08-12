@@ -777,6 +777,18 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
                 .or_else(|| uri.strip_prefix("attn://"))
                 .unwrap_or(&uri);
 
+            // `HtmlViewer` asks path-mode HTML responses for an annotation
+            // runtime with this query flag. The server, rather than the shell,
+            // splices the already-bundled runtime into the bytes: that keeps
+            // the document's real attn:// base URL intact, so relative styles,
+            // images and fonts still resolve exactly as they do unannotated.
+            // The iframe remains sandboxed without allow-same-origin, hence it
+            // retains an opaque origin even though its bytes came from attn://.
+            let annotate_html = uri
+                .split_once('?')
+                .map(|(_, query)| query.split('#').next().unwrap_or(query))
+                .is_some_and(|query| query.split('&').any(|part| part == "attn-annotate=1"));
+
             // Strip any query string / fragment before resolving the file. The
             // HtmlViewer appends `?v=<mtime>` to cache-bust on live-reload;
             // without this the query would be treated as part of the path and
@@ -789,7 +801,7 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
             let file_path = std::path::Path::new(path.as_ref());
 
             match std::fs::read(file_path) {
-                Ok(bytes) => {
+                Ok(mut bytes) => {
                     let mime = mime_from_extension(file_path);
                     let ext = file_path
                         .extension()
@@ -818,6 +830,9 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
                     // libraries) need it; the frame is sandboxed and the IPC
                     // bridge is fenced off regardless. @see planning/complete-plan.md §5.
                     if matches!(ext.as_deref(), Some("html" | "htm")) {
+                        if annotate_html {
+                            bytes = inject_html_annotation_runtime(bytes);
+                        }
                         builder = builder.header(
                             "Content-Security-Policy",
                             "default-src 'self' attn: https: data:; \
@@ -2079,6 +2094,38 @@ fn mime_from_extension(path: &std::path::Path) -> &'static str {
     }
 }
 
+/// Runtime bundled from `web/src/doc-runtime/` by `npm run build:doc-runtime`.
+/// It is deliberately a raw JavaScript artifact instead of a copy of the
+/// TypeScript string export so the native protocol handler and `srcdoc` viewer
+/// execute byte-identical code.
+const HTML_ANNOTATION_RUNTIME: &str = include_str!("../web/src/doc-runtime/runtime.generated.js");
+
+/// Append the annotation runtime without parsing arbitrary author HTML.
+///
+/// The last closing body tag is the only safe splice point: earlier textual
+/// `</body>` values can sit in a comment, script string, or attribute. The
+/// browser's HTML parser places a trailing script in the body when no closing
+/// tag exists. The marker makes repeated protocol fetches idempotent.
+fn inject_html_annotation_runtime(mut html: Vec<u8>) -> Vec<u8> {
+    const MARKER: &[u8] = b"data-attn-runtime";
+    if html.windows(MARKER.len()).any(|window| window == MARKER) {
+        return html;
+    }
+    let script = format!("\n<script data-attn-runtime>{HTML_ANNOTATION_RUNTIME}</script>\n");
+    let needle = b"</body";
+    if let Some(index) = html
+        .windows(needle.len())
+        .rposition(|window| window.eq_ignore_ascii_case(needle))
+    {
+        if html[index..].contains(&b'>') {
+            html.splice(index..index, script.bytes());
+            return html;
+        }
+    }
+    html.extend_from_slice(script.as_bytes());
+    html
+}
+
 /// The Svelte app, built by Vite into a single self-contained HTML file.
 /// Embedded at compile time from build output in OUT_DIR.
 const APP_HTML: &str = include_str!(concat!(env!("OUT_DIR"), "/attn-index.html"));
@@ -2260,6 +2307,23 @@ mod tests {
             "attn://localhost/reviewable/abc"
         ));
         assert!(!is_reserved_localhost_review("attn://review/abc"));
+    }
+
+    #[test]
+    fn html_annotation_injection_preserves_relative_resource_markup() {
+        let html = br#"<!doctype html><html><head><link href="style.css"></head><body><img src="chart.png"><p>Report</p></body></html>"#.to_vec();
+        let injected = String::from_utf8(inject_html_annotation_runtime(html)).expect("utf8 html");
+        assert!(injected.contains("href=\"style.css\""));
+        assert!(injected.contains("src=\"chart.png\""));
+        assert!(injected.contains("data-attn-runtime"));
+        assert!(injected.find("data-attn-runtime").unwrap() < injected.rfind("</body>").unwrap());
+    }
+
+    #[test]
+    fn html_annotation_injection_is_idempotent() {
+        let once = inject_html_annotation_runtime(b"<body>Hello</body>".to_vec());
+        let twice = inject_html_annotation_runtime(once.clone());
+        assert_eq!(once, twice);
     }
 
     // ----- attn-nnj.2.6 watcher classification ---------------------------

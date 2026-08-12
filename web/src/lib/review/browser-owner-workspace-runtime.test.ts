@@ -207,12 +207,12 @@ function deferred(): { promise: Promise<void>; resolve(): void } {
   return { promise, resolve };
 }
 
-function shareRequest(): BrowserWorkspaceShareRequest {
+function shareRequest(paths = ['notes.md']): BrowserWorkspaceShareRequest {
   return {
     relayUrl: 'https://relay.example',
     browserReviewBase: 'https://attn.sh/review',
     scopeKind: 'file',
-    paths: ['notes.md'],
+    paths,
   };
 }
 
@@ -229,6 +229,19 @@ async function seedLocal(storage: BrowserStorage, workspaceId: string, text = 'h
     name: workspaceId,
     storagePersisted: true,
     entry: { path: 'notes.md', kind: 'markdown', body: new TextEncoder().encode(text) },
+  });
+}
+
+async function seedHtmlLocal(storage: BrowserStorage, workspaceId: string) {
+  return storage.workspaces.createWorkspace({
+    workspaceId,
+    name: workspaceId,
+    storagePersisted: true,
+    entry: {
+      path: 'report.html',
+      kind: 'html',
+      body: new TextEncoder().encode('<main><h1>Quarterly report</h1></main>'),
+    },
   });
 }
 
@@ -703,6 +716,40 @@ defineCase('ensureShare activates authority on the runtime-owned lease without r
     'runtime continues to own the sole workspace lease',
   );
   competing.close();
+  await runtime.close();
+  storage.close();
+});
+
+defineCase('an HTML-only share starts durable review but never exposes Markdown collab', async () => {
+  const now = 1_720_000_000_000;
+  const storage = await openStorage(() => now);
+  const workspaceId = 'share-html-only-runtime';
+  await seedHtmlLocal(storage, workspaceId);
+  const events: string[] = [];
+  const authorityFiles: BrowserOwnerAuthorityFile[][] = [];
+  const runtime = new BrowserOwnerWorkspaceRuntime(runtimeOptions(storage, workspaceId, {
+    now: () => now,
+    authorityFactory: (options) => {
+      authorityFiles.push([...options.files]);
+      return new FakeAuthority(options, storage, events);
+    },
+    sharing: {
+      now: () => now,
+      randomBytes: deterministicRandom(),
+      createRoom: async (options) => bootstrapFromOptions(options),
+      publish: snapshotPublisher,
+      indexBuilder: testIndexBuilder,
+      shareRelayFactory: memoryShareRelayFactory(),
+      outboxFactory: ({ storage: outboxStorage, credentials }) =>
+        new AckingShareOutbox(outboxStorage, credentials.roomId, events),
+    },
+  }));
+  await runtime.start();
+  const view = await runtime.ensureShare(shareRequest(['report.html']));
+  assert(view.invite, 'HTML publication mints a review invite');
+  equal(authorityFiles[0]?.[0]?.docType, 'html', 'authority recognizes the review-only document');
+  equal(runtime.getState().bindings[0]?.docType, 'html', 'runtime retains the HTML binding');
+  equal(await runtime.getCollabSeed('report.html'), null, 'HTML never opts into Markdown co-editing');
   await runtime.close();
   storage.close();
 });

@@ -5,11 +5,13 @@ import {
   mapError,
   relativeTimeLabel,
   sizeLabel,
+  toSummary,
 } from './workspace-service';
 import { StorageConflictError, BrowserStorage, BrowserStorageError } from '../../lib/review/browser-storage';
 import { inviteCapabilityFrom } from '../../lib/review/browser-workspace-share';
 import { generateBrowserIdentity } from '../../lib/review/browser-session';
 import { base64UrlEncode, contentHash } from '../../lib/review/browser-crypto';
+import type { WorkspaceEntryRecord, WorkspaceRecord } from '../../lib/review/browser-workspace-schema';
 
 Object.defineProperty(globalThis, 'IDBKeyRange', {
   configurable: true,
@@ -150,11 +152,12 @@ defineCase('import/export round-trip preserves nested paths and bytes', async ()
     const imported = await service.importWorkspace('Research folio', [
       { path: 'index.md', bytes: new TextEncoder().encode('# Index'), kind: 'markdown' },
       { path: 'notes/deep/a.md', bytes: new TextEncoder().encode('nested'), kind: 'markdown' },
+      { path: 'reports/q3.html', bytes: new TextEncoder().encode('<h1>Q3</h1>'), kind: 'html' },
       { path: 'figures/latency.png', bytes: image, kind: 'asset', mediaType: 'image/png' },
     ]);
-    assertEqual(imported.entries.length, 3, 'imported entries');
+    assertEqual(imported.entries.length, 4, 'imported entries');
     const exported = await service.exportWorkspace(imported.workspace.workspaceId);
-    assertEqual(exported.length, 3, 'exported entries');
+    assertEqual(exported.length, 4, 'exported entries');
     const png = exported.find((file) => file.path === 'figures/latency.png');
     assert(png, 'asset path preserved');
     assertEqual(png.mediaType, 'image/png', 'media type preserved');
@@ -162,9 +165,39 @@ defineCase('import/export round-trip preserves nested paths and bytes', async ()
     assert(png.bytes.every((byte, index) => byte === image[index]), 'bytes identical');
     const nested = exported.find((file) => file.path === 'notes/deep/a.md');
     assert(nested, 'nested path preserved');
+    assertEqual(exported.find((file) => file.path === 'reports/q3.html')?.kind, 'html', 'HTML kind preserved');
   } finally {
     service.close();
   }
+});
+
+defineCase('HTML is stored as a document rather than downgraded to an asset', async () => {
+  const service = await openService();
+  try {
+    const imported = await service.importWorkspace('HTML report', [
+      { path: 'report.html', bytes: new TextEncoder().encode('<h1>Report</h1>'), kind: 'html' },
+    ]);
+    assertEqual(imported.entries[0]?.kind, 'html', 'HTML storage kind');
+    assertEqual(imported.workspace.activePath, 'report.html', 'HTML opens as the first document');
+    const summaries = await service.listWorkspaces();
+    assertEqual(summaries[0]?.htmlCount, 1, 'HTML count');
+    assertEqual(summaries[0]?.assetCount, 0, 'HTML is not an asset');
+  } finally {
+    service.close();
+  }
+});
+
+defineCase('legacy text/html assets count as HTML at read time', () => {
+  const workspace = {
+    workspaceId: 'legacy-html', name: 'Legacy HTML', createdAt: 1, updatedAt: 2,
+  } as WorkspaceRecord;
+  const entries = [{
+    workspaceId: 'legacy-html', path: 'report.html', kind: 'asset', mediaType: 'text/html; charset=utf-8',
+    sizeBytes: 42, headRevisionId: 'revision', createdAt: 1, updatedAt: 2,
+  }] as WorkspaceEntryRecord[];
+  const summary = toSummary(workspace, entries, 3);
+  assertEqual(summary.htmlCount, 1, 'legacy HTML count');
+  assertEqual(summary.assetCount, 0, 'legacy HTML is excluded from asset count');
 });
 
 defineCase('empty import is an explicit user-visible error', async () => {

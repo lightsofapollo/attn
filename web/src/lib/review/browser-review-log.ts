@@ -24,11 +24,10 @@
 //      the two-tab divergence this epic exists to kill. On rotation the old
 //      room's materialized state is dropped and the new room replayed.
 //
-// R2-spilled snapshot blobs and the anchor-index REBUILD check stay with the
-// live session (the leader hard-verifies each blob on live receipt and feeds
-// it through the hosted-owner sink's applySnapshot pass-through; a
-// wrong-but-hash-valid index can only misplace a card into the orphan tray,
-// never alter content).
+// R2-spilled snapshot blobs are replayed from the durable log after their
+// pointer and blob doorbells arrive. The live session still verifies network
+// receipt, but it never gets a privileged store-write path: a projection is
+// the only way any hosted tab materializes review plaintext.
 
 import { BrowserWsClient, type DecodedEnvelope, type MailboxEnvelope } from './browser-ws';
 import type { BrowserStorage } from './browser-storage';
@@ -40,6 +39,7 @@ import {
   type ReviewStoreSink,
 } from './browser-session';
 import { contentHash } from './browser-crypto';
+import { resolveBrowserR2Snapshot } from './browser-snapshot-r2';
 import { decompressSnapshotIfNeeded } from './snapshot-compression';
 import {
   REVIEW_INBOUND_CHANNEL_PREFIX,
@@ -65,6 +65,12 @@ export interface ReviewLogRoomKeys {
   eventKey: Uint8Array;
   snapshotKey: Uint8Array;
   signalingKey: Uint8Array;
+  /**
+   * Relay admission key retained solely to authenticate the existing R2
+   * resolver's cached-body verification (read-scoped in v3). Projection
+   * replay never makes a network request, so it is never sent anywhere.
+   */
+  readAdmissionKey: Uint8Array;
   /**
    * Promoted-manifest path → fileId map. This is how EVERY hosted tab scopes
    * the review margin to the active file (attn-9ek7) — the authority's
@@ -132,6 +138,11 @@ export async function discoverReviewLogRoom(
     eventKey: new Uint8Array(credentials.keys.eventKey),
     snapshotKey: new Uint8Array(credentials.keys.snapshotKey),
     signalingKey: new Uint8Array(credentials.keys.signalingKey),
+    readAdmissionKey: new Uint8Array(
+      credentials.protocolVersion === 3
+        ? credentials.readAdmissionKey!
+        : credentials.keys.admissionKey,
+    ),
     bindings: (capability.publishedManifest?.entries ?? []).map((entry) => ({
       path: entry.path,
       fileId: entry.fileId,
@@ -173,7 +184,7 @@ export async function replayReviewLogIntoStore(options: {
   // AFTER the replay loop so the (sync) onEnvelope callback never races an
   // async decompress against client.close().
   const pointers = new Map<string, SnapshotPointer>();
-  const decodedBlobs: Array<{ blobId: string; plaintext: Uint8Array }> = [];
+  const decodedBlobs: Array<{ envelope: MailboxEnvelope; plaintext: Uint8Array }> = [];
   // Never started: replayEnvelope() drives the verified decrypt/signature
   // pipeline entirely offline; the connection fields only satisfy the
   // constructor shape.
@@ -192,7 +203,7 @@ export async function replayReviewLogIntoStore(options: {
       onEnvelope: (decoded) => {
         if (decoded.envelope.kind === 'snapshot_blob') {
           decodedBlobs.push({
-            blobId: decoded.envelope.envelopeId,
+            envelope: decoded.envelope,
             plaintext: new Uint8Array(decoded.plaintext),
           });
           decoded.plaintext.fill(0);
@@ -249,9 +260,46 @@ export async function replayReviewLogIntoStore(options: {
       if (item) await client.replayEnvelope(item.envelope, item.serverSeq);
     }
     for (const blob of decodedBlobs) {
-      const pointer = pointers.get(blob.blobId);
+      const pointer = pointers.get(blob.envelope.envelopeId);
       if (!pointer) {
         blob.plaintext.fill(0);
+        continue;
+      }
+      if (isR2BlobRefPlaintext(blob.plaintext, blob.envelope.envelopeId)) {
+        // The envelope wrapper has already passed BrowserWsClient's AEAD +
+        // device-signature pipeline. The resolver re-opens it to bind the
+        // cached sealed body to its signed blob reference. It is deliberately
+        // cache-only here: no projection tab learns a presigned R2 URL or
+        // writes a newly fetched body through a live-session authority.
+        blob.plaintext.fill(0);
+        let recovered: Uint8Array | null = null;
+        try {
+          recovered = await resolveBrowserR2Snapshot({
+            relayUrl: 'https://replay.invalid/',
+            roomId: room.roomId,
+            admissionKey: room.readAdmissionKey,
+            protocolVersion: room.protocolVersion,
+            snapshotKey: room.snapshotKey,
+            wrapper: blob.envelope,
+            fetchImpl: async () => {
+              throw new Error('projection R2 recovery is cache-only');
+            },
+            sealedCache: {
+              getSealed: (storedRoomId, blobId) => storage.getSealedBlob(storedRoomId, blobId),
+              // A projection has no privileged network receipt path. It may
+              // consume a sealed body verified and persisted earlier, never
+              // persist one itself.
+              putSealed: () => undefined,
+            },
+          });
+          await hydrateReplayedSnapshot(store, pointer, recovered, hydrated);
+        } catch {
+          // A cache miss or integrity failure leaves the snapshot unhydrated
+          // for this pass. There is intentionally no fallback network fetch;
+          // the next durable blob commit + doorbell can retry safely.
+        } finally {
+          recovered?.fill(0);
+        }
         continue;
       }
       await hydrateReplayedSnapshot(store, pointer, blob.plaintext, hydrated);
@@ -267,11 +315,38 @@ type SnapshotPointer = {
 };
 
 /**
+ * BrowserWsClient has authenticated the wrapper before this runs. This small
+ * shape check only selects the cache-only R2 path; the resolver repeats the
+ * cryptographic wrapper and sealed-body validation before any plaintext is
+ * materialized.
+ */
+function isR2BlobRefPlaintext(bytes: Uint8Array, envelopeId: string): boolean {
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes));
+  } catch {
+    return false;
+  }
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const candidate = value as {
+    storage?: unknown;
+    blobId?: unknown;
+    byteLength?: unknown;
+    contentHash?: unknown;
+  };
+  return (
+    candidate.storage === 'r2'
+    && candidate.blobId === envelopeId
+    && Number.isSafeInteger(candidate.byteLength)
+    && (candidate.byteLength as number) >= 0
+    && typeof candidate.contentHash === 'string'
+  );
+}
+
+/**
  * Verify + apply one replayed inline snapshot blob. Content is pinned to
  * the signed pointer's baseHash; markdown/html only (assets and workspace
- * manifests have no bearing on margin anchoring, and R2 wrappers parse to
- * null and are skipped — those threads stay in the orphan tray until the
- * live session recovers the spill).
+ * manifests have no bearing on margin anchoring).
  */
 async function hydrateReplayedSnapshot(
   store: ReviewStoreSink,
@@ -563,14 +638,11 @@ export async function openWorkspaceReviewProjection(
  * event, the leader sees the bug too: divergence impossible by construction.
  *
  * What still passes through:
- *   - applySnapshot: snapshot hydration is idempotent (content-addressed by
- *     snapshotId, placeholder-upgrade only) and the R2-spill recovery path
- *     exists ONLY in the live session — dropping it would strip anchor
- *     resolution from large documents in the leader tab.
  *   - pendingOutbox: the ReviewBar's OutboxIndicator ("N pending · Retry")
  *     reflects the live outbox, which only the session knows.
- * Everything else (room selection, file scoping, room lifecycle) belongs to
- * the projection + EditorShell, so those writes land on inert local fields.
+ * Everything else — including snapshots — belongs to the projection +
+ * EditorShell. A durable snapshot blob now rings the same review doorbell as
+ * an event, so the projection will re-hydrate it after verified persistence.
  */
 export function createHostedOwnerSessionStoreSink(): ReviewStoreSink {
   let target: ReviewStoreSink | null = null;
@@ -591,7 +663,7 @@ export function createHostedOwnerSessionStoreSink(): ReviewStoreSink {
     // Projection-owned: the durable commit + doorbell that precede this call
     // are the real write path. Deliberately NOT forwarded.
     applyEvent: () => undefined,
-    applySnapshot: (snapshot) => withStore((store) => store.applySnapshot(snapshot)),
+    applySnapshot: () => undefined,
     setCurrentFile: () => undefined,
     setCurrentSnapshot: () => undefined,
     // Plain inert fields — the session stamps/clears them on start/close,
@@ -655,9 +727,10 @@ function zeroRoomKeys(room: ReviewLogRoomKeys): void {
   room.eventKey.fill(0);
   room.snapshotKey.fill(0);
   room.signalingKey.fill(0);
+  room.readAdmissionKey.fill(0);
 }
 
-/** Replay only ever copies the three AEAD keys out; clobber the rest. */
+/** Replay copies only its necessary AEAD + read-admission keys; clobber the rest. */
 function zeroOwnerCredentialMaterial(credentials: BrowserOwnerCredentials): void {
   credentials.roomSecret.fill(0);
   credentials.keys.rootKey.fill(0);

@@ -28,6 +28,7 @@
     WorkspaceShareRequest,
     WorkspaceShareView,
   } from './types';
+  import type { WorkspaceReviewProjectionState } from '../../lib/review/browser-review-log';
   import type EditorComponentType from '../../lib/Editor.svelte';
   import type ReviewMarginComponentType from '../../lib/ReviewMargin.svelte';
   import type ReviewApplyExpandComponentType from '../../lib/ReviewApplyExpand.svelte';
@@ -199,6 +200,12 @@
   let collabSeedRequest = 0;
   let loadedCollabGenerationKey: string | null = null;
   let boundCollabKey: string | null = null;
+  // The request token alone only rejects older calls. It does not prevent an
+  // owner seed fetched while the controller is rotating from resolving after
+  // a different reactive turn has already installed a newer request. Keep the
+  // exact controller identity too: an authenticated seed is meaningful only
+  // for the controller that supplied it.
+  let collabSeedController: ReturnType<EditingSession['getController']> | null = null;
   let autosave: AutosaveController | null = null;
   // Durable commits completed this session — observable for tests/status.
   let commitCount = $state(0);
@@ -228,26 +235,29 @@
       || ownerState?.reason?.startsWith('The review room expired') === true,
   );
   // Review surfaces render in EVERY tab of a shared workspace, not just the
-  // lease holder: follower tabs have no authority session but the durable
-  // review-log watcher (attn-dgya) hydrates the store and stamps the room.
+  // lease holder. This projection state is intentionally the only source for
+  // room identity and file bindings; the authority only describes whether
+  // THIS tab currently has a live authoring connection.
+  let reviewProjection = $state<WorkspaceReviewProjectionState>({
+    roomId: null,
+    bindings: [],
+    replay: 'idle',
+  });
   const reviewRoomActive = $derived(
-    Boolean(ownerState?.roomId ?? reviewStoreRef?.currentRoomId),
+    reviewProjection.roomId !== null && reviewProjection.replay === 'ready',
   );
   // A follower tab showing hydrated threads: reply/resolve stay available —
   // the handlers promote this tab through the normal lease handoff on use.
   const reviewFollowerTab = $derived(
-    !ownerState?.roomId && Boolean(reviewStoreRef?.currentRoomId),
+    !ownerState?.roomId && reviewRoomActive,
   );
-  // Promoted-manifest path → fileId map from the review-log watcher: the
-  // follower's substitute for the leader-only authority bindings.
-  let reviewLogBindings = $state<Array<{ path: string; fileId: string }>>([]);
-  // The storage-backed projection is the source for a real review. Demo
-  // content is presentation-only, retained only as a seeded history state
-  // when no real room exists.
-  let reviewProjectionState = $state<'idle' | 'ready' | 'failed'>('idle');
-  const durableReviewHistory = $derived(
-    Boolean(reviewStoreRef?.currentRoomId) && reviewProjectionState === 'ready',
+  const reviewLogBindings = $derived(reviewProjection.bindings);
+  // Mock shells carry illustrative cards, but a real workspace only ever
+  // reaches review UI through its durable projection.
+  const fixtureReviewHistory = $derived(
+    !reviewRoomActive && workspace.reviewCards.length > 0,
   );
+  const durableReviewHistory = $derived(reviewRoomActive);
 
   // ————— multi-file rail state (attn-7xl.3.4) —————
   let addingMarkdown = $state(false);
@@ -279,7 +289,9 @@
   const reviewCount = $derived(
     reviewRoomActive && reviewStoreRef
       ? reviewStoreRef.roomActiveThreadCount
-      : workspace.reviewCards.length,
+      : fixtureReviewHistory
+        ? workspace.reviewCards.length
+        : 0,
   );
   let badgePop = $state(false);
   let lastReviewCount = -1;
@@ -806,35 +818,18 @@
   // The runtime bindings map workspace path → published share fileId.
   $effect(() => {
     const store = reviewStoreRef;
-    const state = ownerState;
     const path = activeEntry?.path;
     if (!store || !path) return;
-    // Leader: authority bindings. Follower (no session): the promoted
-    // manifest's bindings from the review-log watcher — same map, read
-    // from storage instead of the live authority (attn-dgya follow-up).
-    const bindings = state?.roomId
-      ? store.currentRoomId === state.roomId
-        ? state.bindings
-        : null
-      : store.currentRoomId !== null
-        ? reviewLogBindings
-        : null;
-    if (!bindings) return;
-    const binding = bindings.find((item) => item.path === path);
+    if (!reviewRoomActive) return;
+    const binding = reviewLogBindings.find((item) => item.path === path);
     if (!binding) return;
     untrack(() => {
       if (store.currentFileId === binding.fileId) return;
-      if (state?.roomId) {
-        store.setCurrentFile(binding.fileId);
-      } else {
-        // Follower tabs replay content-less snapshot POINTERS (blob
-        // hydration stays with the live session), so setCurrentFile's
-        // renderability guard would refuse this pin — but the document
-        // body here comes from the local workspace, not the snapshot.
-        // Pin directly, mirroring the guard-free parts of setCurrentFile.
-        store.currentFileId = binding.fileId;
-        store.currentSnapshotId = null;
-      }
+      // The local workspace is the rendered document. Pin the matching
+      // promoted file directly so every projection — leader or follower —
+      // scopes threads identically even before a snapshot is renderable.
+      store.currentFileId = binding.fileId;
+      store.currentSnapshotId = null;
     });
   });
 
@@ -1378,18 +1373,21 @@
       // NOW even in a never-lease tab — otherwise the projection-hydrated
       // threads have no component to render into.
       unsubscribe = handle.subscribe((state) => {
-        reviewLogBindings = [...state.bindings];
-        reviewProjectionState = state.replay;
+        reviewProjection = {
+          roomId: state.roomId,
+          bindings: [...state.bindings],
+          replay: state.replay,
+        };
         if (state.roomId !== null) void ensureEditorGraph(true);
       });
     }).catch(() => {
-      reviewProjectionState = 'failed';
+      reviewProjection = { roomId: null, bindings: [], replay: 'failed' };
     });
     return () => {
       cancelled = true;
       unsubscribe?.();
       projection?.close();
-      reviewProjectionState = 'idle';
+      reviewProjection = { roomId: null, bindings: [], replay: 'idle' };
     };
   });
 
@@ -1631,6 +1629,7 @@
     untrack(() => {
       collabSeedRequest += 1;
       collabSeed = null;
+      collabSeedController = null;
       collabClientId = null;
       boundCollabKey = null;
       loadedCollabGenerationKey = null;
@@ -1664,6 +1663,7 @@
       }
       untrack(() => {
         collabSeed = seed;
+        collabSeedController = null;
         collabClientId = crypto.randomUUID();
         boundCollabKey = null;
         collabEpoch += 1;
@@ -1738,6 +1738,7 @@
         untrack(() => {
           collabSeedRequest += 1;
           collabSeed = null;
+          collabSeedController = null;
           collabClientId = null;
           boundCollabKey = null;
           collabEpoch += 1;
@@ -1764,6 +1765,7 @@
         || activeEntry?.path !== entry.path
       ) return;
       collabSeed = seed;
+      collabSeedController = currentSession.getController();
       collabClientId = seed ? crypto.randomUUID() : null;
       boundCollabKey = null;
       collabEpoch += 1;
@@ -1787,7 +1789,7 @@
       || readyCollabEpoch !== epoch
     ) return;
     const controller = currentSession.getController();
-    if (!controller) return;
+    if (!controller || controller !== collabSeedController) return;
     const key = `${state.controllerGeneration}:${seed.fileId}:${seed.epoch}:${epoch}`;
     if (boundCollabKey === key) return;
     const bridge: EditorBridge = {
@@ -1951,7 +1953,7 @@
       review: {
         activePath: activeEntry?.path ?? null,
         ownerRoomId: ownerState?.roomId ?? null,
-        bindings: (ownerState?.bindings ?? []).map((b) => ({ path: b.path, fileId: b.fileId })),
+        bindings: [...reviewLogBindings],
         storeRoomId: reviewStoreRef?.currentRoomId ?? null,
         storeFileId: reviewStoreRef?.currentFileId ?? null,
         threads: reviewStoreRef?.threads.length ?? null,
@@ -2024,8 +2026,7 @@
         // and the bridge's deliveries rendered nowhere.
         const path = activeEntry?.path;
         const activeFileId =
-          ownerState?.bindings.find((binding) => binding.path === path)?.fileId
-          ?? reviewLogBindings.find((binding) => binding.path === path)?.fileId;
+          reviewLogBindings.find((binding) => binding.path === path)?.fileId;
         const scoped = cursors.filter(
           (cursor) => !cursor.location?.fileId || cursor.location.fileId === activeFileId,
         );
@@ -2073,6 +2074,10 @@
       const { reviewStore } = await import('../../lib/review/store.svelte');
       reviewStore.openThreeWayApply(result.verdict);
     }
+    // The action is durably committed before the runtime returns. Ring Desk
+    // only after that point so another tab re-projects a terminal event, not
+    // an optimistic UI dismissal.
+    service.announceReviewActivity(workspace.id);
     return result;
   }
 
@@ -2083,10 +2088,12 @@
     if (!currentSession || !entry || root.type !== 'suggestion_created') {
       throw new Error('Suggestion is not available.');
     }
-    return currentSession.rejectSuggestion({
+    const result = await currentSession.rejectSuggestion({
       path: entry.path,
       suggestionId: root.suggestionId,
     });
+    service.announceReviewActivity(workspace.id);
+    return result;
   }
 
   async function applyReviewedSuggestion(
@@ -2096,11 +2103,13 @@
     const currentSession = session;
     const entry = activeEntry;
     if (!currentSession || !entry) throw new Error('Owner apply is unavailable.');
-    return currentSession.applySuggestion({
+    const result = await currentSession.applySuggestion({
       path: entry.path,
       suggestionId: verdict.suggestionId,
       replacement,
     });
+    service.announceReviewActivity(workspace.id);
+    return result;
   }
 
   async function replyToReview(anchor: import('../../lib/types').Anchor, body: string, threadId: string): Promise<void> {
@@ -2115,6 +2124,7 @@
     const currentSession = session ?? (await ensureOwnerSession());
     if (!currentSession) throw new Error('Review authoring is unavailable.');
     await currentSession.resolveComment(threadId);
+    service.announceReviewActivity(workspace.id);
   }
 
   async function retryReviewDelivery(): Promise<void> {
@@ -2209,23 +2219,18 @@
     void switchTo(relativePath);
   }
 
-  // path ↔ fileId across the leader authority bindings and the follower-tab
-  // review-log bindings (same union the cursor-scope filter uses).
+  // Path ↔ fileId comes exclusively from the promoted-manifest projection.
   function activeOwnerFileId(): FileId | null {
     const path = activeEntry?.path;
     if (!path) return null;
     return (
-      (ownerState?.bindings.find((b) => b.path === path)?.fileId
-        ?? reviewLogBindings.find((b) => b.path === path)?.fileId
-        ?? null) as FileId | null
+      (reviewLogBindings.find((b) => b.path === path)?.fileId ?? null) as FileId | null
     );
   }
 
   function pathForFileId(fileId: FileId): string | null {
     return (
-      ownerState?.bindings.find((b) => b.fileId === fileId)?.path
-      ?? reviewLogBindings.find((b) => b.fileId === fileId)?.path
-      ?? null
+      reviewLogBindings.find((b) => b.fileId === fileId)?.path ?? null
     );
   }
 
@@ -2456,7 +2461,7 @@
     // A thread on another shared file: switch to that file first — the
     // active-file scoping effect re-points the store, then focus follows.
     if (toast.fileId !== null) {
-      const binding = ownerState?.bindings.find((item) => item.fileId === toast.fileId);
+      const binding = reviewLogBindings.find((item) => item.fileId === toast.fileId);
       if (binding) onSelectEntry?.(binding.path);
     }
     reviewStoreRef?.setFocusEventId(toast.eventId);
@@ -2510,11 +2515,31 @@
       const name = store.displayNameFor(arrival.authorId);
       const verb = arrival.kind === 'suggestion' ? 'suggested an edit' : 'commented';
       const binding = arrival.fileId !== null
-        ? ownerState?.bindings.find((item) => item.fileId === arrival.fileId)
+        ? reviewLogBindings.find((item) => item.fileId === arrival.fileId)
         : undefined;
       const suffix = binding ? ` · ${binding.path.split('/').at(-1)}` : '';
       pushToast(`${name} ${verb}${suffix}`, arrival.eventId, arrival.fileId);
     }
+  });
+
+  // A review projection changing is durable workspace activity, not a live
+  // connection signal. Tell other tabs to refresh their Desk summaries, but
+  // intentionally send no plaintext, event id, author, or count over the
+  // advisory channel. The receiving tab decrypts and tallies its own log.
+  let lastAnnouncedReviewFingerprint: string | null = null;
+  $effect(() => {
+    const store = reviewStoreRef;
+    const roomId = reviewProjection.roomId;
+    if (!store || !roomId || reviewProjection.replay !== 'ready') return;
+    const eventIds = store.events
+      .filter((event) => event.meta.roomId === roomId)
+      .map((event) => event.meta.eventId)
+      .sort()
+      .join(',');
+    const fingerprint = `${roomId}:${eventIds}`;
+    if (fingerprint === lastAnnouncedReviewFingerprint) return;
+    lastAnnouncedReviewFingerprint = fingerprint;
+    service.announceReviewActivity(workspace.id);
   });
 
   // Tapping an inline anchor marker (mobile reader) sets the store's focus
@@ -3029,7 +3054,7 @@
       onResolveComment={resolveReview}
       onReplyComment={replyToReview}
     />
-  {:else if workspace.reviewCards.length > 0}
+  {:else if fixtureReviewHistory}
     <section class="review-history-placeholder" aria-labelledby="review-history-heading">
       <p class="review-history-label">Saved review</p>
       <h2 id="review-history-heading">{workspace.reviewCards.length} {workspace.reviewCards.length === 1 ? 'thread' : 'threads'} from this workspace</h2>
@@ -3043,7 +3068,7 @@
       </div>
       <p class="review-history-note">Live review adds presence and replies; saved feedback stays here.</p>
     </section>
-  {:else if reviewProjectionState === 'failed'}
+  {:else if reviewProjection.replay === 'failed'}
     <section class="review-history-placeholder" aria-labelledby="review-history-heading">
       <p class="review-history-label">Review history</p>
       <h2 id="review-history-heading">Review history is temporarily unavailable</h2>
@@ -3075,7 +3100,7 @@
         onOpenDesk={() => window.location.assign('/app')}
         activeEntryPath={activeEntry?.path}
         {shareOpen}
-        reviewHistoryAvailable={durableReviewHistory || workspace.reviewCards.length > 0 || reviewProjectionState === 'failed'}
+        reviewHistoryAvailable={durableReviewHistory || fixtureReviewHistory || reviewProjection.replay === 'failed'}
         actions={desktopHeaderActions}
         footer={desktopSidebarFooter}
         content={documentSurface}
@@ -3417,7 +3442,7 @@
           onReplyComment={replyToReview}
         />
       </div>
-    {:else if workspace.reviewCards.length > 0}
+    {:else if fixtureReviewHistory}
       <p class="review-history-note">Live review adds presence and replies; saved feedback stays here.</p>
       {#each workspace.reviewCards as card (card.author + card.body)}
         <div class="review-card">
@@ -3429,7 +3454,7 @@
           No review yet. Share this workspace to open an encrypted room around it.
         </p>
       {/each}
-    {:else if reviewProjectionState === 'failed'}
+    {:else if reviewProjection.replay === 'failed'}
       <p class="review-empty">Saved review history could not load. Reopen this workspace to try again.</p>
     {:else}
       <p class="review-empty">No review yet. Share this workspace to open an encrypted room around it.</p>
@@ -3437,6 +3462,6 @@
   </BottomSheet>
 {/if}
 
-{#if ownerState?.roomId && ReviewApplyExpandComponent}
+{#if reviewRoomActive && ReviewApplyExpandComponent}
   <ReviewApplyExpandComponent onApplySuggestion={applyReviewedSuggestion} />
 {/if}

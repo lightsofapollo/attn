@@ -40,6 +40,7 @@ import type { LeaseHandle } from './browser-workspace-lease';
 import type { PublishedManifestPointer } from './browser-snapshot-publisher';
 import type { SnapshotPublicationOutbox } from './browser-snapshot-publisher';
 import type { MailboxEnvelope } from './browser-ws';
+import type { BrowserReviewEphemeraSignal } from './browser-review-ephemera';
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 5_000;
 const DEFAULT_ROLLOVER_STEP_HEADROOM = 256;
@@ -159,12 +160,11 @@ export interface BrowserOwnerAuthorityOptions {
     onState?: (state: BrowserSessionState) => void;
   };
   /**
-   * Cursor presence mirror (attn-37f9): the leader is the only node on both
-   * the relay wire and the local tab channel, so relay-borne cursor payloads
-   * are handed here for the runtime to re-post onto the tab channel. Without
-   * it a reviewer's caret/selection rendered only in the leader tab.
+   * The owner runtime may fan authenticated, non-durable cursor presence out
+   * through its workspace ephemera bus. No review event or storage authority
+   * crosses this boundary.
    */
-  onCursorDelivery?: (payload: string) => void;
+  onEphemeraDelivery?: (signal: BrowserReviewEphemeraSignal) => void;
   collab: {
     selfClientId: string;
     selfLabel: string;
@@ -324,6 +324,16 @@ export class BrowserOwnerAuthorityService {
 
   get controller(): CollabController | null {
     return this.controllerValue;
+  }
+
+  /** The binding that authenticates the currently-installed controller. */
+  getBinding(pathOrFileId: string): BrowserOwnerAuthorityFile | null {
+    for (const binding of this.bindings.values()) {
+      if (binding.path === pathOrFileId || binding.fileId === pathOrFileId) {
+        return { ...binding };
+      }
+    }
+    return null;
   }
 
   prepareTerminalEvent(body: ReviewEventBody): AssembledBrowserEvent {
@@ -927,12 +937,14 @@ export class BrowserOwnerAuthorityService {
       debug[message.kind] = (debug[message.kind] ?? 0) + 1;
     }
     if (!message || (message.kind !== 'resync' && message.kind !== 'cursor')) return;
-    // Presence tee (attn-37f9): mirror relay cursors to follower tabs before
-    // any transition barrier — presence must not queue behind an epoch swap,
-    // and a dropped cursor frame self-heals on the next caret move.
+    // Fan authenticated relay cursors to sibling browser tabs before any
+    // transition barrier. The ephemera bus is lossy by definition, so a
+    // dropped frame self-heals on the next caret move.
     if (message.kind === 'cursor') {
       try {
-        this.options.onCursorDelivery?.(delivery.payload);
+        this.options.onEphemeraDelivery?.({
+          kind: 'cursor', source: 'room', payload: delivery.payload,
+        });
       } catch {
         // Presence is best-effort by definition.
       }
@@ -1010,15 +1022,16 @@ export class BrowserOwnerAuthorityService {
   }
 
   /**
-   * Best-effort presence relay for the local tab hub (attn-37f9): a follower
-   * tab's cursor arrives over the BroadcastChannel and must reach room peers
-   * through this leader's session. Fire-and-forget — no generation guard, no
-   * barrier: a lost cursor frame is repainted by the next caret move.
+   * Best-effort egress for a local-tab cursor that the workspace ephemera bus
+   * has already structurally validated. It stays out of review durability and
+   * bypasses epoch barriers because the next caret update repairs any loss.
    */
-  mirrorCursorToRoom(payload: string): void {
+  sendEphemera(signal: BrowserReviewEphemeraSignal): void {
+    if (signal.kind !== 'cursor' || signal.source !== 'local-tab') return;
+    if (parseCollabWireMessage(signal.payload)?.kind !== 'cursor') return;
     const session = this.sessionValue;
     if (!session || this.getState().status !== 'active') return;
-    void session.sendCollab(payload).catch(() => undefined);
+    void session.sendCollab(signal.payload).catch(() => undefined);
   }
 
   private async runAuthoritySend(

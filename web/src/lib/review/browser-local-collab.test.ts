@@ -17,6 +17,7 @@ import {
   localCollabFileId,
   type LocalCollabChannel,
 } from './browser-local-collab';
+import { BrowserReviewEphemeraBus } from './browser-review-ephemera';
 
 let passed = 0;
 let failed = 0;
@@ -28,6 +29,11 @@ function defineCase(name: string, fn: () => Promise<void> | void): void {
 
 function assert(cond: boolean, msg: string): void {
   if (!cond) throw new Error(msg);
+}
+
+function required<T>(value: T | null, message: string): T {
+  if (value === null) throw new Error(message);
+  return value;
 }
 
 // ————— fake wire + clock —————
@@ -112,6 +118,9 @@ function makeEditor(clientID: string, markdown: string) {
 
 interface Fixture {
   bus: FakeBus;
+  ephemeraBus: FakeBus;
+  ephemera: BrowserReviewEphemeraBus;
+  forwarded: string[];
   clock: FakeClock;
   heads: Map<string, string>;
   commits: Array<{ path: string; markdown: string }>;
@@ -120,9 +129,14 @@ interface Fixture {
 
 function makeHub(overrides: { heads?: Map<string, string> } = {}): Fixture {
   const bus = new FakeBus();
+  const ephemeraBus = new FakeBus();
   const clock = new FakeClock();
   const heads = overrides.heads ?? new Map([['notes.md', 'hello world']]);
   const commits: Array<{ path: string; markdown: string }> = [];
+  const forwarded: string[] = [];
+  const ephemera = new BrowserReviewEphemeraBus({
+    workspaceId: 'ws-1', senderId: 'tab-owner', channel: ephemeraBus.connect(),
+  });
   const hub = new LocalCollabHub({
     workspaceId: 'ws-1',
     holderId: 'tab-owner',
@@ -133,11 +147,15 @@ function makeHub(overrides: { heads?: Map<string, string> } = {}): Fixture {
       commits.push({ path, markdown });
       heads.set(path, markdown);
     },
+    ephemera,
+    forwardEphemera: (signal) => {
+      if (signal.kind === 'cursor') forwarded.push(signal.payload);
+    },
     channel: bus.connect(),
     schedule: clock.schedule,
     cancelScheduled: clock.cancel,
   });
-  return { bus, clock, heads, commits, hub };
+  return { bus, ephemeraBus, ephemera, forwarded, clock, heads, commits, hub };
 }
 
 function makeJoin(fixture: Fixture, holderId = 'tab-follower'): LocalCollabJoin {
@@ -147,6 +165,7 @@ function makeJoin(fixture: Fixture, holderId = 'tab-follower'): LocalCollabJoin 
     selfLabel: 'Another tab',
     selfColor: '#8a63b8',
     channel: fixture.bus.connect(),
+    ephemeraChannel: fixture.ephemeraBus.connect(),
     schedule: fixture.clock.schedule,
     cancelScheduled: fixture.clock.cancel,
   });
@@ -248,6 +267,115 @@ defineCase('owner and follower editors converge both directions', async () => {
   assert(ownerEditor.text === followerEditor.text, 'editors must converge');
   join.close();
   await fixture.hub.close();
+});
+
+defineCase('generic ephemera bus carries roster and cursors while doc wire stays step-only', async () => {
+  const fixture = makeHub();
+  const join = makeJoin(fixture);
+  await tick();
+  const ownerSeed = await fixture.hub.seedFor('notes.md');
+  const followerSeed = await join.getSeed('notes.md');
+  const ownerBase = required(ownerSeed, 'owner needs a collab seed');
+  const followerBase = required(followerSeed, 'follower needs a collab seed');
+  const ownerEditor = makeEditor('owner-editor', ownerBase.markdown);
+  fixture.hub.controller.setActiveFile(ownerBase.fileId, ownerEditor.bridge, ownerBase.epoch);
+  const followerEditor = makeEditor('follower-editor', followerBase.markdown);
+  join.getController()!.setActiveFile(followerBase.fileId, followerEditor.bridge, followerBase.epoch);
+  await tick();
+
+  const ownerCursors: string[] = [];
+  const followerCursors: string[] = [];
+  fixture.hub.controller.setRemoteCursorSink((cursors) => {
+    ownerCursors.splice(0, ownerCursors.length, ...cursors.map((cursor) => cursor.clientID));
+  });
+  join.getController()!.setRemoteCursorSink((cursors) => {
+    followerCursors.splice(0, followerCursors.length, ...cursors.map((cursor) => cursor.clientID));
+  });
+  fixture.forwarded.splice(0);
+
+  // Follower → owner → authenticated room egress: this never appears as a
+  // `collab` cursor on the document BroadcastChannel.
+  join.getController()!.broadcastCursor(3);
+  await tick();
+  assert(ownerCursors.includes('tab-follower'), 'owner did not render follower cursor');
+  assert(fixture.forwarded.length === 1, 'follower cursor did not reach room egress once');
+
+  // Owner and remote-room cursors fan back to the follower through the same
+  // bounded bus, with the owner tab as the authenticated sender.
+  fixture.hub.controller.broadcastCursor(4);
+  await tick();
+  assert(followerCursors.includes('tab-owner'), 'follower did not render owner cursor');
+  fixture.ephemera.publish({
+    kind: 'cursor',
+    source: 'room',
+    payload: JSON.stringify({
+      kind: 'cursor',
+      cursor: { clientID: 'remote-reviewer', head: 5, label: 'Reviewer', color: '#123456' },
+    }),
+  });
+  await tick();
+  assert(followerCursors.includes('remote-reviewer'), 'follower did not render remote room cursor');
+
+  fixture.ephemera.publish({
+    kind: 'presence',
+    peers: [{ participantId: 'reviewer', deviceId: 'device-r', kind: 'reviewer', online: true }],
+  });
+  await tick();
+  assert(join.getState().peers[0]?.deviceId === 'device-r', 'follower did not receive room roster');
+  // A late follower needs the roster immediately. Its local document hello
+  // triggers a replay on the SAME generic ephemera bus; no roster crosses the
+  // document channel and no durable state is consulted.
+  const lateJoin = makeJoin(fixture, 'tab-late');
+  await tick();
+  assert(lateJoin.getState().status === 'live', 'late follower did not handshake');
+  assert(lateJoin.getState().peers[0]?.deviceId === 'device-r', 'late follower missed cached roster');
+  lateJoin.close();
+  join.close();
+  await fixture.hub.close();
+  fixture.ephemera.close();
+});
+
+defineCase('buffers a roster that arrives before the document hello elects its owner', async () => {
+  const documentBus = new FakeBus();
+  const ephemeraBus = new FakeBus();
+  const clock = new FakeClock();
+  const join = new LocalCollabJoin({
+    workspaceId: 'ws-ordered',
+    holderId: 'tab-follower',
+    selfLabel: 'Follower',
+    selfColor: '#8a63b8',
+    channel: documentBus.connect(),
+    ephemeraChannel: ephemeraBus.connect(),
+    schedule: clock.schedule,
+    cancelScheduled: clock.cancel,
+  });
+  const ephemera = new BrowserReviewEphemeraBus({
+    workspaceId: 'ws-ordered', senderId: 'tab-owner', channel: ephemeraBus.connect(),
+  });
+  // Different BroadcastChannels have no cross-channel ordering guarantee.
+  ephemera.publish({
+    kind: 'presence',
+    peers: [{ participantId: 'reviewer', deviceId: 'device-r', kind: 'reviewer', online: true }],
+  });
+  assert(join.getState().ownerHolderId === null, 'owner should not be elected before doc hello');
+  const hub = new LocalCollabHub({
+    workspaceId: 'ws-ordered',
+    holderId: 'tab-owner',
+    selfLabel: 'Owner',
+    selfColor: '#8a63b8',
+    readHeadMarkdown: async () => 'hello',
+    commitMarkdown: async () => undefined,
+    ephemera,
+    channel: documentBus.connect(),
+    schedule: clock.schedule,
+    cancelScheduled: clock.cancel,
+  });
+  await tick();
+  assert(join.getState().status === 'live', 'document hello did not elect owner');
+  assert(join.getState().peers[0]?.deviceId === 'device-r', 'pre-hello roster was lost');
+  join.close();
+  await hub.close();
+  ephemera.close();
 });
 
 defineCase('published room authority stays live for local follower tabs', async () => {

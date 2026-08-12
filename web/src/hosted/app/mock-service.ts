@@ -355,6 +355,8 @@ export class MockWorkspaceService implements WorkspaceAppService {
     return () => undefined;
   }
 
+  announceReviewActivity(): void {}
+
   async openReviewProjection(): Promise<ReviewProjectionHandle> {
     // The mock never has a real share; an inert projection keeps EditorShell's
     // lifecycle host uniform (attn-whdh).

@@ -178,7 +178,11 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
     const onMessage = (event: MessageEvent): void => {
       const message = event.data as Partial<WorkspaceChangeMessage> | null;
       if (!message || typeof message.workspaceId !== 'string') return;
-      if (message.kind !== 'content' && message.kind !== 'structure') return;
+      if (
+        message.kind !== 'content'
+        && message.kind !== 'structure'
+        && message.kind !== 'review'
+      ) return;
       if (message.senderId === tabHolderId) return;
       listener({
         workspaceId: message.workspaceId,
@@ -193,6 +197,10 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
   /** attn-whdh: the single review projection, any lease role. */
   async openReviewProjection(workspaceId: string): Promise<ReviewProjectionHandle> {
     return this.service.openReviewProjection(workspaceId);
+  }
+
+  announceReviewActivity(workspaceId: string): void {
+    this.announce({ workspaceId, kind: 'review' });
   }
 
   static async open(options: BrowserWorkspaceServiceOptions = {}): Promise<RealWorkspaceAppService> {

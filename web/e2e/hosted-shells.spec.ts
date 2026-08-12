@@ -69,6 +69,7 @@ test('landing one-click intent opens an untitled draft editor', async ({ page })
 });
 
 test('desktop editor reuses the native sidebar, editor, and review rail frame', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/app/w/ws-product/direction.md?shell=demo');
   await expect(page.locator('[data-slot="sidebar"]')).toBeVisible();
   await expect(page.locator('[data-path][data-active="true"]')).toContainText('direction.md');
@@ -90,6 +91,49 @@ test('desktop editor reuses the native sidebar, editor, and review rail frame', 
   await expect(page.locator('.review-history-placeholder')).toContainText(
     'Live review adds presence and replies; saved feedback stays here.',
   );
+  // Saved review has its own docked column. It must reflow the document rather
+  // than floating over its reading surface; closing remains explicit in the
+  // same header that opened it.
+  await expect(page.getByRole('button', { name: 'Hide saved review' })).toBeVisible();
+  const readingLayout = await page.evaluate(() => {
+    const documentSurface = document.querySelector<HTMLElement>('.hosted-native-document');
+    const rail = document.querySelector<HTMLElement>('[data-slot="right-rail"]');
+    if (!documentSurface || !rail) throw new Error('missing docked review layout');
+    const documentRect = documentSurface.getBoundingClientRect();
+    const railRect = rail.getBoundingClientRect();
+    return {
+      documentRight: documentRect.right,
+      documentWidth: documentRect.width,
+      railLeft: railRect.left,
+      railWidth: railRect.width,
+    };
+  });
+  expect(readingLayout.documentRight).toBeLessThanOrEqual(readingLayout.railLeft + 1);
+  expect(readingLayout.documentWidth).toBeGreaterThanOrEqual(600);
+  expect(readingLayout.railWidth).toBeGreaterThanOrEqual(300);
+  await page.screenshot({ path: 'test-results/hosted-saved-review-docked.png' });
+  // 1024px is still the desktop workspace (the phone layout begins below the
+  // app's 900px breakpoint). The dock must shrink the reading measure rather
+  // than force a horizontal canvas or slide back over the prose.
+  await page.setViewportSize({ width: 1024, height: 900 });
+  const compactReadingLayout = await page.evaluate(() => {
+    const documentSurface = document.querySelector<HTMLElement>('.hosted-native-document');
+    const rail = document.querySelector<HTMLElement>('[data-slot="right-rail"]');
+    if (!documentSurface || !rail) throw new Error('missing compact docked review layout');
+    const documentRect = documentSurface.getBoundingClientRect();
+    const railRect = rail.getBoundingClientRect();
+    return {
+      documentRight: documentRect.right,
+      documentWidth: documentRect.width,
+      railLeft: railRect.left,
+      railRight: railRect.right,
+      viewportWidth: window.innerWidth,
+    };
+  });
+  expect(compactReadingLayout.documentRight).toBeLessThanOrEqual(compactReadingLayout.railLeft + 1);
+  expect(compactReadingLayout.documentWidth).toBeGreaterThanOrEqual(340);
+  expect(compactReadingLayout.railRight).toBeLessThanOrEqual(compactReadingLayout.viewportWidth + 1);
+  await page.screenshot({ path: 'test-results/hosted-saved-review-docked-1024.png' });
   await expect(page.locator('.file-rail, .review-rail')).toHaveCount(0);
   await expectNoHorizontalScroll(page);
 });

@@ -91,6 +91,12 @@
         : 'collapsed'
       : reviewStore.railMode,
   );
+  // Reading wins over visual stability in the hosted owner workspace. A
+  // durable review is a deliberate secondary task; when it opens, reserve a
+  // real column for it rather than painting cards over the document. That
+  // means a line may reflow when the user explicitly chooses Saved review,
+  // but the document's visible reading column is never covered by feedback.
+  const dockedRailWidth = $derived(RAIL_WIDTH_PX[effectiveRailMode]);
 
   const rootPath = $derived(workspaceVirtualRoot(workspaceId));
   const activePath = $derived(
@@ -329,22 +335,24 @@
            centered; a stable anchored margin). Comments hug the document's
            right edge. -->
       <div aria-hidden="true" style="flex: 0 0 clamp(0.75rem, 3vw, 3.5rem);"></div>
-      <div class="flex-1" style="max-width: calc(var(--content-measure) + 4.5rem); min-width: min(100%, 44rem);">
+      <!-- `min-width: 0` is essential when the user opens a 320px dock at a
+           compact desktop width. The prose measure may reduce, but it cannot
+           keep its old 44rem minimum and push the review column behind the
+           app frame's overflow clip. -->
+      <div class="min-w-0 flex-1" style="max-width: calc(var(--content-measure) + 4.5rem);">
         {@render content()}
       </div>
       {#if railVisible}
-        <!-- The aside reserves ONLY the 48px marker gutter, permanently.
-             Review mode never widens it in flow: the card column renders as
-             an elevated overlay panel anchored to this aside's right edge
-             (.review-rail-panel in styles/base.css), sliding over the paper.
-             Document geometry is a pure function of the viewport — toggling
-             the rail never re-wraps a line of text
-             (planning/collab/review-band-stability.md, option A). -->
+        <!-- The collapsed rail is a compact, in-flow marker gutter. Opening
+             saved or live review expands this same column in flow: cards do
+             not sit over the paper, and the header keeps an explicit close
+             action in the user's eye-line. -->
         <aside
           class="right-rail sticky top-0 flex flex-col self-start"
-          style={`flex: 0 0 ${RAIL_WIDTH_PX.collapsed}px; height: ${railViewportHeight > 0 ? `${railViewportHeight}px` : '100dvh'};`}
+          style={`flex: 0 0 ${dockedRailWidth}px; height: ${railViewportHeight > 0 ? `${railViewportHeight}px` : '100dvh'};`}
           data-state={reviewStore.panelOpen ? 'open' : 'closed'}
           data-mode={effectiveRailMode}
+          data-layout="docked"
           data-slot="right-rail"
           aria-label="Review margin"
         >
@@ -355,6 +363,7 @@
             class="review-rail-panel mb-2 flex-1"
             style="--review-overlay-top: 0.5rem; --review-overlay-bottom: 0.5rem;"
             data-expanded={effectiveRailMode !== 'collapsed'}
+            data-layout="docked"
             id="saved-review-margin"
           >
             {#if reviewStore.railMode !== 'hidden' || savedHistoryOpen}
@@ -378,3 +387,16 @@
   panelOpen={reviewStore.panelOpen}
   railToggleInHeader={true}
 />
+
+<style>
+  /* This hosted frame owns its rail outside WorkspaceEditorFrame's scoped
+     styles, so restate the panel plane here. Apart from marking the dock as a
+     distinct reading surface, this keeps the saved-history text on a known,
+     high-contrast backdrop in both themes. */
+  .right-rail[data-layout='docked'] {
+    --rail-backdrop: var(--panel-surface);
+    color: var(--foreground);
+    background: var(--rail-backdrop);
+    border-left: 1px solid var(--panel-border);
+  }
+</style>

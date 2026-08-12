@@ -1405,7 +1405,8 @@
       data-error-kind={sessionState.error.kind}>
       <header
         class="flex min-h-11 shrink-0 items-center gap-2 border-b border-[var(--panel-border)] bg-[var(--header-surface)] px-4"
-        data-slot="browser-review-lifecycle-header"
+        data-slot="browser-review-header"
+        data-lifecycle="true"
       >
         <BrandMark size={18} />
         <span class="font-serif text-sm font-bold text-foreground">attn</span>
@@ -1425,7 +1426,7 @@
         {#if lifecycle.canPasteInvite}
           <div class="mt-7">
             <button
-              class="inline-flex min-h-11 items-center justify-center rounded-md bg-primary px-4 font-sans text-sm font-semibold text-primary-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              class="inline-flex min-h-[44px] items-center justify-center rounded-md bg-primary px-4 font-sans text-sm font-semibold text-primary-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
               type="button"
               aria-expanded={recoveryOpen}
               aria-controls="review-invite-recovery"
@@ -1443,7 +1444,7 @@
                 id="review-invite-input"
                 bind:this={recoveryInput}
                 bind:value={recoveryInvite}
-                class="min-h-11 min-w-0 rounded-md border border-input bg-background px-3 font-sans text-base text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                class="min-h-[44px] min-w-0 rounded-md border border-input bg-background px-3 font-sans text-base text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
                 type="url"
                 inputmode="url"
                 autocomplete="off"
@@ -1460,13 +1461,13 @@
               {/if}
               <div class="flex flex-wrap gap-3">
                 <button
-                  class="inline-flex min-h-11 items-center justify-center rounded-md bg-primary px-4 font-sans text-sm font-semibold text-primary-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                  class="inline-flex min-h-[44px] items-center justify-center rounded-md bg-primary px-4 font-sans text-sm font-semibold text-primary-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
                   type="submit"
                 >
                   Open review
                 </button>
                 <button
-                  class="inline-flex min-h-11 items-center justify-center rounded-md border border-border px-4 font-sans text-sm font-semibold text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  class="inline-flex min-h-[44px] items-center justify-center rounded-md border border-border px-4 font-sans text-sm font-semibold text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
                   type="button"
                   onclick={() => {
                     recoveryOpen = false;
@@ -1483,7 +1484,7 @@
         {#if lifecycle.canRetry}
           <div class="mt-4">
             <button
-              class="inline-flex min-h-11 items-center justify-center rounded-md border border-border px-4 font-sans text-sm font-semibold text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              class="inline-flex min-h-[44px] items-center justify-center rounded-md border border-border px-4 font-sans text-sm font-semibold text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
               type="button"
               onclick={() => window.location.reload()}
             >
@@ -1492,8 +1493,8 @@
           </div>
         {/if}
         <nav class="mt-8 flex flex-wrap gap-x-5 gap-y-3 font-sans text-sm" aria-label="Review recovery">
-          <a class="min-h-11 content-center text-primary underline underline-offset-4" href="/app">Your Desk</a>
-          <a class="min-h-11 content-center text-primary underline underline-offset-4" href="/">attn home</a>
+          <a class="inline-flex min-h-[44px] items-center text-primary underline underline-offset-4" href="/app">Your Desk</a>
+          <a class="inline-flex min-h-[44px] items-center text-primary underline underline-offset-4" href="/">attn home</a>
         </nav>
       </section>
     </div>
@@ -1503,7 +1504,8 @@
       data-status={sessionState.status}>
       <header
         class="flex min-h-11 shrink-0 items-center gap-2 border-b border-[var(--panel-border)] bg-[var(--header-surface)] px-4"
-        data-slot="browser-review-lifecycle-header"
+        data-slot="browser-review-header"
+        data-lifecycle="true"
       >
         <BrandMark size={18} />
         <span class="font-serif text-sm font-bold text-foreground">attn</span>

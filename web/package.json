@@ -25,6 +25,7 @@
     "test:e2e:storage": "playwright test --config playwright.storage.config.ts",
     "test:e2e:push": "playwright test --config playwright.push.config.ts",
     "test:share-owner:live": "tsx scripts/test-browser-share-owner-live.ts",
+    "test:share-ui:live": "tsx scripts/test-hosted-local-share-ui.ts",
     "build:sw": "vite build --config vite.sw.config.ts"
   },
   "dependencies": {

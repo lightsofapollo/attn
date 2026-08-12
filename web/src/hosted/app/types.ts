@@ -268,7 +268,11 @@ export interface LocalCollabJoinHandle {
  */
 export interface WorkspaceChange {
   workspaceId: string;
-  kind: 'content' | 'structure';
+  /**
+   * `review` carries no review plaintext: it is a cross-tab prompt for Desk
+   * to re-project the encrypted durable log and refresh its count pills.
+   */
+  kind: 'content' | 'structure' | 'review';
   path?: string;
 }
 
@@ -323,6 +327,12 @@ export interface WorkspaceAppService {
    * storage on delivery; the message itself carries no document content.
    */
   subscribeWorkspaceChanges(listener: (change: WorkspaceChange) => void): () => void;
+  /**
+   * Ring the advisory Desk doorbell after this tab's durable review
+   * projection changes. The receiving Desk always replays storage; the
+   * message itself contains neither review content nor event metadata.
+   */
+  announceReviewActivity(workspaceId: string): void;
   /**
    * Open the workspace review projection (attn-whdh): the ONE read path
    * every hosted tab — leader or follower — uses to materialize review

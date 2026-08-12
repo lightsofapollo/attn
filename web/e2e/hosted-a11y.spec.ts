@@ -52,6 +52,14 @@ test('axe: share sheet open', async ({ page }) => {
   await expectNoAxeViolations(page, 'share sheet');
 });
 
+test('axe: saved review docked beside the owner document', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto('/app/w/ws-product/direction.md?shell=demo');
+  await page.getByRole('button', { name: 'Saved review' }).click();
+  await expect(page.locator('.review-history-placeholder')).toBeVisible();
+  await expectNoAxeViolations(page, 'saved review dock');
+});
+
 test('axe: mobile editor with files sheet', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto('/app/w/ws-product/direction.md?shell=demo');

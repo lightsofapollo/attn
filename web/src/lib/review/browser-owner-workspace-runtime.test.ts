@@ -15,6 +15,7 @@ import {
   type BrowserOwnerWorkspaceAuthority,
   type BrowserOwnerWorkspaceRuntimeOptions,
 } from './browser-owner-workspace-runtime';
+import type { BrowserReviewEphemeraSignal } from './browser-review-ephemera';
 import type { CreateOwnedRoomOptions, OwnedRoomBootstrapV3 } from './browser-owner-bootstrap';
 import type {
   BrowserOwnerAuthorityFile,
@@ -340,6 +341,13 @@ class FakeAuthority implements BrowserOwnerWorkspaceAuthority {
 
   getState(): BrowserOwnerAuthorityState { return this.state; }
 
+  getBinding(pathOrFileId: string): BrowserOwnerAuthorityFile | null {
+    const binding = this.options.files.find(
+      (candidate) => candidate.path === pathOrFileId || candidate.fileId === pathOrFileId,
+    );
+    return binding ? { ...binding } : null;
+  }
+
   prepareTerminalEvent(body: Parameters<BrowserOwnerWorkspaceAuthority['prepareTerminalEvent']>[0]): AssembledBrowserEvent {
     const owner = this.options.owner;
     return assembleBrowserEvent({
@@ -368,10 +376,10 @@ class FakeAuthority implements BrowserOwnerWorkspaceAuthority {
   async resolveComment(_threadId: string): Promise<ReviewEvent> { throw new Error('not used'); }
   async retryOutbox(): Promise<void> {}
 
-  /** Presence bridge seam (attn-37f9) — recorded for cursor-tee assertions. */
+  /** Loss-only egress seam — recorded for cursor forwarding assertions. */
   readonly mirroredCursorPayloads: string[] = [];
-  mirrorCursorToRoom(payload: string): void {
-    this.mirroredCursorPayloads.push(payload);
+  sendEphemera(signal: BrowserReviewEphemeraSignal): void {
+    if (signal.kind === 'cursor') this.mirroredCursorPayloads.push(signal.payload);
   }
 
   /** Simulate the live transport dying under the authority (attn-hh9r):

@@ -16,9 +16,16 @@
 
 import type { Node as PmNode } from 'prosemirror-model';
 
-import { CollabController } from '../prosemirror/collab-controller';
+import { CollabController, parseCollabWireMessage } from '../prosemirror/collab-controller';
 import { LOCAL_COLLAB_CHANNEL_PREFIX, openBroadcastChannel } from '../tab-channels';
 import type { FileId } from '../types';
+import {
+  BrowserReviewEphemeraBus,
+  type BrowserReviewEphemeraChannel,
+  type BrowserReviewEphemeraMessage,
+  type BrowserReviewEphemeraPeer,
+  type BrowserReviewEphemeraSignal,
+} from './browser-review-ephemera';
 
 /** Primed by loadSeed (async, always ahead of any commit) so commitNow can stay
  *  synchronous while the module itself remains off the desk route. */
@@ -54,17 +61,17 @@ type LocalCollabBody =
       markdown: string;
     }
   | { kind: 'goodbye'; generation: string }
-  | { kind: 'collab'; generation: string; payload: string }
-  | { kind: 'presence'; generation: string; peers: LocalCollabPresencePeer[] };
+  | { kind: 'collab'; generation: string; payload: string };
 
 /** Room presence snapshot mirrored to follower tabs (attn-90qq): the leader
  * is the only tab holding a live session, so followers render the roster
  * from these broadcasts. Shape mirrors BrowserPeerPresence. */
-export interface LocalCollabPresencePeer {
-  participantId: string;
-  deviceId: string;
-  kind: 'owner' | 'reviewer' | 'agent';
-  online: boolean;
+export type LocalCollabPresencePeer = BrowserReviewEphemeraPeer;
+
+/** Cursor wires are accepted only after the canonical collab parser validates
+ * their bounded payload shape. */
+function isCursorPayload(payload: string): boolean {
+  return parseCollabWireMessage(payload)?.kind === 'cursor';
 }
 
 interface LocalCollabEnvelope {
@@ -161,19 +168,6 @@ function parseEnvelope(data: unknown, workspaceId: string): LocalCollabEnvelope 
         ? (envelope as LocalCollabEnvelope)
         : null;
     }
-    case 'presence': {
-      const presence = body as { generation?: unknown; peers?: unknown };
-      if (typeof presence.generation !== 'string' || !Array.isArray(presence.peers)) return null;
-      if (presence.peers.length > 64) return null;
-      const valid = presence.peers.every((peer) => {
-        const p = peer as Partial<LocalCollabPresencePeer>;
-        return typeof p.participantId === 'string' && p.participantId.length > 0 && p.participantId.length <= 256
-          && typeof p.deviceId === 'string' && p.deviceId.length > 0 && p.deviceId.length <= 256
-          && (p.kind === 'owner' || p.kind === 'reviewer' || p.kind === 'agent')
-          && typeof p.online === 'boolean';
-      });
-      return valid ? (envelope as LocalCollabEnvelope) : null;
-    }
     default:
       return null;
   }
@@ -192,11 +186,12 @@ export interface LocalCollabHubOptions extends TimerOptions {
   /** Durable fenced commit through the owner runtime's mutation queue. */
   commitMarkdown(path: string, markdown: string): Promise<void>;
   /**
-   * Presence relay to room peers (attn-37f9): called with a follower tab's
-   * raw cursor payload so the leader forwards it over its live session.
-   * Absent for the legacy (unshared) hub — presence stays tab-local there.
+   * The sole cross-tab presence transport. It is kept separate from this
+   * document channel so cursors/rosters can never turn into durable steps.
    */
-  forwardCursor?: (payload: string) => void;
+  ephemera?: BrowserReviewEphemeraBus | null;
+  /** Owner-only room egress for a follower tab's already-validated cursor. */
+  forwardEphemera?: (signal: BrowserReviewEphemeraSignal) => void;
   /** Active published-room controller. When present, local tabs join the same
    * authenticated authority instead of creating a parallel legacy authority. */
   controller?: CollabController;
@@ -216,30 +211,23 @@ export interface LocalCollabHubOptions extends TimerOptions {
  * reached first all read the same cached markdown, so every participant
  * seeds from an identical base.
  */
-/** Cheap kind probe — full validation happens in the receiving controller. */
-function isCursorPayload(payload: string): boolean {
-  try {
-    return (JSON.parse(payload) as { kind?: unknown }).kind === 'cursor';
-  } catch {
-    return false;
-  }
-}
-
 export class LocalCollabHub {
   readonly generation = randomGeneration();
   readonly controller: CollabController;
   private readonly options: LocalCollabHubOptions;
   private readonly channel: LocalCollabChannel | null;
   private readonly seeds = new Map<FileId, { markdown: string; doc: PmNode }>();
-  /** Last room-presence snapshot broadcast to followers (attn-90qq); re-sent
-   *  on every hello so late-joining tabs start with the current roster. */
-  private lastPresence: LocalCollabPresencePeer[] = [];
+  /** Latest room roster, retained only to answer a late local-tab handshake.
+   * It is republished through BrowserReviewEphemeraBus, never the document
+   * channel and never durable storage. */
+  private lastPresence: BrowserReviewEphemeraPeer[] = [];
   private readonly pendingCommits = new Map<FileId, unknown>();
   private readonly inflightCommits = new Set<Promise<void>>();
   private readonly seedRequests = new Map<string, Promise<LocalCollabSeed | null>>();
   private readonly schedule: LocalCollabSchedule;
   private readonly cancelScheduled: LocalCollabCancel;
   private readonly unsubscribeControllerSend: (() => void) | null;
+  private readonly unsubscribeEphemera: (() => void) | null;
   private closed = false;
 
   constructor(options: LocalCollabHubOptions) {
@@ -263,6 +251,7 @@ export class LocalCollabHub {
     this.unsubscribeControllerSend = options.controller
       ? this.controller.addSendListener((payload) => this.onControllerSend(payload))
       : null;
+    this.unsubscribeEphemera = options.ephemera?.subscribe((message) => this.onEphemera(message)) ?? null;
     if (this.channel) {
       this.channel.onmessage = (event) => this.onMessage(event.data);
     }
@@ -327,6 +316,7 @@ export class LocalCollabHub {
     await Promise.allSettled([...this.inflightCommits]);
     this.post({ kind: 'goodbye', generation: this.generation });
     this.unsubscribeControllerSend?.();
+    this.unsubscribeEphemera?.();
     if (this.channel) {
       this.channel.onmessage = null;
       this.channel.close();
@@ -334,6 +324,13 @@ export class LocalCollabHub {
   }
 
   private onControllerSend(payload: string): void {
+    // Cursor presence does not belong on the document channel. The generic
+    // ephemera bus fans this owner cursor to follower tabs; BrowserAuthority
+    // independently forwards it to remote room members.
+    if (isCursorPayload(payload)) {
+      this.options.ephemera?.publish({ kind: 'cursor', source: 'owner', payload });
+      return;
+    }
     this.post({ kind: 'collab', generation: this.generation, payload });
     // Every accepted batch flows through here as a broadcast — the durable
     // commit signal for files the owner's editor (and its autosave) does NOT
@@ -391,8 +388,11 @@ export class LocalCollabHub {
     const body = envelope.body;
     if (body.kind === 'hello-request') {
       this.post({ kind: 'hello', generation: this.generation });
+      // BroadcastChannel has no retained messages. Re-send the current roster
+      // through the generic loss-only bus after the follower is live so a late
+      // tab need not wait for a later authority status tick.
       if (this.lastPresence.length > 0) {
-        this.post({ kind: 'presence', generation: this.generation, peers: this.lastPresence });
+        this.options.ephemera?.publish({ kind: 'presence', peers: this.lastPresence });
       }
       return;
     }
@@ -411,39 +411,38 @@ export class LocalCollabHub {
       return;
     }
     if (body.kind === 'collab' && body.generation === this.generation) {
+      // The document bus accepts only document/replay messages. Cursor input
+      // arrives through BrowserReviewEphemeraBus, where source and size are
+      // validated separately.
+      if (isCursorPayload(body.payload)) return;
       this.controller.onInbound(body.payload, envelope.senderId);
-      // Cursor tee (attn-37f9): a follower's presence must also reach room
-      // peers through the leader's session — without this a second tab's
-      // caret rendered only inside this device's tabs.
-      if (this.options.forwardCursor && isCursorPayload(body.payload)) {
-        try {
-          this.options.forwardCursor(body.payload);
-        } catch {
-          // Presence is best-effort.
-        }
-      }
     }
   }
 
-  /**
-   * Room-presence mirror (attn-90qq): the leader's session roster, re-posted
-   * to follower tabs whenever it changes. Followers feed their PeerStrip
-   * from these snapshots — they have no session of their own.
-   */
-  broadcastPresence(peers: readonly LocalCollabPresencePeer[]): void {
+  private onEphemera(message: BrowserReviewEphemeraMessage): void {
     if (this.closed) return;
-    this.lastPresence = peers.slice(0, 64).map((peer) => ({ ...peer }));
-    this.post({ kind: 'presence', generation: this.generation, peers: this.lastPresence });
-  }
-
-  /**
-   * Relay→tabs presence mirror (attn-37f9): re-post a relay-borne cursor
-   * payload onto the tab channel so follower tabs render room peers' carets.
-   * Follower controllers dedupe by clientID, so re-delivery is idempotent.
-   */
-  mirrorCursorPayload(payload: string): void {
-    if (this.closed || !isCursorPayload(payload)) return;
-    this.post({ kind: 'collab', generation: this.generation, payload });
+    const signal = message.signal;
+    if (signal.kind === 'presence') {
+      // The runtime publishes roster snapshots from this owner tab. Retain a
+      // bounded copy only for the next LocalCollabJoin hello; no peer state is
+      // ever persisted or replayed through a review log.
+      if (message.senderId === this.options.holderId) {
+        this.lastPresence = signal.peers.map((peer) => ({ ...peer }));
+      }
+      return;
+    }
+    if (message.senderId === this.options.holderId) return;
+    // A local follower's cursor arrives here already structurally validated.
+    // It is consumed by the owner controller and, for a published room, sent
+    // once through the authenticated owner session. Room/owner cursors are
+    // only for follower rendering and are already handled by the authority.
+    if (signal.source !== 'local-tab') return;
+    this.controller.onInbound(signal.payload, message.senderId);
+    try {
+      this.options.forwardEphemera?.(signal);
+    } catch {
+      // Presence is best-effort by definition.
+    }
   }
 
   private post(body: LocalCollabBody): void {
@@ -476,6 +475,8 @@ export interface LocalCollabJoinOptions extends TimerOptions {
   selfLabel: string;
   selfColor: string;
   channel?: LocalCollabChannel | null;
+  /** Test seam for the generic cursor/presence bus. */
+  ephemeraChannel?: BrowserReviewEphemeraChannel | null;
 }
 
 /**
@@ -488,6 +489,8 @@ export interface LocalCollabJoinOptions extends TimerOptions {
 export class LocalCollabJoin {
   private readonly options: LocalCollabJoinOptions;
   private readonly channel: LocalCollabChannel | null;
+  private readonly ephemera: BrowserReviewEphemeraBus;
+  private readonly unsubscribeEphemera: () => void;
   private readonly subscribers = new Set<(state: LocalCollabJoinState) => void>();
   private readonly schedule: LocalCollabSchedule;
   private readonly cancelScheduled: LocalCollabCancel;
@@ -498,6 +501,10 @@ export class LocalCollabJoin {
     peers: [],
   };
   private controllerValue: CollabController | null = null;
+  /** A roster may arrive on the ephemera channel before this tab receives the
+   * document-channel hello. Keep one bounded advisory snapshot and apply it
+   * only if that hello names the same elected owner. */
+  private pendingPresence: { senderId: string; peers: LocalCollabPresencePeer[] } | null = null;
   private seedWaiters = new Map<string, Array<(seed: LocalCollabSeed | null) => void>>();
   private helloTimer: unknown = null;
   private helloDelayMs = HELLO_RETRY_MIN_MS;
@@ -511,6 +518,12 @@ export class LocalCollabJoin {
     this.channel = options.channel === undefined
       ? defaultChannel(options.workspaceId)
       : options.channel;
+    this.ephemera = new BrowserReviewEphemeraBus({
+      workspaceId: options.workspaceId,
+      senderId: options.holderId,
+      ...(options.ephemeraChannel === undefined ? {} : { channel: options.ephemeraChannel }),
+    });
+    this.unsubscribeEphemera = this.ephemera.subscribe((message) => this.onEphemera(message));
     if (this.channel) {
       this.channel.onmessage = (event) => this.onMessage(event.data);
       this.requestHello();
@@ -561,6 +574,8 @@ export class LocalCollabJoin {
     this.helloTimer = null;
     this.dropAllSeedWaiters();
     this.controllerValue = null;
+    this.unsubscribeEphemera();
+    this.ephemera.close();
     if (this.channel) {
       this.channel.onmessage = null;
       this.channel.close();
@@ -586,7 +601,13 @@ export class LocalCollabJoin {
     this.dropAllSeedWaiters();
     this.controllerValue = new CollabController({
       isOwner: false,
-      send: (payload) => this.post({ kind: 'collab', generation, payload }),
+      send: (payload) => {
+        if (isCursorPayload(payload)) {
+          this.ephemera.publish({ kind: 'cursor', source: 'local-tab', payload });
+          return;
+        }
+        this.post({ kind: 'collab', generation, payload });
+      },
       selfClientId: this.options.holderId,
       selfLabel: this.options.selfLabel,
       selfColor: this.options.selfColor,
@@ -594,10 +615,15 @@ export class LocalCollabJoin {
       isAuthorityDevice: (deviceId) => deviceId === ownerHolderId,
     });
     this.patchState({ status: 'live', generation, ownerHolderId, peers: [] });
+    if (this.pendingPresence?.senderId === ownerHolderId) {
+      this.patchState({ peers: this.pendingPresence.peers });
+    }
+    this.pendingPresence = null;
   }
 
   private becomeDisconnected(): void {
     this.controllerValue = null;
+    this.pendingPresence = null;
     this.dropAllSeedWaiters();
     this.patchState({ status: 'connecting', generation: null, ownerHolderId: null, peers: [] });
     this.helloDelayMs = HELLO_RETRY_MIN_MS;
@@ -637,11 +663,6 @@ export class LocalCollabJoin {
         this.controllerValue?.onInbound(body.payload, envelope.senderId);
         return;
       }
-      case 'presence': {
-        if (body.generation !== this.stateValue.generation) return;
-        this.patchState({ peers: body.peers });
-        return;
-      }
       default:
         return;
     }
@@ -678,6 +699,31 @@ export class LocalCollabJoin {
     this.stateValue = { ...this.stateValue, ...patch };
     const snapshot = this.getState();
     for (const subscriber of this.subscribers) subscriber(snapshot);
+  }
+
+  private onEphemera(message: BrowserReviewEphemeraMessage): void {
+    if (this.closed || message.senderId === this.options.holderId) return;
+    const signal = message.signal;
+    if (signal.kind === 'presence') {
+      // Only the elected document authority may mirror the room roster.
+      if (message.senderId === this.stateValue.ownerHolderId) {
+        this.patchState({ peers: [...signal.peers] });
+      } else if (this.stateValue.ownerHolderId === null) {
+        // BroadcastChannel delivery order is independent across channel names;
+        // retain one snapshot until the document-channel hello authenticates
+        // which tab is the owner for this generation.
+        this.pendingPresence = { senderId: message.senderId, peers: [...signal.peers] };
+      }
+      return;
+    }
+    // Only the owner tab can authenticate and relay remote room/owner
+    // presence to this follower. A local-tab cursor is owner-bound only.
+    if (
+      (signal.source === 'room' || signal.source === 'owner')
+      && message.senderId === this.stateValue.ownerHolderId
+    ) {
+      this.controllerValue?.onInbound(signal.payload, message.senderId);
+    }
   }
 
   private post(body: LocalCollabBody): void {

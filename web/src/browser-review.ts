@@ -28,10 +28,12 @@ import {
   recoverStrippedShareInvite,
   type ParsedShareInvite,
 } from './lib/review/browser-share';
+import { parseReviewRoute, type ReviewRoute } from './lib/hosted/routes';
 
 async function bootstrapHostedReview(): Promise<void> {
-  const durablePath = /^\/s\/([A-Za-z0-9_-]+)\/?$/u.test(window.location.pathname);
-  if (durablePath) return bootstrapDurableShare();
+  const route = parseReviewRoute(window.location.pathname);
+  if (!route) throw new Error('invalid hosted review route');
+  if (route.view === 'share') return bootstrapDurableShare(route);
   let parsedInvite: ParsedInvite | undefined;
   let inviteError: string | undefined;
   const hadFragment = window.location.hash.length > 1;
@@ -61,7 +63,7 @@ async function bootstrapHostedReview(): Promise<void> {
         relayUrl,
         parsedInvite,
         inviteError,
-        rememberedRoomId: roomIdFromReviewPath(window.location.pathname),
+        rememberedRoomId: route.roomId,
       },
     });
   } catch (error) {
@@ -70,7 +72,7 @@ async function bootstrapHostedReview(): Promise<void> {
   }
 }
 
-async function bootstrapDurableShare(): Promise<void> {
+async function bootstrapDurableShare(route: Extract<ReviewRoute, { view: 'share' }>): Promise<void> {
   let invite: ParsedShareInvite | null = null;
   try {
     const relayUrl = resolveBrowserRelayUrl(
@@ -83,8 +85,7 @@ async function bootstrapDurableShare(): Promise<void> {
     const target = document.getElementById('app');
     if (!target) throw new Error('missing browser review mount element');
     target.style.display = '';
-    const pathId = window.location.pathname.match(/^\/s\/([A-Za-z0-9_-]+)\/?$/u)?.[1];
-    if (!pathId) throw new Error('invalid durable share path');
+    const pathId = route.shareId;
     // Fragment present → normal join (stashes the key in history.state).
     // Fragmentless → the key this tab stashed before a reload, then the
     // bearer secret auto-remembered on a previous keyed join (boots the
@@ -123,11 +124,6 @@ async function bootstrapDurableShare(): Promise<void> {
     invite?.linkSecret.fill(0);
     throw error;
   }
-}
-
-function roomIdFromReviewPath(pathname: string): string | undefined {
-  const match = pathname.match(/^\/review\/([A-Za-z0-9_-]+)\/?$/u);
-  return match?.[1];
 }
 
 void bootstrapHostedReview().catch((error: unknown) => {

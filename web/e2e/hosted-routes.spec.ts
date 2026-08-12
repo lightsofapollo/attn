@@ -187,11 +187,34 @@ test('capture landing screenshots for design review', async ({ page }) => {
   await page.screenshot({ path: 'test-results/landing-iphone-light.png', fullPage: true });
 });
 
-test('unknown paths fall back to the landing entry', async ({ page }) => {
+test('unknown paths return a branded, keyboard-accessible 404 recovery page', async ({ page }) => {
   const response = await page.goto('/no-such-page');
-  expect(response?.status()).toBe(200);
-  await expect(page.locator('body[data-route="landing"]')).toBeVisible();
+  expect(response?.status()).toBe(404);
+  await expect(page.locator('body[data-route="not-found"]')).toBeVisible();
+  const heading = page.getByRole('heading', { name: 'That page isn’t here.' });
+  await expect(heading).toBeVisible();
+  await expect(heading).toBeFocused();
+  const desk = page.getByRole('link', { name: 'Go to your desk' });
+  await desk.focus();
+  await expect(desk).toBeFocused();
+  await expect(page.getByRole('link', { name: 'Go home' })).toHaveAttribute('href', '/');
 });
+
+for (const malformedPath of [
+  '/app/w',
+  '/app/w/ws-product/%E0%A4',
+  '/review',
+  '/review/room-e2e-canary/extra',
+  '/s/short',
+  '/s/AAAAAAAAAAAAAAAAAAAAAA/',
+]) {
+  test(`malformed hosted route ${malformedPath} returns the not-found recovery`, async ({ page }) => {
+    const response = await page.goto(malformedPath);
+    expect(response?.status()).toBe(404);
+    await expect(page.locator('body[data-route="not-found"]')).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Go to your desk' })).toBeVisible();
+  });
+}
 
 for (const [path, view, headingHint] of [
   ['/app', 'home', 'Your desk'],

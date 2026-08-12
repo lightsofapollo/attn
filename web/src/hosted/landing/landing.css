@@ -168,37 +168,24 @@ p {
   font: 1.18rem/1.6 var(--sans);
 }
 
+/* The promise is one sentence in the activation moment. The detailed,
+   sourced ledger appears later behind its own disclosure. */
+.hero-security {
+  max-width: 52ch;
+  margin: 1rem 0 0;
+  color: var(--hosted-muted);
+  font: 0.92rem/1.55 var(--sans);
+}
+
+.hero-security strong {
+  color: var(--ink);
+}
+
 .hero-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 0.65rem;
   margin-top: 2rem;
-}
-
-.local-note {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.75rem;
-  max-width: 620px;
-  margin-top: 1.35rem;
-  color: var(--hosted-muted);
-  font: 0.75rem/1.5 var(--sans);
-}
-
-.local-note span {
-  display: flex;
-  align-items: flex-start;
-  gap: 0.42rem;
-}
-
-.local-note span::before {
-  content: '';
-  flex: 0 0 auto;
-  width: 6px;
-  height: 6px;
-  margin-top: 0.23rem;
-  border-radius: 99px;
-  background: var(--hosted-muted);
 }
 
 .product-stage {
@@ -318,9 +305,20 @@ p {
   background: var(--rust);
 }
 
-.entry-strip {
+.secondary-start {
   max-width: 1300px;
   margin: 0 auto 8rem;
+}
+
+.secondary-start-label {
+  margin: 0 0 0.65rem;
+  color: var(--hosted-muted);
+  font: 600 0.7rem/1.2 var(--sans);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.entry-strip {
   display: grid;
   /* minmax(0,…) so tracks can shrink below their content's min-content width.
      Bare `1fr` floors at min-content, which is what pushed 200% text to 574px
@@ -372,6 +370,7 @@ p {
   font-size: clamp(1.35rem, 2.1vw, 1.7rem);
   font-weight: 600;
   line-height: 1.1;
+  overflow-wrap: break-word;
 }
 
 .entry p {
@@ -614,11 +613,29 @@ p {
   font: 0.79rem var(--mono);
 }
 
-/* Only the command scrolls; the copy button holds its place. */
-.code > span {
+/* Only the command scrolls; the copy button holds its place. This is a
+   focusable scroll region, so keyboard users get the same full command as
+   pointer users instead of a clipped, unoperable line at high text scale. */
+.code-command {
+  display: block;
   min-width: 0;
+  width: 100%;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  appearance: none;
+  background: transparent;
+  color: inherit;
+  font: inherit;
   overflow-x: auto;
   white-space: pre;
+  scrollbar-width: thin;
+  scrollbar-color: var(--hosted-muted) transparent;
+}
+
+.code-command:focus-visible {
+  outline: 2px solid var(--rust);
+  outline-offset: 3px;
 }
 
 .code-copy {
@@ -849,11 +866,6 @@ footer {
     flex: 1 1 10rem;
   }
 
-  .local-note {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 0.45rem;
-  }
-
   .product-stage {
     min-height: 390px;
     margin-top: 3.5rem;
@@ -878,9 +890,12 @@ footer {
     bottom: -10px;
   }
 
+  .secondary-start {
+    margin: 0 1rem 5rem;
+  }
+
   .entry-strip {
     grid-template-columns: minmax(0, 1fr);
-    margin: 0 1rem 5rem;
   }
 
   .entry {
@@ -947,9 +962,55 @@ footer {
    the contrast: a reader checking an E2EE promise wants the "cannot" list beside
    the "can" list, not a paragraph. Set in the reading face — this is prose to be
    read, not chrome to be operated. */
-.relay-ledger {
+.security-guarantee {
   max-width: 1180px;
   margin: 4rem auto 0;
+  padding-top: 2rem;
+  border-top: 1px solid var(--rule);
+}
+
+.security-guarantee > p {
+  max-width: 62ch;
+  margin: 0;
+  color: var(--hosted-muted);
+  font: 1rem/1.6 var(--sans);
+}
+
+.security-guarantee > p strong {
+  color: var(--ink);
+}
+
+.threat-model {
+  margin-top: 1rem;
+}
+
+.threat-model summary {
+  display: list-item;
+  width: fit-content;
+  min-height: 44px;
+  padding: 0.65rem 0.8rem 0.65rem 0.25rem;
+  color: var(--ink);
+  cursor: pointer;
+  font: 600 0.9rem/1.35 var(--sans);
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+.threat-model summary::marker {
+  color: var(--rust);
+}
+
+.threat-model summary:focus-visible {
+  outline: 2px solid var(--rust);
+  outline-offset: 3px;
+}
+
+.threat-model[open] summary {
+  margin-bottom: 0.9rem;
+}
+
+.relay-ledger {
+  margin: 0;
   padding: clamp(2rem, 4vw, 3rem);
   border: 1px solid var(--rule);
   border-radius: 10px;

@@ -16,7 +16,7 @@
   "assets": {
     "binding": "ASSETS",
     "directory": "./dist-browser",
-    "not_found_handling": "single-page-application",
+    "not_found_handling": "none",
     "run_worker_first": true
   }
 }

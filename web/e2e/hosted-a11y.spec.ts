@@ -77,6 +77,59 @@ test('keyboard-only: landing reaches both CTAs', async ({ browserName, page }) =
   await expect(openDesk).toBeFocused();
 });
 
+test('landing keeps its security proof disclosed and its install command keyboard-readable', async ({ page }) => {
+  await page.setViewportSize({ width: 320, height: 700 });
+  await page.goto('/');
+
+  const hero = page.locator('.hero');
+  await expect(hero.locator('.button.primary')).toHaveCount(1);
+  await expect(hero.locator('a[data-action]')).toHaveCount(2);
+  await expect(page.locator('.site-nav .button.primary')).toHaveCount(0);
+  await expect(page.locator('.secondary-start')).toContainText('Other ways to begin');
+  await expect(page.locator('.secondary-start .button.primary')).toHaveCount(0);
+
+  const threatModel = page.locator('details.threat-model');
+  await expect(threatModel).toHaveJSProperty('open', false);
+  await page
+    .getByRole('textbox', { name: 'Install command: brew install lightsofapollo/attn/attn' })
+    .scrollIntoViewIfNeeded();
+  await page.getByText('Read the threat model', { exact: true }).click();
+  await expect(threatModel).toHaveJSProperty('open', true);
+  await expect(threatModel.getByRole('link', { name: 'relay-spec.md' })).toBeVisible();
+  await expect(threatModel.getByRole('link', { name: 'security-review.md' })).toBeVisible();
+
+  // A 200% root text scale makes the command wider than a narrow viewport.
+  // The focusable command must still expose the clipped tail by keyboard.
+  await page.evaluate(() => {
+    document.documentElement.style.fontSize = '200%';
+  });
+  const command = page.getByRole('textbox', {
+    name: 'Install command: brew install lightsofapollo/attn/attn',
+  });
+  for (const width of [320, 390]) {
+    await page.setViewportSize({ width, height: 700 });
+    await command.evaluate((element) => element.scrollTo({ left: 0, behavior: 'auto' }));
+    await expect.poll(() => command.evaluate((element) => element.scrollWidth > element.clientWidth)).toBe(true);
+    await command.focus();
+    await page.keyboard.press('ArrowRight');
+    await expect.poll(() => command.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+    await page.keyboard.press('End');
+    await expect.poll(() => command.evaluate((element) => element.scrollLeft)).toBeGreaterThan(0);
+    expect(
+      await page.evaluate(() => {
+        const root = document.scrollingElement;
+        return root ? root.scrollWidth - root.clientWidth : 0;
+      }),
+    ).toBe(0);
+  }
+
+  await expect(command).toHaveValue('brew install lightsofapollo/attn/attn');
+  const copy = page.locator('.native-section .code-copy').first();
+  await page.context().grantPermissions(['clipboard-write']);
+  await copy.click();
+  await expect(copy).toHaveAttribute('data-state', 'copied');
+});
+
 test('keyboard-only: share sheet opens, traps start focus, and closes', async ({ page }) => {
   await page.goto('/app/w/ws-product/direction.md?shell=demo');
   const share = page.getByRole('button', { name: 'Share for review' });
@@ -136,10 +189,10 @@ test('authoring controls move focus into transient inputs and restore it on canc
   await fileRow.click({ button: 'right' });
   const deleteFile = page.getByRole('menuitem', { name: 'Delete…', exact: true });
   await deleteFile.click();
-  const deleteDialog = page.getByRole('alertdialog', { name: /Delete untitled\.md/u });
-  await expect(deleteDialog.getByRole('button', { name: 'Cancel' })).toBeFocused();
+  const deleteConfirmation = page.getByRole('group', { name: /Delete untitled\.md/u });
+  await expect(deleteConfirmation.getByRole('button', { name: 'Cancel' })).toBeFocused();
   await page.keyboard.press('Escape');
-  await expect(deleteDialog).not.toBeVisible();
+  await expect(deleteConfirmation).not.toBeVisible();
   await expect(fileRow).toBeFocused();
 });
 

@@ -11,6 +11,7 @@ web/playwright-report/
 web/test-results/
 web/src/lib/icons/vscode-generated/
 web/src/lib/vscode-icon-map.generated.ts
+web/src/lib/vscode-icon-packs/
 
 # wrangler dev state
 web/.wrangler/

@@ -73,6 +73,9 @@
     type BrowserCollabDelivery,
     type BrowserSessionState,
   } from './lib/review/browser-session';
+  import { parseInviteUrl } from './lib/review/browser-invite';
+  import { parseShareInvite } from './lib/review/browser-share';
+  import { reviewerLifecyclePresentation } from './lib/review/reviewer-lifecycle';
   import type { DurableShareBrowserSessionFacade, RememberedPushShareSessionFacade } from './lib/review/browser-share-production';
   import type { BrowserPushConsentState } from './lib/review/browser-push-consent';
   import { CollabController } from './lib/prosemirror/collab-controller';
@@ -451,15 +454,17 @@
   }
 
   void session.start().catch((err: unknown) => {
-    const message = err instanceof Error ? err.message : String(err);
     const revoked = err instanceof Error && err.name === 'ShareGoneError';
+    // State retains a safe generic explanation. Do not write relay or
+    // capability diagnostics to the browser console.
+    console.error('[attn] hosted reviewer start failed');
     session.close();
     // start() should never throw — but if it does, surface a terminal error
     // so the UI is not stuck in `connecting`.
     sessionState = {
       ...sessionState,
       status: 'error',
-      error: { kind: revoked ? 'share_revoked' : 'network', message },
+      error: { kind: revoked ? 'share_revoked' : 'network', message: 'connection failed' },
     };
   });
 
@@ -1344,29 +1349,38 @@
       sessionState.status === 'connecting' ||
       (sessionState.status === 'connected' && displayedContent === null),
   );
+  const lifecycle = $derived(reviewerLifecyclePresentation(sessionState.error));
+  let recoveryOpen = $state(false);
+  let recoveryInvite = $state('');
+  let recoveryError = $state<string | null>(null);
+  let recoveryInput = $state<HTMLInputElement | undefined>();
+  $effect(() => {
+    if (recoveryOpen) recoveryInput?.focus();
+  });
 
-  const errorMessage = $derived(formatError(sessionState.error));
+  function openInviteRecovery(): void {
+    recoveryError = null;
+    recoveryOpen = true;
+  }
 
-  function formatError(err: BrowserSessionState['error']): string | null {
-    if (!err) return null;
-    switch (err.kind) {
-      case 'invite_invalid':
-        return 'Invalid invite link';
-      case 'admission_rejected':
-        return 'Access denied';
-      case 'room_deleted':
-        return 'This review room has been deleted';
-      case 'room_expired':
-        return 'This review room has expired';
-      case 'cursor_too_old':
-        return 'Session expired — please re-open the invite link';
-      case 'share_revoked':
-        return 'This review has ended';
-      case 'device_register':
-      case 'network':
-      default:
-        return 'Could not reach the review relay';
+  function submitInviteRecovery(event: SubmitEvent): void {
+    event.preventDefault();
+    const value = recoveryInvite.trim();
+    try {
+      // A complete browser review or durable-share link may recover this
+      // state. Validate it first without persisting or exposing its fragment.
+      try {
+        parseInviteUrl(value);
+      } catch {
+        parseShareInvite(value);
+      }
+    } catch {
+      recoveryError = 'Paste the complete attn review link, including the part after #.';
+      return;
     }
+    // Do not persist, log, or render the capability. BrowserSession strips the
+    // fragment synchronously after this navigation and keeps it in memory.
+    window.location.assign(value);
   }
 </script>
 
@@ -1386,17 +1400,126 @@
   data-live-editing={reviewerAvailability.liveEditing ? 'true' : 'false'}
 >
   {#if sessionState.error}
-    <div class="browser-review-error flex h-full flex-col items-center justify-center gap-3 px-6 text-center"
+    <div class="browser-review-lifecycle flex h-full min-h-0 flex-col overflow-auto"
       data-slot="browser-review-error"
       data-error-kind={sessionState.error.kind}>
-      <p class="text-base font-medium text-foreground">{errorMessage}</p>
-      <p class="text-sm text-muted-foreground">{sessionState.error.message}</p>
+      <header
+        class="flex min-h-11 shrink-0 items-center gap-2 border-b border-[var(--panel-border)] bg-[var(--header-surface)] px-4"
+        data-slot="browser-review-lifecycle-header"
+      >
+        <BrandMark size={18} />
+        <span class="font-serif text-sm font-bold text-foreground">attn</span>
+        <span class="h-3 w-px bg-border" aria-hidden="true"></span>
+        <span class="font-sans text-meta font-medium text-foreground">Review</span>
+      </header>
+      <section class="m-auto w-full max-w-xl px-6 py-12 sm:px-10" aria-labelledby="review-lifecycle-title">
+        <p class="m-0 font-sans text-label text-muted-foreground">Review invitation</p>
+        <h1 id="review-lifecycle-title" class="mt-3 font-serif text-3xl font-semibold tracking-tight text-foreground">
+          {lifecycle.title}
+        </h1>
+        <p class="mt-3 max-w-[42ch] font-sans text-base leading-7 text-muted-foreground">{lifecycle.diagnosis}</p>
+        <p class="mt-4 max-w-[48ch] border-t border-border pt-4 font-sans text-sm leading-6 text-muted-foreground">
+          {lifecycle.privacyNote}
+        </p>
+
+        {#if lifecycle.canPasteInvite}
+          <div class="mt-7">
+            <button
+              class="inline-flex min-h-11 items-center justify-center rounded-md bg-primary px-4 font-sans text-sm font-semibold text-primary-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              type="button"
+              aria-expanded={recoveryOpen}
+              aria-controls="review-invite-recovery"
+              onclick={openInviteRecovery}
+            >
+              Paste complete link
+            </button>
+          </div>
+          {#if recoveryOpen}
+            <form id="review-invite-recovery" class="mt-4 grid gap-3" onsubmit={submitInviteRecovery}>
+              <label class="font-sans text-sm font-medium text-foreground" for="review-invite-input">
+                Complete review link
+              </label>
+              <input
+                id="review-invite-input"
+                bind:this={recoveryInput}
+                bind:value={recoveryInvite}
+                class="min-h-11 min-w-0 rounded-md border border-input bg-background px-3 font-sans text-base text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                type="url"
+                inputmode="url"
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+                aria-describedby="review-invite-help review-invite-error"
+                required
+              />
+              <p id="review-invite-help" class="m-0 font-sans text-sm leading-6 text-muted-foreground">
+                Include everything after #. It is used only in this browser.
+              </p>
+              {#if recoveryError}
+                <p id="review-invite-error" class="m-0 font-sans text-sm text-destructive" role="alert">{recoveryError}</p>
+              {/if}
+              <div class="flex flex-wrap gap-3">
+                <button
+                  class="inline-flex min-h-11 items-center justify-center rounded-md bg-primary px-4 font-sans text-sm font-semibold text-primary-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                  type="submit"
+                >
+                  Open review
+                </button>
+                <button
+                  class="inline-flex min-h-11 items-center justify-center rounded-md border border-border px-4 font-sans text-sm font-semibold text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  type="button"
+                  onclick={() => {
+                    recoveryOpen = false;
+                    recoveryInvite = '';
+                    recoveryError = null;
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          {/if}
+        {/if}
+        {#if lifecycle.canRetry}
+          <div class="mt-4">
+            <button
+              class="inline-flex min-h-11 items-center justify-center rounded-md border border-border px-4 font-sans text-sm font-semibold text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              type="button"
+              onclick={() => window.location.reload()}
+            >
+              Retry connection
+            </button>
+          </div>
+        {/if}
+        <nav class="mt-8 flex flex-wrap gap-x-5 gap-y-3 font-sans text-sm" aria-label="Review recovery">
+          <a class="min-h-11 content-center text-primary underline underline-offset-4" href="/app">Your Desk</a>
+          <a class="min-h-11 content-center text-primary underline underline-offset-4" href="/">attn home</a>
+        </nav>
+      </section>
     </div>
   {:else if isLoading}
-    <div class="browser-review-loading flex h-full flex-col items-center justify-center gap-2 text-muted-foreground"
+    <div class="browser-review-lifecycle flex h-full min-h-0 flex-col overflow-auto"
       data-slot="browser-review-loading"
       data-status={sessionState.status}>
-      <p class="text-sm">Loading review…</p>
+      <header
+        class="flex min-h-11 shrink-0 items-center gap-2 border-b border-[var(--panel-border)] bg-[var(--header-surface)] px-4"
+        data-slot="browser-review-lifecycle-header"
+      >
+        <BrandMark size={18} />
+        <span class="font-serif text-sm font-bold text-foreground">attn</span>
+        <span class="h-3 w-px bg-border" aria-hidden="true"></span>
+        <span class="font-sans text-meta font-medium text-foreground">Review</span>
+      </header>
+      <section class="m-auto w-full max-w-xl px-6 py-12 sm:px-10" aria-labelledby="review-lifecycle-title" aria-live="polite">
+        <p class="m-0 font-sans text-label text-muted-foreground">Review invitation</p>
+        <h1 id="review-lifecycle-title" class="mt-3 font-serif text-3xl font-semibold tracking-tight text-foreground">
+          {lifecycle.title}
+        </h1>
+        <p class="mt-3 max-w-[42ch] font-sans text-base leading-7 text-muted-foreground">{lifecycle.diagnosis}</p>
+        <p class="mt-4 max-w-[48ch] border-t border-border pt-4 font-sans text-sm leading-6 text-muted-foreground">
+          {lifecycle.privacyNote}
+        </p>
+      </section>
     </div>
   {:else}
     <div class="browser-review-body flex min-h-0 flex-1 flex-row overflow-hidden">
@@ -1459,7 +1582,7 @@
 
               <button
                 type="button"
-                class="inline-flex h-7 items-center gap-1 rounded-md border px-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 {reviewStore.panelOpen
+                class="browser-review-rail-toggle inline-flex h-7 items-center gap-1 rounded-md border px-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 {reviewStore.panelOpen
                   ? 'border-primary/35 bg-primary/10 text-primary hover:bg-primary/15'
                   : 'border-transparent text-muted-foreground hover:bg-accent hover:text-foreground'}"
                 data-slot="browser-review-rail-toggle"
@@ -1688,3 +1811,12 @@
     onSubmit={collapseComposeSelection}
   />
 {/if}
+
+<style>
+  @media (pointer: coarse) {
+    .browser-review-rail-toggle {
+      min-width: 44px;
+      min-height: 44px;
+    }
+  }
+</style>

@@ -241,6 +241,13 @@
   // Promoted-manifest path → fileId map from the review-log watcher: the
   // follower's substitute for the leader-only authority bindings.
   let reviewLogBindings = $state<Array<{ path: string; fileId: string }>>([]);
+  // The storage-backed projection is the source for a real review. Demo
+  // content is presentation-only, retained only as a seeded history state
+  // when no real room exists.
+  let reviewProjectionState = $state<'idle' | 'ready' | 'failed'>('idle');
+  const durableReviewHistory = $derived(
+    Boolean(reviewStoreRef?.currentRoomId) && reviewProjectionState === 'ready',
+  );
 
   // ————— multi-file rail state (attn-7xl.3.4) —————
   let addingMarkdown = $state(false);
@@ -267,6 +274,8 @@
   let docTitle = $state('');
   let showDocTitle = $state(false);
 
+  // A review thread is durable work; “live” describes the connection below,
+  // not whether this count or its history exists.
   const reviewCount = $derived(
     reviewRoomActive && reviewStoreRef
       ? reviewStoreRef.roomActiveThreadCount
@@ -1370,13 +1379,17 @@
       // threads have no component to render into.
       unsubscribe = handle.subscribe((state) => {
         reviewLogBindings = [...state.bindings];
+        reviewProjectionState = state.replay;
         if (state.roomId !== null) void ensureEditorGraph(true);
       });
-    }).catch(() => undefined);
+    }).catch(() => {
+      reviewProjectionState = 'failed';
+    });
     return () => {
       cancelled = true;
       unsubscribe?.();
       projection?.close();
+      reviewProjectionState = 'idle';
     };
   });
 
@@ -2380,6 +2393,15 @@
       paletteOpen = !paletteOpen;
       return;
     }
+    // File deletion is deliberately an inline tree confirmation rather than a
+    // modal dialog. Keep Escape recovery explicit so keyboard users return to
+    // the active file row instead of a transient destructive state.
+    if (event.key === 'Escape' && confirmingEntryDelete) {
+      event.preventDefault();
+      confirmingEntryDelete = false;
+      focusSidebarAnchor('[data-path][data-active="true"]');
+      return;
+    }
     // Escape steps back from a click-opened thread (collapse expanded
     // resolved card → clear focus → re-hide click-revealed cards). Never
     // while a modal or a text field owns the keyboard, and never while
@@ -2925,22 +2947,24 @@
         }}
       />
     {:else if confirmingEntryDelete && activeEntry}
-      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
       <div
         class="hosted-delete-confirm"
-        role="alertdialog"
-        aria-label={`Delete ${activeEntry.path}?`}
-        onkeydown={(event) => {
-          if (event.key !== 'Escape') return;
-          event.stopPropagation();
-          confirmingEntryDelete = false;
-          focusSidebarAnchor('[data-path][data-active="true"]');
-        }}
+        role="group"
+        aria-label={`Delete ${activeEntry.path}`}
       >
-        <span>Delete {activeEntry.path}?</span>
+        <span role="status">Delete {activeEntry.path}?</span>
         <div>
-          <!-- Safe action takes initial focus: Enter must never destroy. -->
-          <button use:autofocus type="button" onclick={() => (confirmingEntryDelete = false)}>Cancel</button>
+          <!-- This is an inline tree confirmation, not a modal. Safe action
+               gets focus and both it and the global Escape path return to the
+               active-file tree row; no fake dialog contract remains. -->
+          <button
+            use:autofocus
+            type="button"
+            onclick={() => {
+              confirmingEntryDelete = false;
+              focusSidebarAnchor('[data-path][data-active="true"]');
+            }}
+          >Cancel</button>
           <button class="danger" type="button" onclick={() => void deleteActiveEntry()}>Delete file</button>
         </div>
       </div>
@@ -3005,6 +3029,26 @@
       onResolveComment={resolveReview}
       onReplyComment={replyToReview}
     />
+  {:else if workspace.reviewCards.length > 0}
+    <section class="review-history-placeholder" aria-labelledby="review-history-heading">
+      <p class="review-history-label">Saved review</p>
+      <h2 id="review-history-heading">{workspace.reviewCards.length} {workspace.reviewCards.length === 1 ? 'thread' : 'threads'} from this workspace</h2>
+      <div class="review-history-list">
+        {#each workspace.reviewCards as card (card.author + card.body)}
+          <article class="review-card">
+            <strong>{card.author} · {card.ageLabel}</strong>
+            <p>{card.body}</p>
+          </article>
+        {/each}
+      </div>
+      <p class="review-history-note">Live review adds presence and replies; saved feedback stays here.</p>
+    </section>
+  {:else if reviewProjectionState === 'failed'}
+    <section class="review-history-placeholder" aria-labelledby="review-history-heading">
+      <p class="review-history-label">Review history</p>
+      <h2 id="review-history-heading">Review history is temporarily unavailable</h2>
+      <p class="review-history-note">Your document is safe on this device. Reopen this workspace to try loading its saved feedback again.</p>
+    </section>
   {/if}
 {/snippet}
 
@@ -3031,6 +3075,7 @@
         onOpenDesk={() => window.location.assign('/app')}
         activeEntryPath={activeEntry?.path}
         {shareOpen}
+        reviewHistoryAvailable={durableReviewHistory || workspace.reviewCards.length > 0 || reviewProjectionState === 'failed'}
         actions={desktopHeaderActions}
         footer={desktopSidebarFooter}
         content={documentSurface}
@@ -3112,6 +3157,7 @@
         type="button"
         bind:this={shareButton}
         data-sharing={sharingActive}
+        data-slot="owner-mobile-share"
         onclick={() => openShare(shareButton)}
       >
         {#if sharingActive}<span class="share-live-dot" aria-hidden="true"></span>{/if}
@@ -3353,7 +3399,7 @@
 
 {#if reviewSheetOpen}
   <BottomSheet
-    title={ownerState?.roomId && reviewStoreRef ? `Review · ${reviewStoreRef.roomActiveThreadCount}` : `Review · ${workspace.reviewCards.length}`}
+    title={`Review · ${reviewCount}`}
     onclose={closeReviewSheet}
   >
     {#if reviewRoomActive && ReviewMarginComponent}
@@ -3371,7 +3417,8 @@
           onReplyComment={replyToReview}
         />
       </div>
-    {:else}
+    {:else if workspace.reviewCards.length > 0}
+      <p class="review-history-note">Live review adds presence and replies; saved feedback stays here.</p>
       {#each workspace.reviewCards as card (card.author + card.body)}
         <div class="review-card">
           <strong>{card.author} · {card.ageLabel}</strong>
@@ -3382,6 +3429,10 @@
           No review yet. Share this workspace to open an encrypted room around it.
         </p>
       {/each}
+    {:else if reviewProjectionState === 'failed'}
+      <p class="review-empty">Saved review history could not load. Reopen this workspace to try again.</p>
+    {:else}
+      <p class="review-empty">No review yet. Share this workspace to open an encrypted room around it.</p>
     {/if}
   </BottomSheet>
 {/if}

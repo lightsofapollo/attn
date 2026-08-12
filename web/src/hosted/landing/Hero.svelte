@@ -50,8 +50,11 @@
     <h1><span>Review it together.</span> <span>Even when they aren’t human.</span></h1>
     <p class="hero-lede">
       Your comments and your agents’ suggestions land in the same margin, under the same rules —
-      distinguished by who wrote them, not by hierarchy. No account, local by default, and
-      end-to-end encrypted the moment you share. The file never leaves your machine.
+      distinguished by who wrote them, not by hierarchy. No account, local by default. The file
+      never leaves your machine.
+    </p>
+    <p class="hero-security">
+      <strong>End-to-end encrypted when you share.</strong> The relay routes ciphertext and never holds a key.
     </p>
     <div class="hero-actions">
       {#if deskCount > 0}
@@ -65,11 +68,6 @@
         </a>
         <a class="button" href="/app" data-action="open-desk">Open your desk</a>
       {/if}
-    </div>
-    <div class="local-note">
-      <span>Humans and agents in one thread</span>
-      <span>Encrypted when shared</span>
-      <span>Files stay on your machine</span>
     </div>
   </div>
 

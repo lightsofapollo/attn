@@ -26,6 +26,37 @@ test('desk home lists recent workspaces with storage health', async ({ page }) =
   await expect(page.locator('h1')).toHaveText('Storage & recovery');
 });
 
+test('mobile Desk makes workspace facts and administration scannable', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/app?shell=demo');
+  const row = page.locator('.workspace-row').first();
+  const layout = await row.evaluate((element) => {
+    const rect = (selector: string) => {
+      const item = element.querySelector<HTMLElement>(selector);
+      if (!item) throw new Error(`missing ${selector}`);
+      const box = item.getBoundingClientRect();
+      return { top: box.top, bottom: box.bottom, width: box.width, height: box.height };
+    };
+    return {
+      title: rect('.row-open'),
+      facts: rect('.detail-group'),
+      review: rect('.review-pill'),
+      status: rect('.row-tail'),
+      menu: rect('.row-menu summary'),
+    };
+  });
+  expect(layout.title.bottom).toBeLessThanOrEqual(layout.facts.top + 1);
+  expect(layout.facts.bottom).toBeLessThanOrEqual(layout.review.top + 1);
+  expect(layout.review.bottom).toBeLessThanOrEqual(layout.status.top + 1);
+  expect(layout.menu.width).toBeGreaterThanOrEqual(44);
+  expect(layout.menu.height).toBeGreaterThanOrEqual(44);
+
+  await page.getByLabel('Manage Product direction').click();
+  await expect(row.getByRole('button', { name: 'Rename' })).toBeVisible();
+  await expect(row.getByRole('button', { name: 'Delete' })).toBeVisible();
+  await expectNoHorizontalScroll(page);
+});
+
 test('landing one-click intent opens an untitled draft editor', async ({ page }) => {
   await page.goto('/app#new');
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
@@ -47,6 +78,18 @@ test('desktop editor reuses the native sidebar, editor, and review rail frame', 
   await expect(page.locator('[data-action="edit"]')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Done', exact: true })).toHaveCount(0);
   await expect(page.locator('[data-slot="right-rail"]')).toHaveCount(1);
+  const savedReview = page.getByRole('button', { name: 'Saved review' });
+  await expect(savedReview).toBeVisible();
+  await expect(savedReview).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.locator('[data-slot="right-rail"]')).toHaveAttribute('data-mode', 'collapsed');
+  await expect(page.locator('.review-history-placeholder')).toHaveCount(0);
+  await savedReview.click();
+  await expect(savedReview).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.locator('.review-history-placeholder')).toContainText('Saved review');
+  await expect(page.locator('.review-history-placeholder')).toContainText('JULES');
+  await expect(page.locator('.review-history-placeholder')).toContainText(
+    'Live review adds presence and replies; saved feedback stays here.',
+  );
   await expect(page.locator('.file-rail, .review-rail')).toHaveCount(0);
   await expectNoHorizontalScroll(page);
 });

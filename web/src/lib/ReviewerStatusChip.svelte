@@ -77,7 +77,7 @@
 <div class="reviewer-status relative inline-flex shrink-0" data-slot="reviewer-status-root">
   <button
     type="button"
-    class="inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full border px-2.5 font-sans text-micro font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50
+    class="reviewer-status-trigger inline-flex h-7 shrink-0 items-center gap-1.5 rounded-full border px-2.5 font-sans text-micro font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50
       {attention
         ? 'border-destructive/40 bg-destructive/5 text-destructive hover:bg-destructive/10'
         : offline
@@ -275,5 +275,12 @@
      without ambient animation (mirrors ShareChip). */
   .reviewer-status-dot-live {
     box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary, currentColor) 20%, transparent);
+  }
+
+  @media (pointer: coarse) {
+    .reviewer-status-trigger {
+      min-height: 44px;
+      min-width: 44px;
+    }
   }
 </style>

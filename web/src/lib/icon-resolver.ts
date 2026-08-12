@@ -1,56 +1,72 @@
-import { ICON_PACKS } from './vscode-icon-map.generated';
-import { getIconPack } from './icon-pack';
+import { DEFAULT_ICON_PACK, loadIconPack, type IconPack, type IconPackIcons } from './vscode-icon-map.generated';
+import { ICON_PACK as defaultPackIcons } from './vscode-icon-packs/eyecons.generated';
+import { getIconPack, subscribeIconPack } from './icon-pack';
+import type { FileIconResolver } from './file-icon-resolver';
+import { resolveFileIconFromPack, resolveFolderIconFromPack } from './file-icon-resolution';
 
-function extensionCandidates(fileName: string): string[] {
-  const lower = fileName.toLowerCase();
-  const parts = lower.split('.');
-  if (parts.length < 2) return [];
+// The native app keeps its default pack immediately available, then loads a
+// non-default selection on demand. It retains responsive pack switching while
+// avoiding an eager multi-pack graph in every consumer of the resolver.
+const loadedPacks = new Map<IconPack, IconPackIcons>([[DEFAULT_ICON_PACK, defaultPackIcons]]);
+const loadingPacks = new Map<IconPack, Promise<void>>();
+const listeners = new Set<() => void>();
 
-  const candidates: string[] = [];
-  for (let i = 1; i < parts.length; i += 1) {
-    candidates.push(parts.slice(i).join('.'));
-  }
-  return candidates;
+function notify(): void {
+  for (const listener of listeners) listener();
 }
 
-function activePackIcons() {
-  return ICON_PACKS[getIconPack()];
+function loadPack(pack: IconPack): void {
+  if (loadedPacks.has(pack) || loadingPacks.has(pack)) return;
+  const pending = loadIconPack(pack)
+    .then((icons) => {
+      loadedPacks.set(pack, icons);
+      if (getIconPack() === pack) notify();
+    })
+    .catch(() => {
+      // The selected pack is an appearance enhancement. Keep the default
+      // images rather than leave the tree unusable if an optional chunk fails.
+    })
+    .finally(() => loadingPacks.delete(pack));
+  loadingPacks.set(pack, pending);
+}
+
+function activePackIcons(): IconPackIcons {
+  const selected = getIconPack();
+  const loaded = loadedPacks.get(selected);
+  if (loaded) return loaded;
+  loadPack(selected);
+  return defaultPackIcons;
 }
 
 /**
  * Every file gets an icon, Markdown included (attn-n01r.7).
  *
- * This used to suppress `.md` behind an `includeMarkdown` opt-in, on the theory
- * that a column of identical Markdown glyphs is noise in a product whose
- * workspaces are almost all Markdown. In practice it read as broken: the
- * filename lookup below runs first, so README.md kept its icon and every other
- * `.md` lost one, and the two call sites disagreed about whether to opt in.
- * Suppression is now gone rather than defaulted — if the density turns out to
- * be the real problem, the answer is a better Markdown glyph, not a missing one.
+ * The resolver remains synchronous for its existing native consumers. When a
+ * remembered non-default pack is still loading it temporarily uses eyecons,
+ * then emits a resolver update so mounted views repaint with the selection.
  */
 export function resolveFileIcon(fileName: string): string | null {
-  const lower = fileName.toLowerCase();
-  const extCandidates = extensionCandidates(lower);
-  const icons = activePackIcons();
-
-  const byName = icons.FILE_NAME_ICONS[lower];
-  if (byName) return byName;
-
-  for (const ext of extCandidates) {
-    const byExt = icons.FILE_EXTENSION_ICONS[ext];
-    if (byExt) return byExt;
-  }
-
-  return icons.DEFAULT_FILE_ICON;
+  return resolveFileIconFromPack(activePackIcons(), fileName);
 }
 
 export function resolveFolderIcon(folderName: string, opened: boolean): string {
-  const lower = folderName.toLowerCase();
-  const icons = activePackIcons();
-  if (opened) {
-    return icons.FOLDER_NAME_OPEN_ICONS[lower]
-      ?? icons.FOLDER_NAME_ICONS[lower]
-      ?? icons.DEFAULT_FOLDER_OPEN_ICON;
-  }
-  return icons.FOLDER_NAME_ICONS[lower] ?? icons.DEFAULT_FOLDER_ICON;
+  return resolveFolderIconFromPack(activePackIcons(), folderName, opened);
 }
+
+export const nativeFileIconResolver: FileIconResolver = {
+  resolveFileIcon,
+  resolveFolderIcon,
+  subscribe(listener) {
+    listeners.add(listener);
+    const unsubscribePack = subscribeIconPack((pack) => {
+      loadPack(pack);
+      listener();
+    });
+    return () => {
+      listeners.delete(listener);
+      unsubscribePack();
+    };
+  },
+};
+
+export { resolveFileIconFromPack, resolveFolderIconFromPack } from './file-icon-resolution';

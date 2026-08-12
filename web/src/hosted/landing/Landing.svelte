@@ -13,7 +13,7 @@
      `main` carried an id nothing linked to. Targets the existing #top so no
      other anchor changes. Visible only when focused. -->
 <a class="skip-link" href="#top">Skip to content</a>
-<!-- <header> so the brand, theme toggle and CTA sit inside a banner landmark.
+<!-- <header> so the brand, theme toggle and navigation sit inside a banner landmark.
      Measured landmarks were navigation -> main -> contentinfo, with no banner,
      so the header region was not addressable at all (attn-n01r.19). -->
 <header>

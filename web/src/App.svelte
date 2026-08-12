@@ -75,6 +75,7 @@
   import MediaPlayer from './lib/MediaPlayer.svelte';
   import HtmlViewer from './lib/HtmlViewer.svelte';
   import DirectoryOverview from './lib/DirectoryOverview.svelte';
+  import { nativeFileIconResolver } from './lib/icon-resolver';
   import CommandPalette from './lib/CommandPalette.svelte';
   import KeyboardShortcutsDialog from './lib/KeyboardShortcutsDialog.svelte';
   import ReviewApplyExpand from './lib/ReviewApplyExpand.svelte';
@@ -3814,6 +3815,7 @@
     {activeOutlineId}
     {sharedPaths}
     unreadByPath={ownerUnreadCountsByPath}
+    iconResolver={nativeFileIconResolver}
     onProjectSwitch={handleProjectSwitch}
     onNavigate={handleSidebarNavigate}
     onExpand={handleTreeExpand}

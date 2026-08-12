@@ -1,8 +1,5 @@
 <script lang="ts">
   import BrandMark from '../../lib/BrandMark.svelte';
-  import { readDeskCount } from '../desk-count';
-
-  const deskCount = readDeskCount();
   import { getTheme, toggleTheme } from '../theme.svelte';
 
   /* Mobile navigation (attn-n01r.17). Below 680px `.nav-link { display: none }`
@@ -43,7 +40,7 @@
   </button>
   <div class="nav-right" id="site-nav-links" data-open={menuOpen}>
     <a class="nav-link" href="#how">How it works</a>
-    {#if deskCount === 0}<a class="nav-link" href="/app">Your desk</a>{/if}
+    <a class="nav-link" href="/app">Your desk</a>
     <a class="nav-link" href="#native">Native app</a>
     <a class="nav-link" href="https://github.com/lightsofapollo/attn">GitHub</a>
     <!-- aria-pressed + an action label (attn-n01r.25). The label was static
@@ -96,10 +93,5 @@
         </svg>
       {/if}
     </button>
-    {#if deskCount > 0}
-      <a class="button primary" href="/app" data-action="open-desk">Your desk ({deskCount})</a>
-    {:else}
-      <a class="button primary" href="/app#new" data-action="new-workspace">New workspace</a>
-    {/if}
   </div>
 </nav>

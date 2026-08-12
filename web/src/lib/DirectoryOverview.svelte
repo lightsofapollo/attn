@@ -1,7 +1,6 @@
 <script lang="ts">
   import type { TreeNode } from './types';
-  import { resolveFileIcon, resolveFolderIcon } from '$lib/icon-resolver';
-  import { getIconPack, subscribeIconPack } from '$lib/icon-pack';
+  import { nativeFileIconResolver, resolveFileIcon, resolveFolderIcon } from '$lib/icon-resolver';
 
   interface Props {
     path: string;
@@ -12,11 +11,11 @@
 
   let { path, rootPath = '', entries, onOpen }: Props = $props();
 
-  let iconPack = $state(getIconPack());
+  let iconRevision = $state(0);
 
   $effect(() => {
-    const unsubscribe = subscribeIconPack((next) => {
-      iconPack = next;
+    const unsubscribe = nativeFileIconResolver.subscribe(() => {
+      iconRevision += 1;
     });
     return unsubscribe;
   });
@@ -90,8 +89,8 @@
   let label = $derived(path.split('/').filter(Boolean).at(-1) ?? path);
 
   function iconSrc(node: TreeNode): string | null {
-    // Force reactivity on iconPack changes
-    void iconPack;
+    // Force reactivity on pack switches and on-demand pack completion.
+    void iconRevision;
     if (node.isDir) {
       return resolveFolderIcon(node.name, false);
     }

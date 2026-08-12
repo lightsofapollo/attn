@@ -43,14 +43,29 @@ assertEq(
   'review navigation',
 );
 assertEq(
-  decideFetch({ ...base, mode: 'navigate', url: `${ORIGIN}/s/share-1` }),
+  decideFetch({ ...base, mode: 'navigate', url: `${ORIGIN}/s/AAAAAAAAAAAAAAAAAAAAAA` }),
   { kind: 'navigation-network-first', shellPath: '/review/' },
   'durable share navigation',
 );
 assertEq(
+  decideFetch({ ...base, mode: 'navigate', url: `${ORIGIN}/s/share-1` }),
+  { kind: 'navigation-network-first', shellPath: undefined },
+  'malformed durable share has no shell fallback',
+);
+assertEq(
   decideFetch({ ...base, mode: 'navigate', url: `${ORIGIN}/anything` }),
-  { kind: 'navigation-network-first', shellPath: '/' },
-  'landing fallback',
+  { kind: 'navigation-network-first', shellPath: undefined },
+  'unknown navigation has no shell fallback',
+);
+assertEq(
+  decideFetch({ ...base, mode: 'navigate', url: `${ORIGIN}/app/w` }),
+  { kind: 'navigation-network-first', shellPath: undefined },
+  'malformed app route has no shell fallback',
+);
+assertEq(
+  decideFetch({ ...base, mode: 'navigate', url: `${ORIGIN}/review` }),
+  { kind: 'navigation-network-first', shellPath: undefined },
+  'malformed review route has no shell fallback',
 );
 
 // Forbidden: everything else bypasses the cache entirely.
@@ -71,7 +86,7 @@ assertEq(decideFetch({ ...base, url: 'not a url' }), { kind: 'bypass' }, 'malfor
 
 // Shell fallback keys.
 assertEq(shellPathFor('/open'), '/app/', 'open uses app shell');
-assertEq(shellPathFor('/reviewzzz'), '/', 'prefix does not leak');
+assertEq(shellPathFor('/reviewzzz'), undefined, 'prefix does not leak');
 
 // Response gating: errors and redirects never enter caches.
 assertEq(

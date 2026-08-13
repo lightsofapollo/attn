@@ -58,9 +58,22 @@ export const nativeFileIconResolver: FileIconResolver = {
   resolveFolderIcon,
   subscribe(listener) {
     listeners.add(listener);
+    // `subscribeIconPack` deliberately emits its current value synchronously.
+    // Forwarding that first emission calls the listener while the subscribing
+    // FileTree effect is STILL RUNNING, so `iconRevision += 1` lands inside
+    // the effect that registered it; Svelte re-runs that effect until it trips
+    // `effect_update_depth_exceeded`, which kills the reactive graph and
+    // leaves every document — markdown included — rendering as one empty
+    // paragraph. There is nothing to redraw for the initial value anyway: the
+    // first render already resolved icons for this pack and started any lazy
+    // load. Genuine pack changes and completed loads notify afterwards.
+    // Same reasoning, same shape as hosted-icon-registry.ts.
+    let selected = getIconPack();
     const unsubscribePack = subscribeIconPack((pack) => {
+      const changed = selected !== pack;
+      selected = pack;
       loadPack(pack);
-      listener();
+      if (changed) listener();
     });
     return () => {
       listeners.delete(listener);

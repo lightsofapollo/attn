@@ -94,95 +94,78 @@ export const RUNTIME_STYLES = `
   color: var(--attn-ink);
 }
 
-/* Left-margin pin revealed on block hover. */
-.attn-gutter-pin {
+/* The hover label: names what the cursor is pointing at, and its ancestors.
+   The outer box is a HIT AREA, not the visible pill — the transparent bottom
+   padding is a reach corridor between the label and the element it labels, so
+   a cursor travelling up to the chip never passes over a third element that
+   would re-target the hover and move the chip out from under it. Losing the
+   chip mid-reach is exactly the bug this geometry exists to prevent. */
+.attn-chip {
   position: absolute;
-  left: 8px;
-  pointer-events: auto;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  border: 1px solid var(--attn-border);
-  border-radius: 999px;
-  background: var(--attn-surface);
-  color: var(--attn-ink);
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 120ms ease;
-  box-shadow: var(--attn-shadow);
-}
-.attn-gutter-pin.is-visible { opacity: 1; }
-.attn-gutter-pin::before {
-  content: "";
-  position: absolute;
-  inset: 6px;
-  border: 1.5px solid currentColor;
-  border-radius: 3px 3px 3px 0;
-  opacity: 0.7;
-}
-.attn-gutter-pin.has-comments {
-  background: var(--attn-comment-accent);
-}
-.attn-gutter-pin.has-comments::after {
-  content: attr(data-count);
-  position: absolute;
-  top: -4px;
-  right: -4px;
-  min-width: 14px;
-  height: 14px;
-  border-radius: 999px;
-  background: var(--attn-element-accent);
-  color: oklch(0.98 0.005 78);
-  font-size: 9px;
-  font-weight: 700;
-  line-height: 14px;
-}
-
-/* Scope breadcrumb: drill into a cell or out to the whole table. */
-.attn-flyout {
-  position: absolute;
-  top: 0;
-  left: 30px;
   display: none;
-  flex-direction: column;
-  min-width: 220px;
-  padding: 4px;
+  pointer-events: auto;
+  padding-bottom: 6px;
+  max-width: min(90vw, 560px);
+}
+.attn-chip.is-visible { display: block; }
+
+.attn-chip-body {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px;
   border: 1px solid var(--attn-border);
   border-radius: 8px;
   background: var(--attn-surface);
   box-shadow: var(--attn-shadow);
+  font-size: 11px;
+  line-height: 1.4;
 }
-.attn-flyout.is-visible { display: flex; }
 
-.attn-scope-item {
+.attn-chip-sep {
+  flex: none;
+  padding: 0 1px;
+  color: var(--attn-ink);
+  opacity: 0.4;
+}
+
+.attn-chip-seg {
   display: flex;
   align-items: baseline;
-  gap: 8px;
-  width: 100%;
-  padding: 6px 8px;
+  gap: 6px;
+  min-width: 0;
+  padding: 3px 7px;
   border: 0;
-  border-radius: 5px;
+  border-radius: 4px;
   background: transparent;
   color: var(--attn-ink);
-  text-align: left;
+  font: inherit;
   cursor: pointer;
-  font-size: 12px;
-}
-.attn-scope-item:hover { background: color-mix(in oklch, var(--attn-ink) 8%, transparent); }
-.attn-scope-title { font-weight: 600; white-space: nowrap; }
-.attn-scope-preview {
-  flex: 1;
-  overflow: hidden;
-  text-overflow: ellipsis;
   white-space: nowrap;
-  opacity: 0.65;
 }
-.attn-scope-count {
-  padding: 1px 6px;
-  border-radius: 999px;
+.attn-chip-seg:hover { background: color-mix(in oklch, var(--attn-ink) 10%, transparent); }
+.attn-chip-seg.is-current {
   background: var(--attn-element-accent);
   color: oklch(0.98 0.005 78);
-  font-size: 10px;
+}
+.attn-chip-seg.is-current:hover {
+  background: color-mix(in oklch, var(--attn-element-accent) 88%, black);
+}
+.attn-chip-title { font-weight: 600; }
+.attn-chip-preview {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 0.7;
+  font-weight: 400;
+}
+.attn-chip-count {
+  flex: none;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--attn-comment-accent);
+  color: oklch(0.98 0.005 78);
+  font-size: 9px;
   font-weight: 700;
 }
 
@@ -223,7 +206,6 @@ export const RUNTIME_STYLES = `
 
 @media (prefers-reduced-motion: reduce) {
   .attn-overlay,
-  .attn-pin,
-  .attn-gutter-pin { transition: none; }
+  .attn-pin { transition: none; }
 }
 `;

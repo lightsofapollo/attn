@@ -911,6 +911,13 @@
     if (bridge) bridge.renderAnchors(htmlRenderableAnchors);
   });
 
+  // Hover chrome is always live in an annotating frame; taking the CLICK — so
+  // the page's own links stop firing — waits until the document is genuinely
+  // reviewable.
+  $effect(() => {
+    htmlBridge?.setInspect(htmlAnnotatable);
+  });
+
   $effect(() => {
     const snapshotId = ownerHtmlSnapshot?.snapshotId;
     if (htmlComposer && htmlComposer.snapshotId !== snapshotId) {
@@ -920,7 +927,12 @@
   });
 
   const htmlAnnotationEvents: AnnotationBridgeEvents = {
-    onProposal: (proposal, rects, caret) => {
+    onProposal: ({ proposal, rects, caret, explicit }) => {
+      // Dragging a selection is not a request for a composer — pressing the
+      // frame's Comment pill, or clicking an element, is. The runtime is only
+      // injected when `htmlAnnotatable`, so the guard below is a mid-gesture
+      // snapshot swap rather than an unshared document.
+      if (!explicit) return;
       const snapshot = ownerHtmlSnapshot;
       if (!htmlAnnotatable || !snapshot) return;
       const near = caret ?? rects.at(-1);

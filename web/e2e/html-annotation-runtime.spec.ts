@@ -42,6 +42,9 @@ const DOC = `<!doctype html>
       <tr><td>Fuzzy quote</td><td>0.50-0.75</td></tr>
     </tbody>
   </table>
+  <p class="links">See <a id="jump" href="#appendix">the appendix</a> for detail.</p>
+  <button id="ping" onclick="window.__ping = (window.__ping || 0) + 1">Recalculate</button>
+  <div class="callout"><span id="bare">Wrapped in markup with no scope tag of its own.</span></div>
 </body></html>`;
 
 /**
@@ -100,6 +103,21 @@ async function boot(page: import('@playwright/test').Page, doc = DOC) {
   );
   await page.waitForFunction(() => (window as unknown as { __attn_ready: boolean }).__attn_ready, {
     timeout: 15_000,
+  });
+}
+
+/**
+ * Turn on inspect mode, as the shell does once a document is genuinely under
+ * review. Hover chrome and element clicks are both gated on it: a document that
+ * cannot take a comment is left strictly alone.
+ */
+async function inspect(page: import('@playwright/test').Page) {
+  await page.evaluate(() => {
+    (window as unknown as { __attn_send: (m: unknown) => void }).__attn_send({
+      type: 'inspect',
+      v: 1,
+      enabled: true,
+    });
   });
 }
 
@@ -294,6 +312,7 @@ test.describe('HTML annotation runtime', () => {
 
   test('offers a cell/row/table scope chain when hovering a table', async ({ page }) => {
     await boot(page);
+    await inspect(page);
     await page.frameLocator('#doc').locator('td', { hasText: 'Fuzzy quote' }).hover();
 
     const hover = await page.waitForFunction(
@@ -317,6 +336,7 @@ test.describe('HTML annotation runtime', () => {
 
   test('paints an element anchor with a persistent, non-blocking overlay', async ({ page }) => {
     await boot(page);
+    await inspect(page);
     await page.frameLocator('#doc').locator('td', { hasText: 'Fuzzy quote' }).hover();
     const hover = await page.waitForFunction(() =>
       (window as unknown as { __attn_last: (t: string) => unknown }).__attn_last('scopeHover'),
@@ -360,6 +380,316 @@ test.describe('HTML annotation runtime', () => {
       .locator('.attn-overlay')
       .evaluate((el) => getComputedStyle(el).pointerEvents);
     expect(pointerEvents).toBe('none');
+  });
+
+  /**
+   * ELEMENT INSPECTION (attn-yqun).
+   *
+   * The tests above drive the protocol; these drive the *interaction* — real
+   * mouse movement over a real opaque-origin frame. That distinction is the
+   * whole reason this group exists. Every earlier surface (the shell-side
+   * daemon script included) could only observe iframe attributes from outside,
+   * so the in-frame hover/click layer shipped with no coverage at all, and both
+   * bugs the first human smoke test found lived exactly there.
+   */
+  test('outlines the element under the cursor and names it on a chip', async ({ page }) => {
+    await boot(page);
+    await inspect(page);
+    const frame = page.frameLocator('#doc');
+    await frame.locator('p.intro').hover();
+
+    await expect(frame.locator('.attn-outline')).toBeVisible();
+    const chip = frame.locator('.attn-chip');
+    await expect(chip).toBeVisible();
+    // Names the thing under the cursor, and shows enough of its content to
+    // confirm you are pointing at what you think you are.
+    await expect(chip.locator('.attn-chip-seg.is-current')).toContainText('p');
+    await expect(chip).toContainText('The quick brown fox');
+  });
+
+  /**
+   * THE REGRESSION THAT REACHED THE USER. The runtime's chrome lives inside the
+   * document it annotates, so a cursor moving onto the chip is a mousemove that
+   * resolves to no document scope. Treating that as "hovering nothing" hid the
+   * affordance out from under the hand reaching for it — a control that cannot
+   * be clicked at all, and one no attribute-level assertion could ever see.
+   */
+  test('keeps the chip alive when the cursor reaches for it', async ({ page }) => {
+    await boot(page);
+    await inspect(page);
+    const frame = page.frameLocator('#doc');
+    const paragraph = frame.locator('p.intro');
+    await paragraph.hover();
+    const chip = frame.locator('.attn-chip');
+    await expect(chip).toBeVisible();
+
+    const from = (await paragraph.boundingBox())!;
+    const to = (await chip.locator('.attn-chip-seg.is-current').boundingBox())!;
+    // Travel the way a hand does — continuously, from inside the element up to
+    // the label — rather than teleporting onto the target.
+    await page.mouse.move(from.x + 12, from.y + from.height / 2);
+    await page.mouse.move(to.x + to.width / 2, to.y + to.height / 2, { steps: 16 });
+    await page.waitForTimeout(300);
+
+    await expect(chip).toBeVisible();
+    await chip.locator('.attn-chip-seg.is-current').click();
+    const picked = await page.waitForFunction(() =>
+      (window as unknown as { __attn_last: (t: string) => unknown }).__attn_last('scopePicked'),
+    );
+    expect((await picked.jsonValue()) as { explicit: boolean }).toMatchObject({ explicit: true });
+  });
+
+  /**
+   * Leaving the chip arms the hide timer. Coming straight back to the element
+   * the chip was already naming has to disarm it — otherwise a cursor that
+   * merely clipped the label on its way past times the chip out while sitting
+   * perfectly still on the thing it wants to comment on.
+   */
+  test('survives a round trip out to the chip and back', async ({ page }) => {
+    await boot(page);
+    await inspect(page);
+    const frame = page.frameLocator('#doc');
+    const paragraph = frame.locator('p.intro');
+    await paragraph.hover();
+    const chip = frame.locator('.attn-chip');
+    await expect(chip).toBeVisible();
+
+    const chipBox = (await chip.locator('.attn-chip-seg.is-current').boundingBox())!;
+    const from = (await paragraph.boundingBox())!;
+    await page.mouse.move(chipBox.x + chipBox.width / 2, chipBox.y + chipBox.height / 2, {
+      steps: 8,
+    });
+    await page.mouse.move(from.x + 12, from.y + from.height / 2, { steps: 8 });
+    // Comfortably past HOVER_GRACE_MS.
+    await page.waitForTimeout(500);
+
+    await expect(chip).toBeVisible();
+  });
+
+  /**
+   * The chip's reach corridor sits ON TOP of the document, so a click there can
+   * never fall through to the page. If it also did not comment, the strip was
+   * dead in both directions — a deliberate press that does nothing at all,
+   * which is the exact class of failure this epic exists to remove.
+   */
+  test('commits from the chip padding, not just its segments', async ({ page }) => {
+    await boot(page);
+    await inspect(page);
+    const frame = page.frameLocator('#doc');
+    await frame.locator('p.intro').hover();
+    const chip = frame.locator('.attn-chip');
+    await expect(chip).toBeVisible();
+
+    const box = (await chip.boundingBox())!;
+    // The bottom-most strip of the chip's box is its transparent padding — no
+    // segment lives there.
+    await page.mouse.click(box.x + box.width - 2, box.y + box.height - 2);
+
+    const picked = await page.waitForFunction(() =>
+      (window as unknown as { __attn_last: (t: string) => unknown }).__attn_last('scopePicked'),
+    );
+    expect((await picked.jsonValue()) as { explicit: boolean }).toMatchObject({ explicit: true });
+  });
+
+  test('drills to an ancestor scope from the breadcrumb', async ({ page }) => {
+    await boot(page);
+    await inspect(page);
+    const frame = page.frameLocator('#doc');
+    await frame.locator('td', { hasText: 'Fuzzy quote' }).hover();
+
+    const chip = frame.locator('.attn-chip');
+    // Outermost first, so the label reads the way a path does.
+    await expect(chip.locator('.attn-chip-seg')).toHaveText([/table/, /row 2/, /cell/]);
+    await chip.locator('.attn-chip-seg', { hasText: 'row 2' }).click();
+
+    const picked = await page.waitForFunction(() =>
+      (window as unknown as { __attn_last: (t: string) => unknown }).__attn_last('scopePicked'),
+    );
+    const payload = (await picked.jsonValue()) as {
+      explicit: boolean;
+      proposal: { html: { target: string; context: { tagName: string; scopePreview: string } } };
+    };
+    expect(payload.explicit).toBe(true);
+    expect(payload.proposal.html.target).toBe('element');
+    expect(payload.proposal.html.context.tagName).toBe('tr');
+    expect(payload.proposal.html.context.scopePreview).toContain('Fuzzy quote');
+  });
+
+  test('offers unscoped markup as a scope of its own', async ({ page }) => {
+    await boot(page);
+    await inspect(page);
+    const frame = page.frameLocator('#doc');
+    await frame.locator('#bare').hover();
+    await expect(frame.locator('.attn-chip')).toBeVisible();
+    await frame.locator('.attn-chip-seg.is-current').click();
+
+    const picked = await page.waitForFunction(() =>
+      (window as unknown as { __attn_last: (t: string) => unknown }).__attn_last('scopePicked'),
+    );
+    // No part of a document may be un-commentable just because its author
+    // reached for a tag the scope list never anticipated.
+    const payload = (await picked.jsonValue()) as {
+      proposal: { html: { context: { tagName: string } } };
+    };
+    expect(payload.proposal.html.context.tagName).toBe('span');
+  });
+
+  /** How many times the document's OWN click handler ran, and where it is. */
+  function pageState(page: import('@playwright/test').Page) {
+    return page
+      .frameLocator('#doc')
+      .locator('body')
+      .evaluate(() => ({
+        clicks: (window as unknown as { __ping?: number }).__ping ?? 0,
+        hash: location.hash,
+      }));
+  }
+
+  test('takes the click in inspect mode so the page cannot act on it', async ({ page }) => {
+    await boot(page);
+    await page.evaluate(() => {
+      (window as unknown as { __attn_send: (m: unknown) => void }).__attn_send({
+        type: 'inspect',
+        v: 1,
+        enabled: true,
+      });
+    });
+
+    await page.frameLocator('#doc').locator('#ping').click();
+    const picked = await page.waitForFunction(() =>
+      (window as unknown as { __attn_last: (t: string) => unknown }).__attn_last('scopePicked'),
+    );
+    const payload = (await picked.jsonValue()) as {
+      explicit: boolean;
+      proposal: { html: { context: { tagName: string } } };
+    };
+    expect(payload).toMatchObject({ explicit: true });
+    expect(payload.proposal.html.context.tagName).toBe('button');
+
+    // Commenting on a control is not operating it, and commenting on a link is
+    // not following it — the frame must still be showing the same document.
+    await page.frameLocator('#doc').locator('#jump').click();
+    expect(await pageState(page)).toEqual({ clicks: 0, hash: '' });
+  });
+
+  test('leaves a document that cannot take a comment strictly alone', async ({ page }) => {
+    await boot(page);
+    const frame = page.frameLocator('#doc');
+
+    await frame.locator('p.intro').hover();
+    await page.waitForTimeout(200);
+    // No chrome at all until the shell says the document is under review. The
+    // chip is opaque and painted OVER the page, so raising one here would
+    // occlude — and eat clicks on — a document that is only being read, to
+    // offer an affordance that could answer nothing but "share this first".
+    await expect(frame.locator('.attn-chip')).toBeHidden();
+    await expect(frame.locator('.attn-outline')).toHaveCount(0);
+
+    await frame.locator('#ping').click();
+    await page.waitForTimeout(200);
+    expect(await pageState(page)).toMatchObject({ clicks: 1 });
+    expect(
+      await page.evaluate(() =>
+        (window as unknown as { __attn_last: (t: string) => unknown }).__attn_last('scopePicked'),
+      ),
+    ).toBeNull();
+  });
+
+  /**
+   * The reachable version of "a click committed to something the chip never
+   * named": drag-select a sentence to read it, then click elsewhere to dismiss
+   * the selection. Chrome is suppressed for the whole gesture, but by click
+   * time mousedown has already collapsed the selection — so a guard that only
+   * asks "is a selection live?" sees nothing and swallows the click.
+   */
+  test('does not commit a click that dismisses a selection', async ({ page }) => {
+    await boot(page);
+    await inspect(page);
+    await selectText(page, 'quick brown fox');
+    await page.waitForFunction(() =>
+      (window as unknown as { __attn_last: (t: string) => unknown }).__attn_last('selection'),
+    );
+    await expect(page.frameLocator('#doc').locator('.attn-chip')).toBeHidden();
+
+    await page.frameLocator('#doc').locator('#ping').click();
+    await page.waitForTimeout(250);
+
+    // Nothing was outlined or named, so nothing may be taken: the click is the
+    // page's, and no composer opens behind it.
+    expect(await pageState(page)).toMatchObject({ clicks: 1 });
+    expect(
+      await page.evaluate(() =>
+        (window as unknown as { __attn_last: (t: string) => unknown }).__attn_last('scopePicked'),
+      ),
+    ).toBeNull();
+  });
+
+  /**
+   * Pins hang outside the elements they belong to and the pill floats under a
+   * selection — neither is the chip, and neither may hold it open. Resting on
+   * one used to cancel a pending hide that nothing ever re-armed.
+   */
+  test('does not let a comment pin hold a stale chip open', async ({ page }) => {
+    await boot(page);
+    await inspect(page);
+    const frame = page.frameLocator('#doc');
+    await page.evaluate(() => {
+      (window as unknown as { __attn_send: (m: unknown) => void }).__attn_send({
+        type: 'renderAnchors',
+        v: 1,
+        anchors: [
+          {
+            anchorId: 'pinned',
+            html: {
+              v: 1,
+              target: 'element',
+              cssSelector: '#title',
+              context: { tagName: 'h1', scopePreview: 'Quarterly report' },
+            },
+            state: 'default',
+            label: '1',
+          },
+        ],
+      });
+    });
+    await expect(frame.locator('.attn-pin')).toHaveCount(1);
+
+    await frame.locator('p.intro').hover();
+    await expect(frame.locator('.attn-chip')).toBeVisible();
+    // Leave the paragraph, then come to rest on the pin belonging to another
+    // element entirely.
+    const pin = (await frame.locator('.attn-pin').boundingBox())!;
+    await page.mouse.move(pin.x + pin.width / 2, pin.y + pin.height / 2, { steps: 10 });
+    await page.waitForTimeout(500);
+
+    await expect(frame.locator('.attn-chip')).toBeHidden();
+  });
+
+  test('marks a dragged selection passive and a pressed pill explicit', async ({ page }) => {
+    await boot(page);
+    await selectText(page, 'quick brown fox');
+    await page.waitForFunction(() =>
+      (window as unknown as { __attn_last: (t: string) => unknown }).__attn_last('selection'),
+    );
+    // Merely having text selected is not a request to comment on it; a shell
+    // that opened a composer here would ambush every ordinary drag.
+    expect(
+      await page.evaluate(
+        () =>
+          (window as unknown as { __attn_last: (t: string) => { explicit: boolean } }).__attn_last(
+            'selection',
+          ).explicit,
+      ),
+    ).toBe(false);
+
+    await page.frameLocator('#doc').locator('.attn-pill').click();
+    const explicit = await page.waitForFunction(
+      () =>
+        (window as unknown as { __attn_last: (t: string) => { explicit: boolean } }).__attn_last(
+          'selection',
+        ).explicit === true,
+    );
+    expect(await explicit.jsonValue()).toBe(true);
   });
 
   test('ignores malformed and unknown shell messages', async ({ page }) => {
@@ -527,6 +857,68 @@ test.describe('HtmlAnnotationBridge (shell side)', () => {
     );
     const results = (await resolutions.jsonValue()) as { anchorId: string; status: string }[];
     expect(results[0]).toMatchObject({ anchorId: 'early', status: 'exact' });
+  });
+
+  /**
+   * The end-to-end path a person actually walks: point at something, click it,
+   * and have the shell receive a proposal it owes an answer to. Driven through
+   * the real bridge and the real injector, because the two pieces that carry
+   * this — `explicit` and `setInspect` — are exactly what decides whether the
+   * shell opens a composer or stays silent.
+   */
+  test('delivers an element click as an explicit proposal', async ({ page }) => {
+    await bootBridge(page);
+    await page.evaluate(() => {
+      (window as unknown as { __inspect: (e: boolean) => void }).__inspect(true);
+    });
+
+    await page.frameLocator('#doc').locator('td', { hasText: 'Fuzzy quote' }).click();
+
+    const proposal = await page.waitForFunction(() => {
+      const list = (window as unknown as { __explicit: unknown[] }).__explicit;
+      return list.length > 0 ? list[list.length - 1] : null;
+    });
+    expect((await proposal.jsonValue()) as { html: { context: { tagName: string } } }).toMatchObject(
+      { html: { target: 'element', context: { tagName: 'td' } } },
+    );
+  });
+
+  /**
+   * THE BUG THAT MADE EVERY PIN VANISH. Anchors are built from the review
+   * store, and Svelte 5 hands out a Proxy for every object it tracks —
+   * structured clone, which `postMessage` uses, throws `DataCloneError` on one.
+   * The throw surfaced nowhere near the cause: the frame simply never received
+   * the anchor set, so no pin was painted, no resolution came back, and the
+   * rail had no geometry to align to. Every previous test here passed plain
+   * literals, which is exactly why none of them caught it.
+   */
+  test('renders anchors that arrive as reactive proxies', async ({ page }) => {
+    await bootBridge(page);
+    await page.evaluate(() => {
+      (window as unknown as { __renderProxied: (a: unknown[]) => void }).__renderProxied([
+        {
+          anchorId: 'proxied',
+          html: {
+            v: 1,
+            target: 'element',
+            cssSelector: '#title',
+            context: { tagName: 'h1', scopePreview: 'Quarterly report' },
+          },
+          state: 'default',
+          label: '1',
+        },
+      ]);
+    });
+
+    const resolutions = await page.waitForFunction(() => {
+      const list = (window as unknown as { __resolutions: { anchorId: string }[] }).__resolutions;
+      return list.length > 0 ? list : null;
+    });
+    expect((await resolutions.jsonValue()) as { anchorId: string; status: string }[]).toMatchObject([
+      { anchorId: 'proxied', status: 'exact' },
+    ]);
+    // The pin is the whole point: a document has to read as annotated.
+    await expect(page.frameLocator('#doc').locator('.attn-pin')).toHaveText('1');
   });
 
   test('replays the full anchor state after an in-place frame reload', async ({ page }) => {

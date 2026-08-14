@@ -1069,6 +1069,13 @@
     bridge.renderAnchors(anchors);
   });
 
+  // Hover chrome is always live in an annotating frame; taking the CLICK — so
+  // the page's own links stop firing — waits until the document is genuinely
+  // reviewable.
+  $effect(() => {
+    htmlBridge?.setInspect(htmlAnnotatable);
+  });
+
   function applyHtmlGeometry(results: { anchorId: string; rects: { y: number }[] }[]): void {
     const next: Record<string, number> = {};
     for (const result of results) {
@@ -1081,7 +1088,13 @@
   }
 
   const htmlAnnotationEvents: AnnotationBridgeEvents = {
-    onProposal: (proposal, rects, caret) => {
+    onProposal: ({ proposal, rects, caret, explicit }) => {
+      // Dragging a selection is not a request for a composer — pressing the
+      // frame's Comment pill, or clicking an element, is.
+      if (!explicit) return;
+      // Unlike the native shell there is no unshared dead end to explain here:
+      // the runtime is only injected into the frame when `htmlAnnotatable`, so
+      // reaching this guard means a snapshot swapped mid-gesture.
       if (!htmlAnnotatable) return;
       const snapshot = displayedSnapshot;
       if (!snapshot) return;

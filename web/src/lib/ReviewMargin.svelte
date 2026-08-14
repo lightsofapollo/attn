@@ -373,8 +373,14 @@
       // in viewport coordinates, so the same container conversion applies.
       for (const t of anchoredThreads) {
         const y = anchorTops[t.id];
-        if (y === undefined) continue;
-        out.set(t.id, y - containerTop);
+        // Fall back to 0 rather than dropping the card — same reasoning as the
+        // resolved chips below, and it matters more here. Geometry crosses a
+        // MessagePort from another origin, so "not reported yet" is the normal
+        // state for a comment in the moment after it is made; skipping those
+        // rendered a brand-new comment nowhere at all, which is indis-
+        // tinguishable from it never having been saved. A card stacked at the
+        // top is a position problem; a missing card is a lost comment.
+        out.set(t.id, y === undefined ? 0 : y - containerTop);
       }
     }
     // Resolved chips always get a y — fall back to 0 (the collision pass

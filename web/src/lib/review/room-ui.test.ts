@@ -15,6 +15,7 @@ import {
   shouldActivateRoomStatus,
   shouldAutoSelectOnlyRoom,
   shouldForgetRoomStatus,
+  snapshotPublishesPath,
 } from './room-ui';
 import type { RoomId } from '../types';
 
@@ -357,6 +358,88 @@ defineCase('shareTargetMatches: empty / null inputs never match', () => {
   assert(shareTargetMatches('/Users/me/plan.md', null) === false, 'no target selected → no match');
   assert(shareTargetMatches('', '') === false, 'both empty → no match');
   assert(shareTargetMatches(undefined, undefined) === false, 'undefined inputs are safe → no match');
+});
+
+// snapshotPublishesPath answers "is the document on screen this snapshot's?" —
+// the question an owner's HTML annotation hangs on, since they stay on their
+// local file after sharing and may have no room focused at all (attn-yqun.3).
+defineCase('snapshotPublishesPath: absolute, root-relative and suffix forms all match', () => {
+  const snapshot = { roomId: 'r' as RoomId, ownerDisplayPath: 'report.html' };
+  assert(
+    snapshotPublishesPath({ snapshot, path: '/p/report.html', rootPath: '/p' }),
+    'a root-relative publish must match the absolute navigation path',
+  );
+  assert(
+    snapshotPublishesPath({ snapshot, path: '/elsewhere/report.html' }),
+    'with no known root, a whole-segment suffix is the best available match',
+  );
+  assert(
+    snapshotPublishesPath({
+      snapshot: { roomId: 'r' as RoomId, ownerDisplayPath: '/p/report.html' },
+      path: '/p/report.html',
+    }),
+    'an absolute publish must match itself',
+  );
+});
+
+// The heuristics answer "is this path in the review", which is the cheap
+// question. Deciding WHICH document a comment attaches to needs the room's own
+// share root, because `ownerDisplayPath` is relative to that and not to the
+// window's root — conflating the two lets a same-named file elsewhere claim
+// the room, and a comment then lands on the wrong file.
+defineCase('snapshotPublishesPath: a known share root retires the heuristics', () => {
+  const snapshot = { roomId: 'r' as RoomId, ownerDisplayPath: 'docs/report.html' };
+  assert(
+    snapshotPublishesPath({
+      snapshot,
+      path: '/proj/docs/report.html',
+      rootPath: '/proj',
+      shareRoot: '/proj',
+    }),
+    'the file the room actually published must still match',
+  );
+  assert(
+    snapshotPublishesPath({
+      snapshot,
+      path: '/proj/archive/docs/report.html',
+      rootPath: '/proj',
+      shareRoot: '/proj',
+    }) === false,
+    'a same-named copy in another folder must not claim the share',
+  );
+  assert(
+    snapshotPublishesPath({
+      snapshot: { roomId: 'r' as RoomId, ownerDisplayPath: 'report.html' },
+      path: '/proj/report.html',
+      rootPath: '/proj',
+      shareRoot: '/other',
+    }) === false,
+    'a path relative to ANOTHER room\'s share root must not resolve against this one',
+  );
+  assert(
+    snapshotPublishesPath({
+      snapshot: { roomId: 'r' as RoomId, ownerDisplayPath: 'report.html' },
+      path: '/proj/report.html',
+      shareRoot: '/proj/report.html',
+    }),
+    'a single-file share root IS the file it published',
+  );
+});
+
+defineCase('snapshotPublishesPath: a name that merely ends the same does not match', () => {
+  const snapshot = { roomId: 'r' as RoomId, ownerDisplayPath: 'report.html' };
+  assert(
+    snapshotPublishesPath({ snapshot, path: '/p/quarterly-report.html' }) === false,
+    'the suffix match must land on a segment boundary, or one file annotates as another',
+  );
+  assert(
+    snapshotPublishesPath({ snapshot, path: null }) === false,
+    'no displayed path → no match',
+  );
+  assert(
+    snapshotPublishesPath({ snapshot: { roomId: 'r' as RoomId }, path: '/p/report.html' }) === false,
+    'a snapshot with no published path cannot claim the document on screen',
+  );
 });
 
 let failed = 0;

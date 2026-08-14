@@ -273,20 +273,58 @@ export function roomPublishesPath(params: {
   rootPath?: string | null;
 }): boolean {
   if (params.roomId === null) return false;
-  const target = normalizeRoomPath(params.path);
-  if (!target) return false;
-  const root = normalizeRoomPath(params.rootPath);
-
   for (const snapshot of params.snapshots) {
     if (snapshot.roomId !== params.roomId) continue;
-    const published = normalizeRoomPath(snapshot.ownerDisplayPath);
-    if (!published) continue;
-    if (published === target) return true;
-    if (published.startsWith('/')) continue;
-    if (root && `${root}/${published}` === target) return true;
-    // Leading slash keeps the match on a segment boundary: "a.md" must not
-    // match "beta.md".
-    if (target.endsWith(`/${published}`)) return true;
+    if (snapshotPublishesPath({ snapshot, path: params.path, rootPath: params.rootPath })) {
+      return true;
+    }
   }
   return false;
+}
+
+/**
+ * Does this one snapshot publish `path`?
+ *
+ * The per-snapshot half of {@link roomPublishesPath}, exported because "which
+ * snapshot is the document on screen" is a different question from "is this
+ * path in the review" — and answering it through the room currently in FOCUS
+ * is wrong for an owner, who stays on their local file after sharing (attn-0wa)
+ * and may have no room selected at all.
+ */
+export function snapshotPublishesPath(params: {
+  snapshot: RoomPathSnapshot;
+  path: string | null | undefined;
+  rootPath?: string | null;
+  /**
+   * The room's OWN share root, when known.
+   *
+   * `ownerDisplayPath` is relative to this, not to the window's `rootPath` —
+   * they coincide often enough that conflating them looks harmless, and then
+   * does not. Supplying it resolves the path exactly and retires the two
+   * heuristics below, which otherwise accept a same-named file from a
+   * different folder ('docs/a.html' vs '/p/archive/docs/a.html') or a path
+   * relative to another room's root entirely. Callers that only ask "is this
+   * path in the review" can omit it; a caller deciding WHICH document a
+   * comment attaches to should not.
+   */
+  shareRoot?: string | null;
+}): boolean {
+  const target = normalizeRoomPath(params.path);
+  if (!target) return false;
+  const published = normalizeRoomPath(params.snapshot.ownerDisplayPath);
+  if (!published) return false;
+  if (published === target) return true;
+  if (published.startsWith('/')) return false;
+
+  const shareRoot = normalizeRoomPath(params.shareRoot);
+  if (shareRoot) {
+    // A single-file share's root IS the file, and it published its own name.
+    return shareRoot === target || `${shareRoot}/${published}` === target;
+  }
+
+  const root = normalizeRoomPath(params.rootPath);
+  if (root && `${root}/${published}` === target) return true;
+  // Leading slash keeps the match on a segment boundary: "a.md" must not
+  // match "beta.md".
+  return target.endsWith(`/${published}`);
 }

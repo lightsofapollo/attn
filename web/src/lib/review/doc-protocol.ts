@@ -96,10 +96,23 @@ export interface RenderableAnchor {
 /** Document → shell. */
 export type DocMessage =
   | { type: 'ready'; v: number; textLength: number; title: string }
-  | { type: 'selection'; v: number; proposal: AnchorProposal; rects: DocRect[]; caret: DocRect }
+  | {
+      type: 'selection';
+      v: number;
+      proposal: AnchorProposal;
+      rects: DocRect[];
+      caret: DocRect;
+      explicit: boolean;
+    }
   | { type: 'selectionCleared'; v: number }
   | { type: 'scopeHover'; v: number; chain: ScopeCandidate[] }
-  | { type: 'scopePicked'; v: number; proposal: AnchorProposal; rects: DocRect[] }
+  | {
+      type: 'scopePicked';
+      v: number;
+      proposal: AnchorProposal;
+      rects: DocRect[];
+      explicit: boolean;
+    }
   | { type: 'anchorsResolved'; v: number; results: AnchorResolution[] }
   | { type: 'geometry'; v: number; results: AnchorGeometry[]; scrollTop: number }
   | { type: 'anchorActivated'; v: number; anchorId: string };
@@ -111,6 +124,15 @@ export type ShellMessage =
   | { type: 'focusAnchor'; v: number; anchorId: string; scrollIntoView: boolean }
   | { type: 'pickScope'; v: number; scopeId: string }
   | { type: 'dismissSelection'; v: number }
+  /**
+   * Whether clicking a document element commits to commenting on it.
+   *
+   * Hover chrome (outline + label chip) is always available so the annotation
+   * model is visible, but swallowing every click is only correct once the
+   * document is genuinely under review: an unshared page is still a page, and
+   * its links and buttons have to keep working.
+   */
+  | { type: 'inspect'; v: number; enabled: boolean }
   | { type: 'theme'; v: number; mode: 'paper' | 'ink' };
 
 // ---------------------------------------------------------------------------
@@ -309,7 +331,14 @@ export function parseDocMessage(raw: unknown): DocMessage | null {
       const rects = parseRects(m.rects);
       const caret = parseRect(m.caret);
       if (!proposal || !rects || !caret) return null;
-      return { type: 'selection', v: DOC_PROTOCOL_VERSION, proposal, rects, caret };
+      return {
+        type: 'selection',
+        v: DOC_PROTOCOL_VERSION,
+        proposal,
+        rects,
+        caret,
+        explicit: m.explicit === true,
+      };
     }
     case 'selectionCleared':
       return { type: 'selectionCleared', v: DOC_PROTOCOL_VERSION };
@@ -327,7 +356,13 @@ export function parseDocMessage(raw: unknown): DocMessage | null {
       const proposal = parseProposal(m.proposal);
       const rects = parseRects(m.rects);
       if (!proposal || !rects) return null;
-      return { type: 'scopePicked', v: DOC_PROTOCOL_VERSION, proposal, rects };
+      return {
+        type: 'scopePicked',
+        v: DOC_PROTOCOL_VERSION,
+        proposal,
+        rects,
+        explicit: m.explicit === true,
+      };
     }
     case 'anchorsResolved': {
       if (!Array.isArray(m.results) || m.results.length > MAX_RESULTS) return null;

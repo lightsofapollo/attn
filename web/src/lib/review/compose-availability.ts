@@ -70,6 +70,24 @@ export const COMPOSE_SUGGEST_NOT_GRANTED =
   'Your invite allows comments, not edits, so suggestions are unavailable.';
 export const COMPOSE_HTML_SUGGEST_UNSUPPORTED =
   'Suggestions are unavailable for HTML documents; add a comment instead.';
+/**
+ * HTML's version of "there is no review context at all".
+ *
+ * Markdown reports that as `absent` and simply hides its toolbar, because the
+ * selection toolbar is the affordance. An HTML document's affordances live
+ * inside a frame the shell cannot reach into, so it cannot hide them — the
+ * refusal has to be spoken instead.
+ */
+export const COMPOSE_HTML_SHARE_FIRST =
+  'Share this HTML file to start a review before commenting.';
+/**
+ * The snapshot is here and hydrated, but it never declared the annotation
+ * capability — it was published by a build that could not author selector
+ * anchors. Structural, not transient: reporting it as "preparing" promises a
+ * wait that will never end.
+ */
+export const COMPOSE_HTML_NOT_ANNOTATABLE =
+  'This shared copy was published without comment support. Share it again to enable commenting.';
 
 /**
  * Resolve whether `kind` can be composed right now.

@@ -190,10 +190,10 @@ ignored by both sides so the protocol can extend without a lockstep upgrade.
 |---|---|---|
 | `hello` | `{}` | runtime booted; sent on `window.parent`, pre-port |
 | `ready` | `{ textLength, title }` | port live, document indexed |
-| `selection` | `{ proposal, rects, caret }` | user selected text; drives the Comment pill |
+| `selection` | `{ proposal, rects, caret, explicit }` | user selected text; drives the Comment pill |
 | `selectionCleared` | `{}` | selection collapsed/lost |
-| `scopeHover` | `{ chain, rects }` | block hover; drives gutter pin + scope breadcrumb |
-| `scopePicked` | `{ proposal, rects }` | user chose a scope (pin or breadcrumb entry) |
+| `scopeHover` | `{ chain, rects }` | element hover; drives the outline + breadcrumb chip |
+| `scopePicked` | `{ proposal, rects, explicit }` | user chose a scope (element click or breadcrumb entry) |
 | `anchorsResolved` | `{ results[] }` | resolution status + rects per rendered anchor |
 | `geometry` | `{ results[], scrollTop, viewport }` | rects moved (scroll/resize/reflow) |
 | `anchorActivated` | `{ anchorId }` | user clicked an overlay chip / pin |
@@ -210,7 +210,31 @@ ignored by both sides so the protocol can extend without a lockstep upgrade.
 | `setAnchorState` | `{ anchorId, state }` | `default` / `active` / `resolved` |
 | `focusAnchor` | `{ anchorId, scrollIntoView }` | rail card → document |
 | `dismissSelection` | `{}` | composer cancelled |
+| `inspect` | `{ enabled }` | this document is under review; annotate it (see below) |
 | `theme` | `{ mode, tokens }` | PAPER/INK switch |
+
+`explicit` separates *the person asked* (Comment pill, element click, breadcrumb entry)
+from *the person is merely dragging a selection*. A shell must answer an explicit proposal
+— open a composer, or say why it cannot — and must ignore a passive one. Silence on an
+explicit proposal is the failure mode attn-yqun.3 exists to close.
+
+`inspect` gates the whole element-annotation surface: hover outline, breadcrumb chip, and
+click-to-comment all appear together and only once the shell says the document can
+actually take a comment.
+
+They are one switch rather than two because the chip is opaque and painted *over* the
+page. An always-visible chip occludes whatever sits above the hovered element and, being
+clickable, swallows clicks there — so on a document that is merely being read it would
+break the page's own links to offer an affordance that could answer nothing but "share
+this first". Under review, that same interception is the point: clicking a link means
+commenting on it, not following it. Before then the document behaves exactly like a
+document, and the text-selection pill remains the way to ask — it answers, with the
+reason.
+
+Two invariants hold inside the frame. A click commits only to the element the chip is
+currently naming, so nothing is ever anchored to something the person could not see was
+selected; and a click is swallowed only when it does become a comment, so nothing is
+taken from the page and then dropped.
 
 `renderAnchors` is deliberately full-state rather than incremental: the frame owns no
 review state, so a diffable snapshot keeps it stateless and makes recovery after a reload

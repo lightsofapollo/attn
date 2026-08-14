@@ -60,6 +60,45 @@ export function injectDocRuntime(html: string): string {
   return html.slice(0, lastMatch.index) + script + html.slice(lastMatch.index);
 }
 
+/**
+ * Flatten an anchor to plain, structured-cloneable data.
+ *
+ * Anchors are assembled from the review store, where Svelte 5 hands out a
+ * PROXY for every object it tracks — and `postMessage` serialises with
+ * structured clone, which throws `DataCloneError` on a proxy. The throw
+ * surfaces nowhere useful: the frame simply never receives the anchor set, so
+ * no pin is painted, no resolution comes back, and the rail has no geometry to
+ * align to. Every symptom points at the document, and nothing points here.
+ *
+ * Flattening also states the boundary's contract honestly — it carries values,
+ * never live objects — so nothing reactive can leak into an untrusted frame.
+ */
+function plainAnchor(anchor: RenderableAnchor): RenderableAnchor {
+  const html = anchor.html;
+  return {
+    anchorId: anchor.anchorId,
+    state: anchor.state,
+    quote: anchor.quote,
+    prefix: anchor.prefix,
+    suffix: anchor.suffix,
+    label: anchor.label,
+    html: {
+      v: html.v,
+      target: html.target,
+      cssSelector: html.cssSelector,
+      fallbackSelectors: html.fallbackSelectors ? [...html.fallbackSelectors] : undefined,
+      textPosition: html.textPosition ? { ...html.textPosition } : undefined,
+      range: html.range ? { ...html.range } : undefined,
+      context: {
+        tagName: html.context.tagName,
+        scopePreview: html.context.scopePreview,
+        role: html.context.role,
+        domPath: html.context.domPath ? [...html.context.domPath] : undefined,
+      },
+    },
+  };
+}
+
 /** A rectangle in the *shell's* coordinate space. */
 export interface ShellRect {
   x: number;
@@ -68,11 +107,34 @@ export interface ShellRect {
   height: number;
 }
 
+/** One anchor the frame is offering, in shell coordinates. */
+export interface ProposalEvent {
+  proposal: AnchorProposal;
+  rects: ShellRect[];
+  /** Where a composer should float; null for element picks (use `rects`). */
+  caret: ShellRect | null;
+  /**
+   * The person asked for this — pressed the Comment pill, clicked an element,
+   * chose a scope on the breadcrumb — rather than merely dragging a selection.
+   *
+   * A shell that cannot open a composer owes an explicit proposal an
+   * explanation; staying silent is what "I clicked Comment and nothing
+   * happened" is made of. Passive proposals carry no such debt.
+   *
+   * The frame sets this, and the frame is untrusted — but the worst a hostile
+   * one gains is raising a composer the user did not ask for, which it could
+   * already do before this flag existed (every proposal opened one). The
+   * composer is shell-owned: the body is typed there and the event is created
+   * there, so this grants no authorship. @see amendments.md #20.
+   */
+  explicit: boolean;
+}
+
 export interface AnnotationBridgeEvents {
   /** The frame booted and is ready to paint. */
   onReady?: () => void;
   /** The user selected text, or picked an element scope. */
-  onProposal?: (proposal: AnchorProposal, rects: ShellRect[], caret: ShellRect | null) => void;
+  onProposal?: (event: ProposalEvent) => void;
   onProposalCleared?: () => void;
   /** Hovering a block offered this scope chain, innermost first. */
   onScopeHover?: (chain: ScopeCandidate[]) => void;
@@ -101,6 +163,12 @@ export class HtmlAnnotationBridge {
    * and port while the shell's review threads have not changed.
    */
   #rendered: RenderableAnchor[] | null = null;
+  /**
+   * Retained for the same reason as `#rendered`: a reloaded frame boots with
+   * inspection off, and a document that silently stopped answering clicks after
+   * a live-reload would read as broken.
+   */
+  #inspect = false;
 
   constructor(frame: HTMLIFrameElement, events: AnnotationBridgeEvents) {
     this.#frame = frame;
@@ -141,6 +209,10 @@ export class HtmlAnnotationBridge {
     // carries no secret; its only payload is the port itself.
     target.postMessage({ type: SHELL_INIT, v: DOC_PROTOCOL_VERSION }, '*', [channel.port2]);
 
+    if (this.#inspect) {
+      this.#port.postMessage({ type: 'inspect', v: DOC_PROTOCOL_VERSION, enabled: true });
+    }
+
     if (this.#rendered) {
       this.#port.postMessage({
         type: 'renderAnchors',
@@ -164,14 +236,20 @@ export class HtmlAnnotationBridge {
         this.#events.onReady?.();
         break;
       case 'selection':
-        this.#events.onProposal?.(
-          message.proposal,
-          this.toShellRects(message.rects),
-          this.toShellRect(message.caret),
-        );
+        this.#events.onProposal?.({
+          proposal: message.proposal,
+          rects: this.toShellRects(message.rects),
+          caret: this.toShellRect(message.caret),
+          explicit: message.explicit,
+        });
         break;
       case 'scopePicked':
-        this.#events.onProposal?.(message.proposal, this.toShellRects(message.rects), null);
+        this.#events.onProposal?.({
+          proposal: message.proposal,
+          rects: this.toShellRects(message.rects),
+          caret: null,
+          explicit: message.explicit,
+        });
         break;
       case 'selectionCleared':
         this.#events.onProposalCleared?.();
@@ -236,11 +314,18 @@ export class HtmlAnnotationBridge {
    * every successful hello, so a frame reload never drops existing pins.
    */
   renderAnchors(anchors: RenderableAnchor[]): void {
-    this.#rendered = anchors;
+    // Flattened once, on the way in: the retained copy is replayed after every
+    // reload, so storing the live proxies would just move the DataCloneError
+    // to the next handshake.
+    this.#rendered = anchors.map(plainAnchor);
     if (!this.#port) {
       return;
     }
-    this.#port.postMessage({ type: 'renderAnchors', v: DOC_PROTOCOL_VERSION, anchors });
+    this.#port.postMessage({
+      type: 'renderAnchors',
+      v: DOC_PROTOCOL_VERSION,
+      anchors: this.#rendered,
+    });
   }
 
   setAnchorState(anchorId: string, state: AnchorRenderState): void {
@@ -265,6 +350,19 @@ export class HtmlAnnotationBridge {
     this.#port?.postMessage({ type: 'pickScope', v: DOC_PROTOCOL_VERSION, scopeId });
   }
 
+  /**
+   * Whether clicking an element in the document commits to commenting on it.
+   *
+   * The frame always offers hover chrome, so the annotation model is visible on
+   * any rendered document. Taking the click, though, means the page's own links
+   * and buttons stop working — only correct once the document is genuinely
+   * under review, which is a question only the shell can answer.
+   */
+  setInspect(enabled: boolean): void {
+    this.#inspect = enabled;
+    this.#port?.postMessage({ type: 'inspect', v: DOC_PROTOCOL_VERSION, enabled });
+  }
+
   dismissSelection(): void {
     this.#port?.postMessage({ type: 'dismissSelection', v: DOC_PROTOCOL_VERSION });
   }
@@ -281,5 +379,6 @@ export class HtmlAnnotationBridge {
     this.#port?.close();
     this.#port = null;
     this.#rendered = null;
+    this.#inspect = false;
   }
 }

@@ -109,6 +109,10 @@
   } from '@handlewithcare/prosemirror-suggest-changes';
   import { hasTextSelection } from './lib/review/popover-anchor';
   import {
+    COMPOSE_FILE_NOT_SHARED,
+    COMPOSE_HTML_NOT_ANNOTATABLE,
+    COMPOSE_HTML_SHARE_FIRST,
+    COMPOSE_PREPARING,
     resolveComposeAvailability,
     toolbarShouldRender,
   } from './lib/review/compose-availability';
@@ -148,6 +152,7 @@
     collabSeedReady,
     ownerRoomForPath,
     roomPublishesPath,
+    snapshotPublishesPath,
     ownerUnreadByPath,
     shareTargetMatches,
   } from './lib/review/room-ui';
@@ -413,24 +418,102 @@
     position: { top: number; left: number };
     // Snapshot identity captured at open time: the proposal's offsets/quote
     // were measured against the document as it was THEN, so a republish while
-    // the composer is open must not restamp them onto the new snapshot.
+    // the composer is open must not restamp them onto the new snapshot. The
+    // room comes from the SNAPSHOT for the same reason — see below.
+    roomId: string;
     fileId: string;
     snapshotId: string;
     baseHash: string;
   } | null>(null);
 
+  /**
+   * The snapshot the HTML document ON SCREEN belongs to.
+   *
+   * Deliberately not resolved through `reviewStore.currentRoomId`. A reviewer
+   * renders the snapshot itself, so the focused room is the right answer for
+   * them — but an owner stays on their LOCAL file after sharing (attn-0wa), and
+   * room focus follows navigation, so keying annotation off the focused room
+   * made a shared document silently un-commentable on the side that shared it.
+   * The document being displayed is what decides.
+   */
+  let htmlAnnotationSnapshot = $derived.by((): ReviewSnapshot | null => {
+    if (isReviewerViewingHtmlSnapshot) return reviewSnapshot;
+    if (activeFileType !== 'html') return null;
+    const owned = reviewStore.snapshots.filter((snapshot) => {
+      const room = reviewStore.rooms[snapshot.roomId];
+      if (room?.role !== 'owner') return false;
+      if (snapshot.docType !== 'html' || typeof snapshot.content !== 'string') return false;
+      // This decides which document a comment ATTACHES to, so it resolves the
+      // published path against the room's own share root rather than accepting
+      // the loose heuristics that answer the cheaper question "is this path
+      // somewhere in the review". A reconnect can lose the share (attn-0wa),
+      // and falling back is better than going blind — but a same-named file in
+      // another folder must not be able to claim the room.
+      const shareRoot = room.share?.ownerDisplayPath ?? null;
+      if (!snapshotPublishesPath({ snapshot, path: activePath, rootPath, shareRoot })) {
+        return false;
+      }
+      return shareRoot ? shareTargetMatches(shareRoot, activePath) : true;
+    });
+    if (owned.length === 0) return null;
+    return owned.reduce((latest, snapshot) =>
+      snapshot.createdAt > latest.createdAt ? snapshot : latest,
+    );
+  });
+
   /** HTML snapshots carry no anchorIndex — they declare a capability instead. */
   let htmlAnnotatable = $derived(
-    reviewSnapshotDocType === 'html' &&
-      reviewSnapshot?.annotation === 'html_selectors_v1' &&
-      reviewStore.currentRoomId !== null,
+    htmlAnnotationSnapshot?.annotation === 'html_selectors_v1',
   );
+
+  // Hover chrome is always live in an annotating frame; taking the CLICK is
+  // what has to wait for a real review, or an unshared page would stop
+  // following its own links the moment attn rendered it.
+  $effect(() => {
+    htmlBridge?.setInspect(htmlAnnotatable);
+  });
+
+  /**
+   * Why this HTML document cannot take a comment right now.
+   *
+   * Only ever spent on an explicit request, and never returns nothing: the
+   * whole point of attn-yqun.3 is that no press of Comment ends in silence.
+   */
+  function htmlCommentUnavailableReason(): string {
+    // The snapshot is here. Whether that is a wait or a dead end depends on
+    // why it cannot take an anchor: a hydrating snapshot resolves itself in a
+    // moment, but one published without the capability never will, and calling
+    // that "preparing" promises a wait that never ends.
+    if (htmlAnnotationSnapshot !== null) {
+      return htmlAnnotationSnapshot.annotation === undefined
+        ? COMPOSE_HTML_NOT_ANNOTATABLE
+        : COMPOSE_PREPARING;
+    }
+    const roomId = ownerRoomIdForActivePath;
+    if (roomId === null) return COMPOSE_HTML_SHARE_FIRST;
+    // `ownerRoomForPath` resolves through the share ROOT, so for a folder share
+    // it answers yes for every file in the project. Membership is the published
+    // file set — except while a freshly minted room has yet to publish anything,
+    // when there is nothing to compare against and waiting is the honest answer.
+    const roomHasPublishedFiles = reviewStore.snapshots.some(
+      (snapshot) => snapshot.roomId === roomId && Boolean(snapshot.ownerDisplayPath),
+    );
+    if (!roomHasPublishedFiles) return COMPOSE_PREPARING;
+    return roomPublishesPath({
+      path: activePath,
+      roomId,
+      snapshots: reviewStore.snapshots,
+      rootPath,
+    })
+      ? COMPOSE_PREPARING
+      : COMPOSE_FILE_NOT_SHARED;
+  }
 
   // A snapshot republish or file switch invalidates an open composer: its
   // proposal no longer describes the displayed document. Close rather than
   // silently mint a drifted-from-birth comment.
   $effect(() => {
-    const current = reviewSnapshot?.snapshotId;
+    const current = htmlAnnotationSnapshot?.snapshotId;
     if (htmlComposer && htmlComposer.snapshotId !== current) {
       htmlComposer = null;
       htmlBridge?.dismissSelection();
@@ -438,7 +521,14 @@
   });
 
   let htmlRenderableAnchors = $derived.by(() => {
-    if (reviewSnapshotDocType !== 'html') return [] as RenderableAnchor[];
+    const snapshot = htmlAnnotationSnapshot;
+    // Both halves matter. Without the first, an owner's local HTML file painted
+    // nothing because the check keyed off the FOCUSED snapshot rather than the
+    // displayed document; without the second, a focus that has moved on would
+    // paint another file's threads onto this one.
+    if (!snapshot || reviewStore.currentFileId !== snapshot.fileId) {
+      return [] as RenderableAnchor[];
+    }
     const out: RenderableAnchor[] = [];
     for (const thread of reviewStore.threadsForCurrentFile) {
       const anchor = thread.anchor;
@@ -463,6 +553,31 @@
     bridge.renderAnchors(anchors);
   });
 
+  // Debug/E2E mirror of the shell's own annotation wiring, in the same spirit
+  // as `__attn_collab_debug__`. It exists because the daemon automation bridge
+  // evaluates in the SHELL's context and cannot reach into the opaque-origin
+  // frame: without this, "the owner's frame never completed its handshake" —
+  // the exact defect a missing `bind:this` caused — is invisible from outside.
+  // Read-only shell state; nothing here can drive the document or author review
+  // state (amendments.md #20).
+  $effect(() => {
+    (
+      window as Window & { __attn_html_debug__?: Record<string, unknown> }
+    ).__attn_html_debug__ = {
+      annotatable: htmlAnnotatable,
+      snapshotId: htmlAnnotationSnapshot?.snapshotId ?? null,
+      composerOpen: htmlComposer !== null,
+      // Geometry crosses a MessagePort from an origin the shell cannot inspect,
+      // so "the rail is empty" and "the frame never reported this anchor" look
+      // identical from outside without this.
+      renderableAnchors: htmlRenderableAnchors.length,
+      anchorTops: Object.keys(htmlAnchorTops).length,
+      // A getter, not a snapshot: the handshake completes asynchronously after
+      // the bridge is constructed, so a captured boolean would always be false.
+      bridgeConnected: () => htmlBridge?.connected ?? false,
+    };
+  });
+
   function applyHtmlGeometry(results: { anchorId: string; rects: { y: number }[] }[]): void {
     const next: Record<string, number> = {};
     for (const result of results) {
@@ -475,8 +590,15 @@
   }
 
   function reportHtmlResolutions(results: AnchorResolution[]): void {
-    const roomId = reviewStore.currentRoomId;
-    if (!roomId) return;
+    // Keyed to the DISPLAYED document, not merely to a focused room. Every
+    // owner-side HTML file gets a live bridge — including unshared ones — and
+    // the document's own scripts share the frame's JS context, so an
+    // unannotatable document could otherwise post `anchorsResolved` and have
+    // the shell emit resolution events into whatever room happened to be in
+    // focus. The frame reports geometry; it does not choose the room.
+    const snapshot = htmlAnnotationSnapshot;
+    if (!htmlAnnotatable || !snapshot) return;
+    const roomId = snapshot.roomId;
     for (const result of results) {
       const thread = reviewStore.threadsForCurrentFile.find((t) => t.id === result.anchorId);
       const eventId = thread?.rootEvent.meta.eventId;
@@ -494,29 +616,29 @@
   }
 
   const htmlAnnotationEvents: AnnotationBridgeEvents = {
-    onProposal: (proposal, rects, caret) => {
-      if (!htmlAnnotatable) {
-        // The runtime reports a proposal once on selection and once when the
-        // person activates its Comment pill. Only the latter has a caret, so
-        // we can explain an unshared/pending owner document without spraying a
-        // toast for every ordinary text selection.
-        if (caret && commentAvailability.status !== 'ready') {
-          toast.info(
-            commentAvailability.status === 'absent'
-              ? 'Share this HTML file to start a review before commenting.'
-              : commentAvailability.status === 'pending'
-                ? commentAvailability.reason
-                : commentAvailability.reason,
-          );
+    onProposal: ({ proposal, rects, caret, explicit }) => {
+      const snapshot = htmlAnnotationSnapshot;
+      // Every refusal below is REPORTED. The previous version returned bare
+      // whenever the focused room did not line up with the displayed document,
+      // which is what "I click Comment and nothing happens" was made of — and
+      // is indistinguishable from a broken build (same discipline as
+      // compose-availability.ts for markdown).
+      if (!htmlAnnotatable || !snapshot) {
+        // Fixed id: the frame chooses how many explicit proposals to send, and
+        // a document's own scripts share its JS context. One replaceable toast
+        // cannot be stacked into a wall of them.
+        if (explicit) {
+          toast.info(htmlCommentUnavailableReason(), { id: 'html-comment-unavailable' });
         }
         return;
       }
-      const snapshot = reviewSnapshot;
-      if (!snapshot) return;
+      // Dragging a selection is not a request for a composer; the pill is.
+      if (!explicit) return;
       const near = caret ?? rects[rects.length - 1];
       htmlComposer = {
         proposal,
         position: { top: (near?.y ?? 0) + (near?.height ?? 0) + 8, left: near?.x ?? 0 },
+        roomId: snapshot.roomId,
         fileId: snapshot.fileId,
         snapshotId: snapshot.snapshotId,
         baseHash: snapshot.baseHash,
@@ -3599,8 +3721,12 @@
     Callers that pass an explicit `rightRail` snippet prop override this
     (used by tests or alternative shells).
   -->
+  <!-- Keyed to the document ON SCREEN, not the focused room's snapshot: an
+       owner stays on their local file after sharing, so the focused-snapshot
+       answer can say "markdown" about a document that is plainly HTML and hand
+       the rail a ProseMirror view that does not exist for it. -->
   <ReviewMargin
-    view={reviewSnapshotDocType === 'html' ? undefined : pmViewForReview}
+    view={htmlAnnotationSnapshot ? undefined : pmViewForReview}
     anchorTops={htmlAnchorTops}
   />
 {/snippet}
@@ -4019,8 +4145,12 @@
 <!-- HTML documents get their own composer: the anchor arrives prebuilt from
      the document frame rather than being derived from a ProseMirror
      selection. @see planning/collab/html-annotation.md §3 -->
-{#if htmlComposer && reviewStore.currentRoomId}
-  {@const htmlRoomId = reviewStore.currentRoomId}
+<!-- Gated on the composer alone: it carries the room its snapshot belongs to,
+     captured when it opened. Gating on the FOCUSED room instead meant an owner
+     whose focus had moved (or never landed) got a composer that could never
+     render. -->
+{#if htmlComposer}
+  {@const htmlRoomId = htmlComposer.roomId}
   <HtmlCommentComposer
     proposal={htmlComposer.proposal}
     position={htmlComposer.position}

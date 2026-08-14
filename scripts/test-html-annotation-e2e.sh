@@ -18,8 +18,17 @@
 # sandboxed iframe, so the automation bridge (which evaluates in the SHELL's
 # context) cannot reach into it. We therefore assert on what the shell can
 # legitimately observe — the injected marker in the iframe's srcdoc, the
-# capability on the received snapshot, and the mounted margin — rather than
-# pretending to inspect the frame's DOM.
+# capability on the received snapshot, the shell's own annotation wiring, and
+# the mounted margin — rather than pretending to inspect the frame's DOM.
+#
+# THE IN-FRAME INTERACTION LAYER IS NOT TESTED HERE, and pretending otherwise is
+# how the hover/click layer once shipped green while being unusable by hand.
+# Hovering, the label chip, element clicks and the Comment pill are driven with
+# a real mouse against a real opaque-origin frame in
+# web/e2e/html-annotation-runtime.spec.ts (`npm run test:e2e:html-annotation`).
+# What this script uniquely proves is the part that needs two daemons and a
+# relay: that the capability, the bytes and the runtime survive the encrypted
+# round trip, and that both sides' shells wire an annotatable frame up.
 #
 # Honors ATTN_SKIP_HTML_ANNOTATION_E2E=1 as a CI escape hatch (relay + webview
 # need a display + loopback, flaky on some headless infra).
@@ -178,6 +187,26 @@ case "$OWNER_SANDBOX" in
     *allow-same-origin*) fail "owner frame escaped its opaque origin (sandbox='$OWNER_SANDBOX')" ;;
     *allow-scripts*) pass "owner annotating frame retains opaque-origin scripts" ;;
     *) fail "owner frame has unexpected sandbox ('$OWNER_SANDBOX')" ;;
+esac
+
+# The owner's own document has to be annotatable and its frame has to have
+# COMPLETED the handshake. Both were false in the shipped build: annotatability
+# was keyed on the focused room (which an owner routinely does not have, since
+# they stay on their local file — attn-0wa), and the path-mode iframe was never
+# bound to the bridge at all, so the runtime said hello and nothing answered.
+# Neither failure is visible in any iframe attribute, which is why they reached
+# a human. Polled: the handshake is asynchronous.
+OWNER_WIRED=""
+for _ in $(seq 1 30); do
+    OWNER_WIRED="$(attn_owner --eval \
+        "JSON.stringify([window.__attn_html_debug__?.annotatable === true, window.__attn_html_debug__?.bridgeConnected?.() === true])" \
+        2>/dev/null | jq -r . 2>/dev/null || echo '')"
+    case "$OWNER_WIRED" in *'[true,true]'*) break ;; esac
+    sleep 0.5
+done
+case "$OWNER_WIRED" in
+    *'[true,true]'*) pass "owner's shared HTML doc is annotatable and its frame is connected" ;;
+    *) fail "owner annotation wiring incomplete ([annotatable,connected]=$OWNER_WIRED)" ;;
 esac
 
 __attn_dual_wait_one "$ATTN_DUAL_OWNER" '[data-slot="review-margin"]' 15000 \

@@ -177,7 +177,14 @@
       onload={() => (loading = false)}
     ></iframe>
   {:else}
+    <!--
+      `bind:this` matters as much here as in the srcdoc branch: without it the
+      annotation bridge has no frame to hand shake with, so an owner's local
+      HTML file injected the runtime, the runtime said hello, and nothing
+      answered — every pill press and element click died in a closed port.
+    -->
     <iframe
+      bind:this={frameEl}
       {src}
       title={fileName}
       class="block h-full border-0 bg-white"

@@ -68,7 +68,14 @@ printf '# Hosted review canary\n\n- [ ] Read-only browser task\n\nCiphertext bou
 printf '# Folder sibling canary\n\nSwitching files must switch decrypted document content.\n' >"$SIBLING_DOC"
 {
   printf '# R2 snapshot canary\n\n%s\n\n<!--\n' "$R2_CANARY"
-  dd if=/dev/zero bs=1200000 count=1 2>/dev/null | tr '\0' 'x'
+  # Incompressible filler, deliberately. The R2 spillover decision is made on
+  # the CIPHERTEXT size after snapshot compression (bootstrap.rs
+  # RELAY_BLOB_SPILLOVER_THRESHOLD_BYTES), and the old 1.2 MB of repeated 'x'
+  # deflates to a few KB — so this document quietly stopped exercising the R2
+  # lane the day compression landed, and the suite's `?cap=` assertion went
+  # dead. Base64 of random bytes stays ~1.8 MB after compression: over the
+  # 1 MiB spillover threshold, under the 5 MiB snapshot cap.
+  dd if=/dev/urandom bs=1800000 count=1 2>/dev/null | base64
   printf '\n-->\n'
 } >"$R2_DOC"
 
@@ -158,8 +165,10 @@ do
 done
 
 ROOM_ID="$(node -e 'const u=new URL(process.argv[1]);process.stdout.write(u.pathname.split("/").filter(Boolean).at(-1) || "")' "$COMMENT_INVITE")"
-DEFAULT_COMMENT_INVITE="$(ATTN_HOME="$ATTN_HOME" ATTN_BROWSER_REVIEW_URL="$WEB_ORIGIN/review" "$ATTN_BIN" review invite "$ROOM_ID" --browser)"
-EXPLICIT_COMMENT_INVITE="$(ATTN_HOME="$ATTN_HOME" ATTN_BROWSER_REVIEW_URL="$WEB_ORIGIN/review" "$ATTN_BIN" review invite "$ROOM_ID" --tier comment --browser)"
+# `--` before the id: a base64url room id can begin with `-` (about 1 run in
+# 64), and clap would otherwise reject it as an unknown flag.
+DEFAULT_COMMENT_INVITE="$(ATTN_HOME="$ATTN_HOME" ATTN_BROWSER_REVIEW_URL="$WEB_ORIGIN/review" "$ATTN_BIN" review invite --browser -- "$ROOM_ID")"
+EXPLICIT_COMMENT_INVITE="$(ATTN_HOME="$ATTN_HOME" ATTN_BROWSER_REVIEW_URL="$WEB_ORIGIN/review" "$ATTN_BIN" review invite --tier comment --browser -- "$ROOM_ID")"
 [ "$DEFAULT_COMMENT_INVITE" = "$COMMENT_INVITE" ] && [ "$EXPLICIT_COMMENT_INVITE" = "$COMMENT_INVITE" ] || {
   echo 'hosted E2E failed: human/default browser invite is not comment tier' >&2
   exit 1

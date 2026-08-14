@@ -19,6 +19,15 @@ const ownerHome = process.env.ATTN_OWNER_HOME;
 const attnBin = process.env.ATTN_BIN;
 const execFileAsync = promisify(execFile);
 
+// This suite audits the actual wire: what bytes leave the page, and that no
+// plaintext or key material ever does. The hosted app's service worker breaks
+// that audit — once it takes control (clients.claim lands mid-session), later
+// fetches such as the R2 blob download are issued FROM the worker and never
+// surface on page.on('request'), so a leak there would be invisible and a
+// legitimate `?cap=` fetch looks absent. You cannot audit the wire through a
+// cache; the app must work service-worker-less anyway (every first visit is).
+test.use({ serviceWorkers: 'block' });
+
 interface EnvelopePost {
   body: string;
   pow: string;
@@ -90,7 +99,7 @@ test('v3 browser tiers render and expose only their granted composers', async ({
   const matrix = [
     { tier: 'view', label: 'View only', url: viewInviteUrl!, authoring: 'false', comment: false, suggest: false },
     { tier: 'comment', label: 'Can comment', url: commentInviteUrl!, authoring: 'true', comment: true, suggest: false },
-    { tier: 'suggest', label: 'Can suggest', url: suggestInviteUrl!, authoring: 'true', comment: true, suggest: true },
+    { tier: 'suggest', label: 'Can comment and suggest edits', url: suggestInviteUrl!, authoring: 'true', comment: true, suggest: true },
   ] as const;
   for (const entry of matrix) {
     const tierContext = await browser.newContext();
@@ -102,7 +111,18 @@ test('v3 browser tiers render and expose only their granted composers', async ({
     const shell = page.locator('[data-slot="browser-review"]');
     await expect(shell).toHaveAttribute('data-authoring-ready', entry.authoring);
     await expect(shell).toHaveAttribute('data-grant-tier', entry.tier);
+    if (entry.authoring === 'true') {
+      await completeNamePrompt(page, `Tier ${entry.tier} reviewer`);
+    } else {
+      // View tier never authors anything, so it must not be nagged for a name.
+      await expect(page.locator('[data-slot="name-prompt"]')).toHaveCount(0);
+    }
+    // The tier label lives inside the reviewer status chip's popover now, so
+    // reading it means opening the chip the way a person would.
+    await page.locator('[data-slot="reviewer-status-chip"]').click();
     await expect(page.locator('[data-slot="browser-grant-tier"]')).toHaveText(entry.label);
+    await page.keyboard.press('Escape');
+    await expect(page.locator('[data-slot="browser-grant-tier"]')).toHaveCount(0);
     await page.getByRole('button', { name: 'Hosted review canary' }).click();
     await expect(page.getByText(contentCanary, { exact: false })).toBeVisible();
     if (entry.authoring === 'true') {
@@ -135,6 +155,24 @@ test('v3 browser tiers render and expose only their granted composers', async ({
     await tierContext.close();
   }
 });
+
+/**
+ * Walk through the display-name onboarding dialog.
+ *
+ * The hosted reviewer opens a blocking name prompt the moment a non-view
+ * session connects with no saved profile (BrowserReviewApp's onboarding
+ * effect, 98dc426) — and every E2E context is a fresh profile, so every
+ * authoring-tier join hits it. Its scrim swallows all clicks while open, so
+ * the suite must complete it exactly where a person would: after connecting,
+ * before touching the document.
+ */
+async function completeNamePrompt(page: Page, name: string): Promise<void> {
+  const prompt = page.locator('[data-slot="name-prompt"]');
+  await prompt.waitFor({ state: 'visible' });
+  await page.locator('[data-slot="name-prompt-input"]').fill(name);
+  await page.locator('[data-slot="name-prompt-confirm"]').click();
+  await prompt.waitFor({ state: 'hidden' });
+}
 
 async function selectEditorText(page: Page, needle: string): Promise<void> {
   const outcome = await page.evaluate((text) => {
@@ -432,6 +470,7 @@ test('native share opens in hosted reviewer without leaking plaintext or keys', 
   await expect.poll(() => capture.deviceStatuses.some((status) => status === 200 || status === 204)).toBe(true);
   await expect.poll(() => capture.wire.some((line) => line.startsWith('WS< '))).toBe(true);
   await expect(page.locator('[data-slot="browser-review"]')).toHaveAttribute('data-authoring-ready', 'true');
+  await completeNamePrompt(page, 'Primary reviewer');
   let browserDirectState: string | null = null;
   try {
     await expect(page.locator('[data-slot="browser-review"]')).toHaveAttribute(
@@ -534,6 +573,7 @@ test('native share opens in hosted reviewer without leaking plaintext or keys', 
   });
   await peerPage.goto(inviteUrl!, { waitUntil: 'domcontentloaded' });
   await expect(peerPage.locator('[data-slot="browser-review"]')).toHaveAttribute('data-authoring-ready', 'true');
+  await completeNamePrompt(peerPage, 'Peer reviewer');
   await peerPage.getByRole('button', { name: 'Hosted review canary' }).click();
   await expect(peerPage.getByText(contentCanary, { exact: false })).toBeVisible();
   try {
@@ -722,7 +762,17 @@ test('native share opens in hosted reviewer without leaking plaintext or keys', 
   const ipcCalls = await page.evaluate(
     () => (window as unknown as { __attnIpcCalls?: string[] }).__attnIpcCalls ?? [],
   );
-  expect(ipcCalls).toEqual([]);
+  // Profile plumbing is the one legitimate traffic on a native bridge: when
+  // `window.ipc` exists (this test plants one to catch leaks), completing the
+  // name prompt persists the display profile through it. Neither message can
+  // carry document content or key material; anything else crossing the bridge
+  // is still a failure.
+  const unexpectedIpc = ipcCalls.filter(
+    (call) => !/"type":"review_set_(?:display_name|color)"/u.test(call),
+  );
+  expect(unexpectedIpc).toEqual([]);
+  expect(ipcCalls.join('\n')).not.toContain(secretCanary!);
+  expect(ipcCalls.join('\n')).not.toContain(contentCanary);
 
   const observedWire = capture.wire.join('\n');
   expect(observedWire).not.toContain(contentCanary);
@@ -768,14 +818,20 @@ test('native share opens in hosted reviewer without leaking plaintext or keys', 
     'data-authoring-ready',
     'true',
   );
+  // Default mode persists nothing (proven above), so the fresh session
+  // onboards a display name again.
+  await completeNamePrompt(page, 'Primary reviewer');
   await page.getByRole('button', { name: 'Hosted review canary' }).click();
   await expect(page.getByText(contentCanary, { exact: false })).toBeVisible();
+  // The link's persistence controls live in the reviewer status chip popover.
+  await page.locator('[data-slot="reviewer-status-chip"]').click();
+  await expect(page.locator('[data-slot="browser-grant-tier"]')).toBeVisible();
   const rememberButton = page.locator('[data-slot="browser-remember-room"]');
   if ((await rememberButton.count()) === 0) {
     // V3 capability persistence is intentionally not implemented yet. Keep
     // the UI honest and retain the fragmentless-refresh fail-closed behavior
     // proved above.
-    await expect(page.locator('[data-slot="browser-persistence-status"]')).toContainText('Keep this link to come back');
+    await expect(page.getByText('Keep this link to come back to the review.')).toBeVisible();
     const unexpectedBrowserErrors = capture.browserErrors.filter(
       (message) => !message.includes('net::ERR_INTERNET_DISCONNECTED'),
     );
@@ -788,6 +844,7 @@ test('native share opens in hosted reviewer without leaking plaintext or keys', 
     console.log(`Remember errors:\n${capture.browserErrors.join('\n')}`);
   }
   await expect(page.getByText(/^Remembered(?: on this browser|; browser may evict local data)$/)).toBeVisible();
+  await page.keyboard.press('Escape');
 
   const rememberedAudit = await page.evaluate(async () => {
     const databaseName = 'attn-browser-review';
@@ -851,11 +908,18 @@ test('native share opens in hosted reviewer without leaking plaintext or keys', 
   // non-extractable remembered key plus exact sealed envelope replay.
   const subscribeCountBeforeReload = capture.wire.filter((line) => line.startsWith('WS> ')).length;
   await page.reload({ waitUntil: 'domcontentloaded' });
-  await expect(page.getByText(/^Remembered(?: on this browser|; browser may evict local data)$/)).toBeVisible();
   await expect(page.locator('[data-slot="browser-review"]')).toHaveAttribute(
     'data-authoring-ready',
     'true',
   );
+  // The planted `window.ipc` stub makes the app route profile persistence to
+  // the "native" bridge instead of browser storage, so every recovered
+  // session in this test onboards afresh.
+  await completeNamePrompt(page, 'Primary reviewer');
+  // The remembered state renders inside the status chip popover.
+  await page.locator('[data-slot="reviewer-status-chip"]').click();
+  await expect(page.getByText(/^Remembered(?: on this browser|; browser may evict local data)$/)).toBeVisible();
+  await page.keyboard.press('Escape');
   await page.getByRole('button', { name: 'Hosted review canary' }).click();
   await expect(page.getByText(contentCanary, { exact: false })).toBeVisible();
   await expect(page.getByRole('button', { name: 'Folder sibling canary' })).toBeVisible();
@@ -942,6 +1006,8 @@ test('forced WebRTC failure stays honest and converges through encrypted mailbox
   const shell = page.locator('[data-slot="browser-review"]');
   await expect(shell).toHaveAttribute('data-authoring-ready', 'true');
   await expect(shell).toHaveAttribute('data-connection', 'direct_failed');
+  // A failed direct link is still a connected session — onboarding runs here too.
+  await completeNamePrompt(page, 'Fallback reviewer');
   await page.getByRole('button', { name: 'Hosted review canary' }).click();
   await expect(page.getByText(contentCanary, { exact: false })).toBeVisible();
   await selectEditorText(page, 'Shared by native');

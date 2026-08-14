@@ -55,6 +55,9 @@ export interface ComposeContext {
    * its payload is hydrated, and an anchor cannot be authored against one.
    */
   fileSnapshotHasAnchors: boolean;
+  /** HTML has no Markdown anchor index; this capability means its sandboxed
+   * document runtime can author selector anchors instead. */
+  fileSnapshotHasHtmlSelectors?: boolean;
   /** What this device's invite permits. */
   grantTier: 'comment' | 'suggest';
 }
@@ -65,6 +68,26 @@ export const COMPOSE_FILE_NOT_SHARED =
   'This file is not part of the share, so there is nothing for a comment to attach to. Share it to review it.';
 export const COMPOSE_SUGGEST_NOT_GRANTED =
   'Your invite allows comments, not edits, so suggestions are unavailable.';
+export const COMPOSE_HTML_SUGGEST_UNSUPPORTED =
+  'Suggestions are unavailable for HTML documents; add a comment instead.';
+/**
+ * HTML's version of "there is no review context at all".
+ *
+ * Markdown reports that as `absent` and simply hides its toolbar, because the
+ * selection toolbar is the affordance. An HTML document's affordances live
+ * inside a frame the shell cannot reach into, so it cannot hide them — the
+ * refusal has to be spoken instead.
+ */
+export const COMPOSE_HTML_SHARE_FIRST =
+  'Share this HTML file to start a review before commenting.';
+/**
+ * The snapshot is here and hydrated, but it never declared the annotation
+ * capability — it was published by a build that could not author selector
+ * anchors. Structural, not transient: reporting it as "preparing" promises a
+ * wait that will never end.
+ */
+export const COMPOSE_HTML_NOT_ANNOTATABLE =
+  'This shared copy was published without comment support. Share it again to enable commenting.';
 
 /**
  * Resolve whether `kind` can be composed right now.
@@ -83,6 +106,10 @@ export function resolveComposeAvailability(
     return { status: 'blocked', reason: COMPOSE_SUGGEST_NOT_GRANTED };
   }
 
+  if (kind === 'suggest' && ctx.fileSnapshotHasHtmlSelectors) {
+    return { status: 'blocked', reason: COMPOSE_HTML_SUGGEST_UNSUPPORTED };
+  }
+
   // No snapshot anywhere in the room: the share is still completing. This is
   // the state the browser dev loop was permanently stuck in before
   // attn-64iy.1, and reading it as "not shared" would have been wrong — the
@@ -94,7 +121,7 @@ export function resolveComposeAvailability(
   }
 
   // Snapshot known but not yet hydrated — its blob is still arriving.
-  if (!ctx.fileSnapshotHasAnchors) {
+  if (!ctx.fileSnapshotHasAnchors && !ctx.fileSnapshotHasHtmlSelectors) {
     return { status: 'pending', reason: COMPOSE_PREPARING };
   }
 

@@ -279,19 +279,19 @@
            are open" is legible before a single card is on screen and the
            cards (a lighter `--review-card-surface`) read as floating on it.
            The rail still never scrolls; wheel forwards to the doc. -->
-      <aside
-        class="right-rail relative flex shrink-0 flex-col overflow-hidden"
-        style={`width: ${railWidthPx}px;`}
-        data-state={panelOpen ? 'open' : 'closed'}
-        data-mode={railMode}
-        data-slot="right-rail"
-        data-width={railWidthPx}
-        data-default-width={RAIL_WIDTH_PX.expanded}
-        data-resizing={dragging ? 'true' : 'false'}
-        aria-label="Review margin"
-        aria-hidden={railMode === 'hidden'}
-        onwheel={(event) => onRailWheel?.(event.deltaY)}
-      >
+      {#if railMode !== 'hidden'}
+        <aside
+          class="right-rail relative flex shrink-0 flex-col overflow-hidden"
+          style={`width: ${railWidthPx}px;`}
+          data-state={panelOpen ? 'open' : 'closed'}
+          data-mode={railMode}
+          data-slot="right-rail"
+          data-width={railWidthPx}
+          data-default-width={RAIL_WIDTH_PX.expanded}
+          data-resizing={dragging ? 'true' : 'false'}
+          aria-label="Review margin"
+          onwheel={(event) => onRailWheel?.(event.deltaY)}
+        >
         {#if railMode === 'expanded'}
           <!-- The grab edge. It sits INSIDE the aside rather than straddling
                the hairline border, because the aside clips its overflow — a
@@ -335,7 +335,6 @@
             onkeydown={onHandleKeyDown}
           ></div>
         {/if}
-        {#if railMode !== 'hidden'}
           {#if railToggleInHeader}
             <div class="h-2 shrink-0" aria-hidden="true"></div>
           {:else}
@@ -369,8 +368,8 @@
           <div class="relative mb-2 min-h-0 flex-1 overflow-hidden">
             {@render rail()}
           </div>
-        {/if}
-      </aside>
+        </aside>
+      {/if}
     </div>
   </SidebarInset>
 </SidebarProvider>

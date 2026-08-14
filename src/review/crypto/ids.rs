@@ -365,6 +365,7 @@ mod tests {
                 block: None,
                 context: None,
                 structure: None,
+                html: None,
             },
             body: text.to_string(),
         }
@@ -907,6 +908,7 @@ mod tests {
                 block: None,
                 context: None,
                 structure: None,
+                html: None,
             },
             operation: SuggestionOperation::Replace {
                 expected_text: "foo".to_string(),
@@ -978,6 +980,7 @@ mod tests {
                     block: None,
                     context: None,
                     structure: None,
+                    html: None,
                 },
                 body: format!("parent-count vector: {label}"),
             };

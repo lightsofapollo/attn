@@ -23,6 +23,19 @@ async function bootstrap(): Promise<void> {
   const target = document.getElementById('app');
   if (!target) throw new Error('missing app mount element');
 
+  // This normally cannot happen because the worker and Vite middleware only
+  // serve the app entry for parseable paths. It still matters for an offline
+  // cached shell or a third-party static host: do not initialize storage and
+  // quietly turn a malformed path into the desk.
+  const route = parseAppRoute(window.location.pathname);
+  if (!route) {
+    const { default: NotFound } = await import('../../src/hosted/not-found/NotFound.svelte');
+    document.body.dataset.route = 'not-found';
+    mount(NotFound, { target });
+    document.body.dataset.hydrated = 'true';
+    return;
+  }
+
   const surface = new URLSearchParams(window.location.search).get('surface');
   if (surface === 'landing-review-demo') {
     const [{ default: LandingReviewDemo }] = await Promise.all([
@@ -44,7 +57,6 @@ async function bootstrap(): Promise<void> {
     service = new MockWorkspaceService(scenario);
   }
 
-  const route = parseAppRoute(window.location.pathname);
   mount(AppShell, {
     target,
     props: {

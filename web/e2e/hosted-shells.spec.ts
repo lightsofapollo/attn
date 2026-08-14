@@ -26,6 +26,37 @@ test('desk home lists recent workspaces with storage health', async ({ page }) =
   await expect(page.locator('h1')).toHaveText('Storage & recovery');
 });
 
+test('mobile Desk makes workspace facts and administration scannable', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/app?shell=demo');
+  const row = page.locator('.workspace-row').first();
+  const layout = await row.evaluate((element) => {
+    const rect = (selector: string) => {
+      const item = element.querySelector<HTMLElement>(selector);
+      if (!item) throw new Error(`missing ${selector}`);
+      const box = item.getBoundingClientRect();
+      return { top: box.top, bottom: box.bottom, width: box.width, height: box.height };
+    };
+    return {
+      title: rect('.row-open'),
+      facts: rect('.detail-group'),
+      review: rect('.review-pill'),
+      status: rect('.row-tail'),
+      menu: rect('.row-menu summary'),
+    };
+  });
+  expect(layout.title.bottom).toBeLessThanOrEqual(layout.facts.top + 1);
+  expect(layout.facts.bottom).toBeLessThanOrEqual(layout.review.top + 1);
+  expect(layout.review.bottom).toBeLessThanOrEqual(layout.status.top + 1);
+  expect(layout.menu.width).toBeGreaterThanOrEqual(44);
+  expect(layout.menu.height).toBeGreaterThanOrEqual(44);
+
+  await page.getByLabel('Manage Product direction').click();
+  await expect(row.getByRole('button', { name: 'Rename' })).toBeVisible();
+  await expect(row.getByRole('button', { name: 'Delete' })).toBeVisible();
+  await expectNoHorizontalScroll(page);
+});
+
 test('landing one-click intent opens an untitled draft editor', async ({ page }) => {
   await page.goto('/app#new');
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
@@ -38,6 +69,7 @@ test('landing one-click intent opens an untitled draft editor', async ({ page })
 });
 
 test('desktop editor reuses the native sidebar, editor, and review rail frame', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/app/w/ws-product/direction.md?shell=demo');
   await expect(page.locator('[data-slot="sidebar"]')).toBeVisible();
   await expect(page.locator('[data-path][data-active="true"]')).toContainText('direction.md');
@@ -47,6 +79,61 @@ test('desktop editor reuses the native sidebar, editor, and review rail frame', 
   await expect(page.locator('[data-action="edit"]')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Done', exact: true })).toHaveCount(0);
   await expect(page.locator('[data-slot="right-rail"]')).toHaveCount(1);
+  const savedReview = page.getByRole('button', { name: 'Saved review' });
+  await expect(savedReview).toBeVisible();
+  await expect(savedReview).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.locator('[data-slot="right-rail"]')).toHaveAttribute('data-mode', 'collapsed');
+  await expect(page.locator('.review-history-placeholder')).toHaveCount(0);
+  await savedReview.click();
+  await expect(savedReview).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.locator('.review-history-placeholder')).toContainText('Saved review');
+  await expect(page.locator('.review-history-placeholder')).toContainText('JULES');
+  await expect(page.locator('.review-history-placeholder')).toContainText(
+    'Live review adds presence and replies; saved feedback stays here.',
+  );
+  // Saved review has its own docked column. It must reflow the document rather
+  // than floating over its reading surface; closing remains explicit in the
+  // same header that opened it.
+  await expect(page.getByRole('button', { name: 'Hide saved review' })).toBeVisible();
+  const readingLayout = await page.evaluate(() => {
+    const documentSurface = document.querySelector<HTMLElement>('.hosted-native-document');
+    const rail = document.querySelector<HTMLElement>('[data-slot="right-rail"]');
+    if (!documentSurface || !rail) throw new Error('missing docked review layout');
+    const documentRect = documentSurface.getBoundingClientRect();
+    const railRect = rail.getBoundingClientRect();
+    return {
+      documentRight: documentRect.right,
+      documentWidth: documentRect.width,
+      railLeft: railRect.left,
+      railWidth: railRect.width,
+    };
+  });
+  expect(readingLayout.documentRight).toBeLessThanOrEqual(readingLayout.railLeft + 1);
+  expect(readingLayout.documentWidth).toBeGreaterThanOrEqual(600);
+  expect(readingLayout.railWidth).toBeGreaterThanOrEqual(300);
+  await page.screenshot({ path: 'test-results/hosted-saved-review-docked.png' });
+  // 1024px is still the desktop workspace (the phone layout begins below the
+  // app's 900px breakpoint). The dock must shrink the reading measure rather
+  // than force a horizontal canvas or slide back over the prose.
+  await page.setViewportSize({ width: 1024, height: 900 });
+  const compactReadingLayout = await page.evaluate(() => {
+    const documentSurface = document.querySelector<HTMLElement>('.hosted-native-document');
+    const rail = document.querySelector<HTMLElement>('[data-slot="right-rail"]');
+    if (!documentSurface || !rail) throw new Error('missing compact docked review layout');
+    const documentRect = documentSurface.getBoundingClientRect();
+    const railRect = rail.getBoundingClientRect();
+    return {
+      documentRight: documentRect.right,
+      documentWidth: documentRect.width,
+      railLeft: railRect.left,
+      railRight: railRect.right,
+      viewportWidth: window.innerWidth,
+    };
+  });
+  expect(compactReadingLayout.documentRight).toBeLessThanOrEqual(compactReadingLayout.railLeft + 1);
+  expect(compactReadingLayout.documentWidth).toBeGreaterThanOrEqual(340);
+  expect(compactReadingLayout.railRight).toBeLessThanOrEqual(compactReadingLayout.viewportWidth + 1);
+  await page.screenshot({ path: 'test-results/hosted-saved-review-docked-1024.png' });
   await expect(page.locator('.file-rail, .review-rail')).toHaveCount(0);
   await expectNoHorizontalScroll(page);
 });

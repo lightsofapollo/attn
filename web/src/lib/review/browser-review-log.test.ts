@@ -21,8 +21,9 @@ import {
   openWorkspaceReviewProjection,
   replayReviewLogIntoStore,
   type ReviewLogRoomKeys,
+  type WorkspaceReviewProjection,
 } from './browser-review-log';
-import { BrowserStorage } from './browser-storage';
+import { BrowserStorage, type SealedBlobFileSystem } from './browser-storage';
 import { inviteCapabilityFrom } from './browser-workspace-share';
 import {
   aeadSeal,
@@ -220,6 +221,135 @@ function mintCommentEnvelope(
   };
 }
 
+function mintR2SnapshotBlobEnvelope(
+  identity: BrowserDeviceIdentity,
+  envelopeId: string,
+  createdAt: number,
+  content: string,
+): { wrapper: MailboxEnvelope; sealedBody: Uint8Array } {
+  const snapshotBytes = toCanonicalBytes({ docType: 'markdown', content });
+  const aad: EnvelopeAad = {
+    v: 2,
+    roomId: ROOM_ID,
+    envelopeId,
+    kind: 'snapshot_blob',
+    authorId: identity.participantId,
+    deviceId: identity.deviceId,
+    createdAt,
+  };
+  const blobRef = toCanonicalBytes({
+    storage: 'r2',
+    blobId: envelopeId,
+    byteLength: snapshotBytes.length,
+    contentHash: contentHash(snapshotBytes),
+  });
+  const wrapperNonce = new Uint8Array(24).fill(0x81);
+  const wrapperCiphertext = aeadSeal(KEYS.snapshotKey, wrapperNonce, blobRef, aad);
+  const sealedNonce = new Uint8Array(24).fill(0x82);
+  const sealedCiphertext = aeadSeal(KEYS.snapshotKey, sealedNonce, snapshotBytes, aad);
+  const sealedBody = new Uint8Array(sealedNonce.length + sealedCiphertext.length);
+  sealedBody.set(sealedNonce);
+  sealedBody.set(sealedCiphertext, sealedNonce.length);
+  const wrapper: MailboxEnvelope = {
+    v: 2,
+    roomId: ROOM_ID,
+    envelopeId,
+    authorId: identity.participantId,
+    deviceId: identity.deviceId,
+    createdAt,
+    expiresAt: createdAt + 7 * 24 * 60 * 60 * 1000,
+    kind: 'snapshot_blob',
+    nonce: base64UrlEncode(wrapperNonce),
+    ciphertext: base64UrlEncode(wrapperCiphertext),
+    ciphertextBytes: wrapperCiphertext.length,
+  };
+  snapshotBytes.fill(0);
+  blobRef.fill(0);
+  wrapperNonce.fill(0);
+  wrapperCiphertext.fill(0);
+  sealedNonce.fill(0);
+  sealedCiphertext.fill(0);
+  return { wrapper, sealedBody };
+}
+
+function mintR2SnapshotPointerEnvelope(
+  identity: BrowserDeviceIdentity,
+  envelopeId: string,
+  createdAt: number,
+  content: string,
+  blobId: string,
+): MailboxEnvelope {
+  const snapshotBytes = toCanonicalBytes({ docType: 'markdown', content });
+  const meta: SignableMetaShape = {
+    v: 2,
+    eventId: '',
+    roomId: ROOM_ID,
+    authorId: identity.participantId,
+    deviceId: identity.deviceId,
+    createdAt,
+    parentEventIds: [],
+  };
+  const body = {
+    type: 'snapshot_created' as const,
+    fileId: 'file-r2-cache',
+    snapshotId: 'snapshot-r2-cache',
+    ownerDisplayPath: 'untitled.md',
+    baseHash: contentHash(new TextEncoder().encode(content)),
+    encryptedBlobRef: {
+      storage: 'r2' as const,
+      blobId,
+      byteLength: snapshotBytes.length,
+      contentHash: contentHash(snapshotBytes),
+    },
+    inlineSnapshot: null,
+  };
+  meta.eventId = deriveEventId(meta, body);
+  const signed = toCanonicalBytes({
+    body,
+    meta: {
+      v: meta.v,
+      roomId: meta.roomId,
+      authorId: meta.authorId,
+      deviceId: meta.deviceId,
+      createdAt: meta.createdAt,
+      parentEventIds: [],
+    },
+  });
+  const auth = {
+    signature: base64UrlEncode(ed25519.sign(signed, identity.signingSecret)),
+    signingKeyId: base64UrlEncode(sha256(identity.signingPublic)),
+  };
+  const plaintext = toCanonicalBytes({ auth, body, meta: { ...meta } });
+  const nonce = new Uint8Array(24).fill(0x83);
+  const aad: EnvelopeAad = {
+    v: 2,
+    roomId: ROOM_ID,
+    envelopeId,
+    kind: 'event',
+    authorId: identity.participantId,
+    deviceId: identity.deviceId,
+    createdAt,
+  };
+  const ciphertext = aeadSeal(KEYS.eventKey, nonce, plaintext, aad);
+  const envelope: MailboxEnvelope = {
+    v: 2,
+    roomId: ROOM_ID,
+    envelopeId,
+    authorId: identity.participantId,
+    deviceId: identity.deviceId,
+    createdAt,
+    expiresAt: createdAt + 7 * 24 * 60 * 60 * 1000,
+    kind: 'event',
+    nonce: base64UrlEncode(nonce),
+    ciphertext: base64UrlEncode(ciphertext),
+    ciphertextBytes: ciphertext.length,
+  };
+  snapshotBytes.fill(0);
+  nonce.fill(0);
+  ciphertext.fill(0);
+  return envelope;
+}
+
 interface StubStore extends ReviewStoreSink {
   events: ReviewEvent[];
   snapshots: ReviewSnapshot[];
@@ -266,9 +396,32 @@ function makeStubStore(): StubStore {
   return s;
 }
 
+class MemorySealedFilesystem implements SealedBlobFileSystem {
+  readonly files = new Map<string, Uint8Array>();
+  writes = 0;
+
+  async write(path: string, sealedBytes: Uint8Array): Promise<void> {
+    this.writes += 1;
+    this.files.set(path, new Uint8Array(sealedBytes));
+  }
+
+  async read(path: string): Promise<Uint8Array | null> {
+    const value = this.files.get(path);
+    return value ? new Uint8Array(value) : null;
+  }
+
+  async delete(path: string): Promise<boolean> {
+    return this.files.delete(path);
+  }
+
+  async deletePrefix(prefix: string): Promise<void> {
+    for (const path of this.files.keys()) if (path.startsWith(prefix)) this.files.delete(path);
+  }
+}
+
 let counter = 0;
 
-async function openStorage(): Promise<BrowserStorage> {
+async function openStorage(filesystem: SealedBlobFileSystem | null = null): Promise<BrowserStorage> {
   counter += 1;
   return BrowserStorage.open({
     createIfMissing: true,
@@ -276,6 +429,7 @@ async function openStorage(): Promise<BrowserStorage> {
     indexedDB: new IDBFactory(),
     crypto,
     navigator: null,
+    filesystem,
   });
 }
 
@@ -326,6 +480,7 @@ function roomKeysFixture(identity: BrowserDeviceIdentity): ReviewLogRoomKeys {
     eventKey: new Uint8Array(KEYS.eventKey),
     snapshotKey: new Uint8Array(KEYS.snapshotKey),
     signalingKey: new Uint8Array(KEYS.signalingKey),
+    readAdmissionKey: new Uint8Array(KEYS.admissionKey),
     bindings: [],
   };
 }
@@ -430,6 +585,141 @@ defineCase('WorkspaceReviewProjection discovers the published share and follows 
   }
 });
 
+defineCase('two independent projections converge from the same durable review log', async () => {
+  const leaderStorage = await openStorage();
+  const followerStorage = await leaderStorage.openSibling(true);
+  const ring = new BroadcastChannel(REVIEW_INBOUND_CHANNEL_PREFIX + ROOM_ID);
+  let leaderProjection: WorkspaceReviewProjection | null = null;
+  let followerProjection: WorkspaceReviewProjection | null = null;
+  try {
+    const identity = ownerIdentity();
+    const workspaceId = await seedSharedWorkspace(leaderStorage, identity);
+    await leaderStorage.putDevice(ROOM_ID, ownerDevice(identity));
+    await leaderStorage.commitInbound(
+      ROOM_ID,
+      identity.deviceId,
+      mintCommentEnvelope(identity, 'env-two-tabs-1', 1_700_000_100_000, 'FIRST', 'thread-first'),
+      1,
+    );
+
+    const leaderStore = makeStubStore();
+    const followerStore = makeStubStore();
+    leaderProjection = await openWorkspaceReviewProjection({
+      storage: leaderStorage,
+      workspaceId,
+      store: leaderStore,
+    });
+    followerProjection = await openWorkspaceReviewProjection({
+      storage: followerStorage,
+      workspaceId,
+      store: followerStore,
+    });
+    assertEq(leaderStore.events.length, 1, 'leader projection hydrated the first event');
+    assertEq(followerStore.events.length, 1, 'follower projection hydrated the first event');
+
+    await leaderStorage.commitInbound(
+      ROOM_ID,
+      identity.deviceId,
+      mintCommentEnvelope(identity, 'env-two-tabs-2', 1_700_000_200_000, 'SECOND', 'thread-second'),
+      2,
+    );
+    ring.postMessage({ roomId: ROOM_ID });
+    for (
+      let attempt = 0;
+      attempt < 100 && (leaderStore.events.length < 2 || followerStore.events.length < 2);
+      attempt += 1
+    ) await delay(10);
+    assertEq(leaderStore.events.length, 2, 'leader projection replayed the durable update');
+    assertEq(followerStore.events.length, 2, 'follower projection replayed the same durable update');
+    assertEq(
+      leaderStore.events.map((event) => event.meta.eventId).join(','),
+      followerStore.events.map((event) => event.meta.eventId).join(','),
+      'independent projection handles materialize an identical event set',
+    );
+  } finally {
+    leaderProjection?.close();
+    followerProjection?.close();
+    ring.close();
+    followerStorage.close();
+    leaderStorage.close();
+  }
+});
+
+defineCase('independent projections hydrate a pointer-before-blob R2 snapshot from the sealed cache', async () => {
+  const filesystem = new MemorySealedFilesystem();
+  const leaderStorage = await openStorage(filesystem);
+  const followerStorage = await leaderStorage.openSibling(true);
+  const ring = new BroadcastChannel(REVIEW_INBOUND_CHANNEL_PREFIX + ROOM_ID);
+  let leaderProjection: WorkspaceReviewProjection | null = null;
+  let followerProjection: WorkspaceReviewProjection | null = null;
+  try {
+    const identity = ownerIdentity();
+    const workspaceId = await seedSharedWorkspace(leaderStorage, identity);
+    await leaderStorage.putDevice(ROOM_ID, ownerDevice(identity));
+    const content = '# Cached R2 snapshot\n\nEvery projection can verify this.\n';
+    const blob = mintR2SnapshotBlobEnvelope(identity, 'env-r2-cache-blob', 1_700_000_100_000, content);
+    const pointer = mintR2SnapshotPointerEnvelope(
+      identity,
+      'env-r2-cache-pointer',
+      1_700_000_100_100,
+      content,
+      blob.wrapper.envelopeId,
+    );
+
+    // This body has been verified and persisted by an earlier live receipt.
+    // The projection can only read it; it has no R2 presign/network path.
+    assertEq(
+      await leaderStorage.putSealedBlob(ROOM_ID, blob.wrapper.envelopeId, blob.sealedBody),
+      true,
+      'verified sealed R2 body cached',
+    );
+    const writesBeforeProjection = filesystem.writes;
+    blob.sealedBody.fill(0);
+
+    // Pointer first: neither projection can hydrate until the separately
+    // durable wrapper appears and rings the shared review doorbell.
+    await leaderStorage.commitInbound(ROOM_ID, identity.deviceId, pointer, 1);
+    const leaderStore = makeStubStore();
+    const followerStore = makeStubStore();
+    leaderProjection = await openWorkspaceReviewProjection({
+      storage: leaderStorage,
+      workspaceId,
+      store: leaderStore,
+    });
+    followerProjection = await openWorkspaceReviewProjection({
+      storage: followerStorage,
+      workspaceId,
+      store: followerStore,
+    });
+    assertEq(leaderStore.snapshots.length, 0, 'leader waits for the R2 wrapper');
+    assertEq(followerStore.snapshots.length, 0, 'follower waits for the R2 wrapper');
+
+    await leaderStorage.commitInbound(ROOM_ID, identity.deviceId, blob.wrapper, 2);
+    ring.postMessage({ roomId: ROOM_ID });
+    for (
+      let attempt = 0;
+      attempt < 100 && (leaderStore.snapshots.length < 1 || followerStore.snapshots.length < 1);
+      attempt += 1
+    ) await delay(10);
+
+    assertEq(leaderStore.snapshots.length, 1, 'leader projected the cached R2 snapshot');
+    assertEq(followerStore.snapshots.length, 1, 'follower projected the cached R2 snapshot');
+    assertEq(leaderStore.snapshots[0]?.content, content, 'leader hydrated exact content');
+    assertEq(followerStore.snapshots[0]?.content, content, 'follower hydrated exact content');
+    assertEq(
+      filesystem.writes,
+      writesBeforeProjection,
+      'projections never persist or rewrite sealed R2 bodies',
+    );
+  } finally {
+    leaderProjection?.close();
+    followerProjection?.close();
+    ring.close();
+    followerStorage.close();
+    leaderStorage.close();
+  }
+});
+
 defineCase('projection follows a room rotation: drops the old room, replays the new (attn-kobw)', async () => {
   const storage = await openStorage();
   try {
@@ -454,6 +744,7 @@ defineCase('projection follows a room rotation: drops the old room, replays the 
       eventKey: new Uint8Array(KEYS.eventKey),
       snapshotKey: new Uint8Array(KEYS.snapshotKey),
       signalingKey: new Uint8Array(KEYS.signalingKey),
+      readAdmissionKey: new Uint8Array(KEYS.admissionKey),
       bindings: [],
     });
     let currentRoom = ROOM_ID;

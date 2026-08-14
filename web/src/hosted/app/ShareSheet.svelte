@@ -63,7 +63,7 @@
     activeEntry?.path
       ?? (workspace?.openPath && entries.some((entry) => entry.path === workspace.openPath)
         ? workspace.openPath
-        : entries.find((entry) => entry.kind === 'markdown')?.path),
+        : entries.find((entry) => entry.kind === 'markdown' || entry.kind === 'html')?.path),
   );
   const initialActiveEntry = $derived(entries.find((entry) => entry.path === initialActivePath));
   const name = $derived(workspace?.name ?? workspaceName ?? 'Workspace');
@@ -118,7 +118,7 @@
     entriesForScope(entries, 'entries', configuredFilePath, selectedPaths),
   );
   const manifest = $derived(summarizeEntries(selectedEntries));
-  const scopeValid = $derived(manifest.markdownCount > 0);
+  const scopeValid = $derived(manifest.markdownCount + manifest.htmlCount > 0);
   const configurationReady = $derived(
     durability.allowed && scopeValid && Boolean(workspace) && Boolean(onCreate),
   );
@@ -128,7 +128,7 @@
   const webShareAvailable = $derived(supportsWebShare());
 
   const configurationHint = $derived.by(() => {
-    if (!scopeValid) return 'Include at least one Markdown file.';
+    if (!scopeValid) return 'Include at least one Markdown or HTML document.';
     if (durability.hardBlocked) return 'Sharing is unavailable until local storage is healthy.';
     return 'Encrypted before it leaves this browser.';
   });
@@ -145,14 +145,14 @@
   $effect(() => {
     if (selectionInitialized || entries.length === 0) return;
     selectionInitialized = true;
-    if (initialActiveEntry?.kind === 'markdown') {
+    if (initialActiveEntry?.kind === 'markdown' || initialActiveEntry?.kind === 'html') {
       scopeChoice = 'entries';
       configuredFilePath = initialActiveEntry.path;
       selectedPaths = [initialActiveEntry.path];
       return;
     }
-    const firstMarkdown = entries.find((entry) => entry.kind === 'markdown');
-    if (firstMarkdown) selectedPaths = [firstMarkdown.path];
+    const firstDocument = entries.find((entry) => entry.kind === 'markdown' || entry.kind === 'html');
+    if (firstDocument) selectedPaths = [firstDocument.path];
   });
 
   $effect(() => {
@@ -411,7 +411,7 @@
                   {entry.path}
                   {#if entry.path === initialActivePath}<small>Current</small>{/if}
                 </span>
-                <span class="share-entry-meta">{entry.kind === 'markdown' ? 'Markdown' : entry.presentation === 'preview' ? 'Preview' : 'Download'} · {entry.sizeLabel}</span>
+                <span class="share-entry-meta">{entry.kind === 'markdown' ? 'Markdown' : entry.kind === 'html' ? 'HTML document' : entry.presentation === 'preview' ? 'Preview' : 'Download'} · {entry.sizeLabel}</span>
               </label>
             {/each}
           </div>
@@ -420,12 +420,13 @@
             <strong>{manifest.entryCount} {manifest.entryCount === 1 ? 'file' : 'files'} selected · {formatByteCount(manifest.totalBytes)}</strong>
             <span>{[
               `${manifest.markdownCount} Markdown`,
+              manifest.htmlCount > 0 ? `${manifest.htmlCount} HTML` : null,
               manifest.previewableAssetCount > 0 ? `${manifest.previewableAssetCount} previewable` : null,
               manifest.downloadOnlyAssetCount > 0 ? `${manifest.downloadOnlyAssetCount} download-only` : null,
             ].filter(Boolean).join(' · ')}</span>
           </div>
           {#if !scopeValid}
-            <p class="share-error" role="alert">Select at least one Markdown file to create a review.</p>
+            <p class="share-error" role="alert">Select at least one Markdown or HTML document to create a review.</p>
           {/if}
           {#if !workspace}
             <p class="share-error" role="alert">Workspace details are unavailable. Close this sheet and reopen the workspace.</p>

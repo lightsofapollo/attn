@@ -216,6 +216,7 @@ fn placeholder_anchor() -> Anchor {
         block: None,
         context: None,
         structure: None,
+        html: None,
     }
 }
 
@@ -561,6 +562,7 @@ fn v3_tiers_enforce_comment_and_suggestion_end_to_end() {
         block: None,
         context: None,
         structure: None,
+        html: None,
     };
     let replacement = "accepted line";
     suggester.mgr.submit(ReviewCommand::CreateSuggestion {

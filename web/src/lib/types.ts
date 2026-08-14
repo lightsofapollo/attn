@@ -50,10 +50,20 @@ export interface WorkspaceSnapshotManifest {
   entries: WorkspaceManifestEntry[];
 }
 
+/**
+ * How a snapshot's comments are anchored. Markdown uses the Rust-built
+ * `anchorIndex`; HTML has no Rust-side index (that would need a headless HTML
+ * parser in the binary) and declares this capability instead, resolving its
+ * anchors client-side in the document frame.
+ * @see planning/collab/html-annotation.md §6
+ */
+export type SnapshotAnnotation = 'html_selectors_v1';
+
 /** Canonical decrypted bytes carried by a snapshot_blob envelope. */
 export type SnapshotPlaintext =
   | { docType: 'markdown'; content: string; anchorIndex?: AnchorIndex }
-  | { docType: 'html'; content: string }
+  /** `annotation` absent means read-only — an older peer, or a legacy snapshot. */
+  | { docType: 'html'; content: string; annotation?: SnapshotAnnotation }
   | { docType: 'asset'; content: string; mediaType: string; encoding: 'base64url' }
   | { docType: 'workspace_manifest'; manifest: WorkspaceSnapshotManifest };
 
@@ -149,6 +159,7 @@ export type IpcMessageType =
   | 'review_accept_suggestion'
   | 'review_reject_suggestion'
   | 'review_resolve_anchor'
+  | 'review_html_anchor_resolution'
   | 'review_resolve_comment'
   | 'review_set_display_name'
   | 'review_set_color'
@@ -308,6 +319,21 @@ export interface ReviewResolveAnchorMessage {
   range: PositionAnchor;
 }
 
+/**
+ * The document frame's client-side verdict on an HTML anchor. Local-only —
+ * the daemon mints nothing and tells no peer, because this describes *this*
+ * client's rendered DOM.
+ * @see planning/collab/html-annotation.md §5, §7
+ */
+export interface ReviewHtmlAnchorResolutionMessage {
+  type: 'review_html_anchor_resolution';
+  roomId: RoomId;
+  eventId: EventId;
+  status: 'exact' | 'remapped' | 'ambiguous' | 'stale';
+  confidence: number;
+  range?: PositionAnchor;
+}
+
 export interface ReviewResolveCommentMessage {
   type: 'review_resolve_comment';
   roomId: RoomId;
@@ -375,6 +401,7 @@ export type IpcMessage =
   | ReviewAcceptSuggestionMessage
   | ReviewRejectSuggestionMessage
   | ReviewResolveAnchorMessage
+  | ReviewHtmlAnchorResolutionMessage
   | ReviewResolveCommentMessage
   | ReviewSetDisplayNameMessage
   | ReviewSetColorMessage
@@ -707,12 +734,76 @@ export interface StructureAnchor {
   ordinalInParent: number;
 }
 
+/** What an HTML anchor is attached to. */
+export type HtmlAnchorTarget = 'text_range' | 'element';
+
+/**
+ * W3C `TextPositionSelector`: UTF-8 byte offsets into the document's canonical
+ * rendered text (`textContent`).
+ * @see planning/collab/html-annotation.md §6
+ */
+export interface HtmlTextPosition {
+  start: number;
+  end: number;
+}
+
+/**
+ * W3C `RangeSelector`: start/end containers addressed by CSS selector plus a
+ * UTF-8 byte offset into each container's text.
+ * @see planning/collab/html-annotation.md §6
+ */
+export interface HtmlRangeSelector {
+  startSelector: string;
+  startOffset: number;
+  endSelector: string;
+  endOffset: number;
+}
+
+/**
+ * Agent-legible description of what an HTML anchor covers, captured at anchor
+ * time so a coding agent receiving the comment knows what it was attached to.
+ * @see planning/collab/html-annotation.md §2
+ */
+export interface HtmlAnchorContext {
+  tagName: string;
+  role?: string;
+  /** e.g. `row 3 · Fuzzy quote · edit-distance match` */
+  scopePreview: string;
+  /** Ancestor chain, outermost first, e.g. `['table', 'tbody', 'tr']`. */
+  domPath?: string[];
+}
+
+/**
+ * W3C Web Annotation selector set for an anchor authored against a *rendered
+ * HTML document*. Mirrors the Rust `HtmlAnchor` (src/review/model.rs).
+ *
+ * Opaque to Rust — persisted and synced verbatim, resolved client-side in the
+ * document frame, which is the only place a DOM exists.
+ * @see planning/collab/html-annotation.md §2, §6
+ */
+export interface HtmlAnchor {
+  v: 1;
+  target: HtmlAnchorTarget;
+  /** Primary CSS selector: the element itself, or a text range's ancestor. */
+  cssSelector: string;
+  /** Ranked alternates, most specific first, tried when `cssSelector` misses. */
+  fallbackSelectors?: string[];
+  textPosition?: HtmlTextPosition;
+  /** Present when the selection crosses element boundaries. */
+  range?: HtmlRangeSelector;
+  context: HtmlAnchorContext;
+}
+
 /**
  * Layered anchor describing where a review event was authored.
  *
  * The resolver uses the strongest available layer and falls back with
  * decreasing confidence.
- * @see planning/collab/data-model.md §Anchors
+ *
+ * Markdown anchors populate `position` (source offsets) plus any of
+ * `quote`/`block`/`context`/`structure`. HTML anchors populate `html`, and
+ * reuse `position`/`quote`/`context` with rendered-text semantics.
+ * @see planning/collab/data-model.md §Anchors, planning/collab/html-annotation.md §6
  */
 export interface Anchor {
   v: 2;
@@ -724,6 +815,8 @@ export interface Anchor {
   block?: BlockAnchor;
   context?: ContextAnchor;
   structure?: StructureAnchor;
+  /** Present only for anchors authored against a rendered HTML document. */
+  html?: HtmlAnchor;
 }
 
 /**
@@ -746,7 +839,9 @@ export type ResolvedAnchor =
       status: 'exact';
       confidence: 1.0;
       currentRange: PositionAnchor;
-      reason: 'base_hash_match' | 'mapped_through_local_steps';
+      // `client_resolved`: an HTML anchor resolved by the document frame
+      // against its own DOM — no local resolver step ran (html-annotation.md §7).
+      reason: 'base_hash_match' | 'mapped_through_local_steps' | 'client_resolved';
     }
   | {
       status: 'remapped';
@@ -757,7 +852,8 @@ export type ResolvedAnchor =
         | 'block_fingerprint_match'
         | 'structure_quote_match'
         | 'context_match'
-        | 'fuzzy_quote_match';
+        | 'fuzzy_quote_match'
+        | 'client_resolved';
     }
   | {
       status: 'ambiguous';
@@ -1153,6 +1249,12 @@ export interface ReviewSnapshot {
   /** Validated, inert workspace topology. It contains no entry bodies. */
   workspaceManifest?: WorkspaceSnapshotManifest;
   anchorIndex?: AnchorIndex;
+  /**
+   * HTML only: declares that this snapshot can be annotated client-side.
+   * Absent means read-only — an older peer, or a legacy snapshot.
+   * @see planning/collab/html-annotation.md §6
+   */
+  annotation?: SnapshotAnnotation;
   encryptedBlobRef?: BlobRef;
 }
 

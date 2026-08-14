@@ -15,19 +15,26 @@ interface Env {
 const IMMUTABLE_ASSET = /\/[\w-]+-[A-Za-z0-9_-]{8,}\.[A-Za-z0-9]+$/;
 
 // Deep paths (`/app/w/:workspaceId/:filePath`, `/review/:roomId`) must serve
-// their entry's HTML document rather than fall through the SPA handler, which
-// only knows about the landing `index.html`. Hashed build assets live under
-// `/assets/` and are never shadowed by these route prefixes.
-function rewriteToEntryDocument(request: Request): Request {
-  if (request.method !== 'GET' && request.method !== 'HEAD') return request;
+// their entry's HTML document. Unknown browser navigations instead borrow the
+// landing document solely to render its branded recovery state, then retain a
+// real 404 status. Hashed build assets are never shadowed by either behavior.
+function rewriteToEntryDocument(request: Request): { request: Request; notFound: boolean } {
+  if (request.method !== 'GET' && request.method !== 'HEAD') return { request, notFound: false };
   const url = new URL(request.url);
   const entry = hostedEntryForPath(url.pathname);
-  if (entry === 'landing') return request;
+  if (!entry) {
+    // Asset and API requests keep the asset binding's ordinary 404. A direct
+    // document navigation gets the branded page without pretending it exists.
+    if (!request.headers.get('accept')?.includes('text/html')) return { request, notFound: false };
+    url.pathname = entryRequestPath('landing');
+    url.search = '';
+    return { request: new Request(url.toString(), request), notFound: true };
+  }
   const canonical = entryRequestPath(entry);
-  if (url.pathname === canonical) return request;
+  if (url.pathname === canonical) return { request, notFound: false };
   url.pathname = canonical;
   url.search = '';
-  return new Request(url.toString(), request);
+  return { request: new Request(url.toString(), request), notFound: false };
 }
 
 export default {
@@ -42,7 +49,8 @@ export default {
     const landingReviewDemo =
       requestUrl.pathname === '/app'
       && requestUrl.searchParams.get('surface') === 'landing-review-demo';
-    const response = await env.ASSETS.fetch(rewriteToEntryDocument(request));
+    const rewrite = rewriteToEntryDocument(request);
+    const response = await env.ASSETS.fetch(rewrite.request);
     const headers = new Headers(response.headers);
 
     headers.set(
@@ -80,8 +88,8 @@ export default {
     }
 
     return new Response(response.body, {
-      status: response.status,
-      statusText: response.statusText,
+      status: rewrite.notFound ? 404 : response.status,
+      statusText: rewrite.notFound ? 'Not Found' : response.statusText,
       headers,
     });
   },

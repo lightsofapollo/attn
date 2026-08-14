@@ -59,8 +59,20 @@
 		     against a max-height-bounded ancestor, which is what left this
 		     modal clipped and unscrollable (attn-11g4.1.1). See the sizing note
 		     in `components/ui/scroll-area/scroll-area.svelte`. -->
+		<!-- `grid-cols-[minmax(0,1fr)]` is load-bearing, not decoration. A bare
+		     `grid` has ONE implicit column sized `auto`, i.e. `minmax(auto,
+		     max-content)`, and inside a scroll container that resolves to the
+		     widest child's max-content width rather than the dialog's. One
+		     unbreakable string — a `font-mono` filesystem path, a long invite
+		     URL — then widened the whole column past the dialog (measured: a
+		     542px column in a 446px content box, every row 70px past the right
+		     edge) where the frame's `overflow-hidden` silently CLIPPED it:
+		     buttons and labels were cut in half rather than wrapping or
+		     truncating. `minmax(0,1fr)` resolves against the dialog's own width
+		     and lets children shrink below min-content, so `truncate`/`min-w-0`
+		     inside them finally have a definite width to work against. -->
 		<ScrollArea class="min-h-0 flex-1">
-			<div data-slot="dialog-content-body" class="grid gap-4 p-6">
+			<div data-slot="dialog-content-body" class="grid grid-cols-[minmax(0,1fr)] gap-4 p-6">
 				{@render children?.()}
 			</div>
 		</ScrollArea>

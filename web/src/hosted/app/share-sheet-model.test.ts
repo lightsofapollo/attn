@@ -59,6 +59,7 @@ test('scope resolution and manifest summary preserve exact paths and sizes', () 
   equal(summarizeEntries(entries), {
     entryCount: 3,
     markdownCount: 1,
+    htmlCount: 0,
     previewableAssetCount: 1,
     downloadOnlyAssetCount: 1,
     totalBytes: 4096,

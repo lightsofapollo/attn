@@ -319,7 +319,12 @@ async function entryPlaintext(
     };
   }
   const content = new TextDecoder('utf-8', { fatal: true }).decode(source.bytes);
-  if (source.docType === 'html') return { docType: 'html', content };
+  // HTML gets no anchor index — it declares a client-side annotation capability
+  // instead and resolves its anchors in the document frame.
+  // @see planning/collab/html-annotation.md §6
+  if (source.docType === 'html') {
+    return { docType: 'html', content, annotation: 'html_selectors_v1' };
+  }
   const builder = injected ?? (await import('./browser-anchor-index')).buildCanonicalAnchorIndex;
   return { docType: 'markdown', content, anchorIndex: await builder(source.bytes, snapshotId) };
 }

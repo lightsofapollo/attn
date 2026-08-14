@@ -22,8 +22,7 @@
   import ChevronRight from '@lucide/svelte/icons/chevron-right';
   import Share2 from '@lucide/svelte/icons/share-2';
   import UnreadBadge from './UnreadBadge.svelte';
-  import { resolveFileIcon, resolveFolderIcon } from '$lib/icon-resolver';
-  import { getIconPack, subscribeIconPack } from '$lib/icon-pack';
+  import type { FileIconResolver } from './file-icon-resolver';
   import {
     sidebarPresenceBadgeForNode,
     type SidebarPresenceLocation,
@@ -42,6 +41,9 @@
     sharedPaths?: Set<string>;
     unreadByPath?: Readonly<Record<string, number>>;
     collaboratorLocations?: SidebarPresenceLocation[];
+    /** Supplied by the native or hosted shell so this shared tree never owns
+     *  an icon asset registry. */
+    iconResolver?: FileIconResolver;
   }
 
   let {
@@ -57,16 +59,17 @@
     sharedPaths = new Set<string>(),
     unreadByPath = {},
     collaboratorLocations = [],
+    iconResolver,
   }: Props = $props();
 
   let expanded: Record<string, boolean> = $state({});
-  let iconPack = $state(getIconPack());
+  let iconRevision = $state(0);
 
   $effect(() => {
-    const unsubscribe = subscribeIconPack((next) => {
-      iconPack = next;
+    if (!iconResolver) return;
+    return iconResolver.subscribe(() => {
+      iconRevision += 1;
     });
-    return unsubscribe;
   });
 
   function isExpanded(path: string): boolean {
@@ -139,13 +142,13 @@
   }
 
   function getFileIcon(node: TreeNode): string | null {
-    iconPack;
-    return resolveFileIcon(node.name);
+    void iconRevision;
+    return iconResolver?.resolveFileIcon(node.name) ?? null;
   }
 
-  function getFolderIcon(name: string, path: string): string {
-    iconPack;
-    return resolveFolderIcon(name, isExpanded(path));
+  function getFolderIcon(name: string, path: string): string | null {
+    void iconRevision;
+    return iconResolver?.resolveFolderIcon(name, isExpanded(path)) ?? null;
   }
 
   function normalizePath(path: string): string {
@@ -243,6 +246,7 @@
     {@const presenceBadge = presenceBadgeFor(node, exp)}
     {@const folderShared = isPathShared(node)}
     {@const folderUnread = unreadForPath(node.path)}
+    {@const folderIcon = getFolderIcon(node.name, node.path)}
     <SidebarMenuItem>
       <Collapsible
         open={exp}
@@ -263,7 +267,11 @@
                     style={`--tree-depth: ${depth};`}
                   >
                     <ChevronRight class="sidebar-tree-chevron size-3.5 shrink-0 transition-transform duration-150 group-data-[state=open]/collapsible:rotate-90" />
-                    <img src={getFolderIcon(node.name, node.path)} alt="" aria-hidden="true" class="sidebar-tree-icon-image size-3.5 shrink-0" />
+                    {#if folderIcon}
+                      <img src={folderIcon} alt="" aria-hidden="true" class="sidebar-tree-icon-image size-3.5 shrink-0" />
+                    {:else}
+                      <span aria-hidden="true" class="sidebar-tree-markdown-marker">·</span>
+                    {/if}
                     <span class="sidebar-tree-name truncate">{node.name}</span>
                     {#if presenceBadge}
                       <span
@@ -313,7 +321,7 @@
         <CollapsibleContent>
           {#if node.children}
             <SidebarMenu class="sidebar-tree-sub" style={`--tree-depth: ${depth};`}>
-              <FileTree nodes={node.children} {activePath} depth={depth + 1} {rootPath} {onNavigate} {onExpand} {onShare} {onRename} {onDelete} {sharedPaths} {unreadByPath} {collaboratorLocations} />
+              <FileTree nodes={node.children} {activePath} depth={depth + 1} {rootPath} {onNavigate} {onExpand} {onShare} {onRename} {onDelete} {sharedPaths} {unreadByPath} {collaboratorLocations} {iconResolver} />
             </SidebarMenu>
           {/if}
         </CollapsibleContent>

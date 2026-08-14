@@ -243,6 +243,39 @@ test('import creates a real multi-file workspace preserving paths', async ({ pag
   await expect(page.getByRole('button', { name: 'desk.png' })).toBeVisible();
 });
 
+test('imported HTML opens as a document rather than a download-only asset', async ({ page }) => {
+  await page.goto('/app');
+  const chooser = page.waitForEvent('filechooser');
+  await page.getByRole('button', { name: /Import workspace/u }).click();
+  await (await chooser).setFiles([{
+    name: 'quarterly-report.html',
+    mimeType: 'text/html',
+    buffer: Buffer.from('<!doctype html><html><body><h1>Quarterly report</h1><p>HTML review surface</p></body></html>'),
+  }]);
+
+  await expect(page).toHaveURL(/\/app\/w\/[A-Za-z0-9_-]+\/quarterly-report\.html$/u);
+  const document = page.locator('[data-slot="hosted-html-document"]');
+  await expect(document).toBeVisible();
+  await expect(document.frameLocator('iframe').getByRole('heading', { name: 'Quarterly report' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'quarterly-report.html', exact: true })).toBeVisible();
+  await expect(page.locator('.hosted-native-document .asset-preview')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Download' })).toHaveCount(0);
+
+  // The file remains reachable after navigating away: mobile Files groups
+  // documents separately from Markdown and generic assets.
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator('.thumb-dock').getByRole('button', { name: 'Files' }).click();
+  const files = page.getByRole('dialog', { name: 'Files' });
+  await expect(files).toContainText('1 HTML');
+  await expect(files.locator('.file-group').filter({ hasText: 'HTML' })).toContainText('quarterly-report.html');
+  await page.keyboard.press('Escape');
+
+  await page.getByRole('button', { name: 'Share' }).click();
+  const dialog = page.getByRole('dialog', { name: 'Share files for review' });
+  await expect(dialog).toContainText('0 Markdown · 1 HTML');
+  await expect(dialog.getByRole('button', { name: /Create review link for 1 file/u })).toBeEnabled();
+});
+
 test('desk rename and delete are real and confirmed in-app', async ({ page }) => {
   await page.goto('/app#new');
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();

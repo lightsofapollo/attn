@@ -243,12 +243,27 @@ pub enum DocType {
     WorkspaceManifest,
 }
 
+/// How a snapshot's comments are anchored.
+///
+/// Markdown uses the Rust-built [`AnchorIndex`]. HTML has no Rust-side index —
+/// it would require a headless HTML parser in the binary — so it declares this
+/// capability instead, and anchors resolve client-side in the document frame.
+///
+/// Spec: `html-annotation.md` §6, `amendments.md` decision #19.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotAnnotation {
+    /// W3C Web Annotation selector sets, resolved in the document frame.
+    HtmlSelectorsV1,
+}
+
 /// Local-only decrypted snapshot payload (document content + optional anchor
 /// index). Kept off the wire per `amendments.md` decision #14.
 ///
 /// `anchor_index` is present only for markdown docs (it positions comments and
-/// suggestions against the rendered structure). HTML docs are read-only, so
-/// they carry no anchor index — `anchor_index` is `None`.
+/// suggestions against the rendered structure). HTML docs never carry one;
+/// annotatable HTML instead declares `annotation`, and its anchors are resolved
+/// client-side.
 ///
 /// Spec: `data-model.md` §Snapshot Graph.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -261,6 +276,11 @@ pub struct SnapshotPlaintext {
     pub content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor_index: Option<AnchorIndex>,
+    /// Declares that this snapshot can be annotated without a Rust-built
+    /// index. `None` on an HTML snapshot means read-only (the pre-`attn-61t`
+    /// behavior, and what a peer on an older build will publish).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub annotation: Option<SnapshotAnnotation>,
     /// Required only for `asset`; a syntactically valid MIME type without
     /// parameters. Keeping this declaration inside the encrypted payload
     /// means the relay/R2 remain content-blind.
@@ -358,9 +378,19 @@ impl SnapshotPlaintext {
         match self.doc_type {
             DocType::Markdown => {
                 self.require_text_shape("markdown")?;
+                // Markdown anchors against the Rust-built index; declaring a
+                // client-side capability as well would be two sources of truth.
+                if self.annotation.is_some() {
+                    return Err(SnapshotValidationError::new(
+                        "markdown snapshot must not declare annotation capability",
+                    ));
+                }
             }
             DocType::Html => {
                 self.require_text_shape("html")?;
+                // Still true, and deliberately so: HTML never gets a
+                // Rust-built index (`html-annotation.md` §7). Annotatable HTML
+                // declares `annotation` instead.
                 if self.anchor_index.is_some() {
                     return Err(SnapshotValidationError::new(
                         "html snapshot must not contain anchorIndex",
@@ -371,6 +401,11 @@ impl SnapshotPlaintext {
                 if self.anchor_index.is_some() || self.manifest.is_some() {
                     return Err(SnapshotValidationError::new(
                         "asset snapshot contains document/manifest fields",
+                    ));
+                }
+                if self.annotation.is_some() {
+                    return Err(SnapshotValidationError::new(
+                        "asset snapshot must not declare annotation capability",
                     ));
                 }
                 if self.encoding != Some(SnapshotAssetEncoding::Base64url) {
@@ -390,6 +425,7 @@ impl SnapshotPlaintext {
                     || self.anchor_index.is_some()
                     || self.media_type.is_some()
                     || self.encoding.is_some()
+                    || self.annotation.is_some()
                 {
                     return Err(SnapshotValidationError::new(
                         "workspace manifest contains non-manifest fields",
@@ -872,6 +908,11 @@ pub struct AnchorHeadingRef {
 
 /// Layered anchor describing where a review event was authored.
 ///
+/// Markdown anchors populate `position` (source byte/line offsets) plus any of
+/// `quote` / `block` / `context` / `structure`. HTML anchors instead populate
+/// `html`, and reuse `position` / `quote` / `context` with *rendered-text*
+/// semantics — see [`HtmlAnchor`] and `html-annotation.md` §6.
+///
 /// Spec: `data-model.md` §Anchors.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -880,6 +921,9 @@ pub struct Anchor {
     pub file_id: FileId,
     pub snapshot_id: SnapshotId,
     pub base_hash: ContentHash,
+    /// For markdown, UTF-8 byte offsets into the document *source*. For HTML,
+    /// offsets into the document's rendered `textContent`, with `lineRange`
+    /// fixed at `[0, 0]` — Rust never interprets either for HTML.
     pub position: PositionAnchor,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quote: Option<QuoteAnchor>,
@@ -889,6 +933,10 @@ pub struct Anchor {
     pub context: Option<ContextAnchor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub structure: Option<StructureAnchor>,
+    /// Present only for anchors authored against a rendered HTML document.
+    /// Opaque to Rust; resolved client-side in the document frame.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub html: Option<HtmlAnchor>,
 }
 
 /// Snapshot-local byte/line/pm coordinates for an anchor.
@@ -956,6 +1004,213 @@ pub struct StructureAnchor {
 }
 
 // ---------------------------------------------------------------------------
+// HTML anchors
+// ---------------------------------------------------------------------------
+
+/// Doc-type-tagged annotation layer for anchors authored against a *rendered
+/// HTML document*, carrying a W3C Web Annotation selector set.
+///
+/// This layer is **opaque to Rust**: it is persisted and synced verbatim and
+/// never interpreted here. Resolution happens client-side in the document
+/// frame, which is the only place a DOM exists. That is what keeps a headless
+/// HTML parser out of the binary (see `task check:size`).
+///
+/// The values originate in an untrusted document frame, so [`Self::validate`]
+/// bounds every field before the anchor is persisted or synced.
+///
+/// Spec: `html-annotation.md` §2/§6, `amendments.md` decisions #19/#20.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HtmlAnchor {
+    pub v: u32,
+    pub target: HtmlAnchorTarget,
+    /// Primary W3C `CssSelector` for the anchoring element — the element
+    /// itself for [`HtmlAnchorTarget::Element`], the common ancestor for a
+    /// text range.
+    pub css_selector: String,
+    /// Ranked alternates, most specific first, tried when `css_selector` misses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_selectors: Vec<String>,
+    /// W3C `TextPositionSelector` over the document's canonical text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text_position: Option<HtmlTextPosition>,
+    /// W3C `RangeSelector`, present when the selection crosses element bounds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range: Option<HtmlRangeSelector>,
+    pub context: HtmlAnchorContext,
+}
+
+/// What an HTML anchor is attached to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HtmlAnchorTarget {
+    /// A run of text, possibly spanning element boundaries.
+    TextRange,
+    /// A whole DOM element (table cell/row/table, list item, section, …).
+    Element,
+}
+
+/// W3C `TextPositionSelector`: UTF-8 byte offsets into the document's
+/// canonical rendered text (`textContent`), matching
+/// [`CanonicalEncoding::Utf8Bytes`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HtmlTextPosition {
+    pub start: u64,
+    pub end: u64,
+}
+
+/// W3C `RangeSelector`: start/end containers addressed by CSS selector plus a
+/// UTF-8 byte offset into each container's text.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HtmlRangeSelector {
+    pub start_selector: String,
+    pub start_offset: u64,
+    pub end_selector: String,
+    pub end_offset: u64,
+}
+
+/// Agent-legible description of what an HTML anchor covers.
+///
+/// attn's purpose is human comments feeding AI suggestions, and a comment is
+/// only actionable to a coding agent if the payload also says *what* it was
+/// attached to. Capturing this at anchor time is free; reconstructing it later
+/// requires the document.
+///
+/// Spec: `html-annotation.md` §2 (agent-context block).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HtmlAnchorContext {
+    /// Lowercase tag name of the target element, e.g. `tr`.
+    pub tag_name: String,
+    /// ARIA role, explicit or implicit, when the frame could determine one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// Human-readable scope label shown in the breadcrumb, e.g.
+    /// `row 3 · Fuzzy quote · edit-distance match`.
+    pub scope_preview: String,
+    /// Short ancestor chain, outermost first, e.g. `["table", "tbody", "tr"]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dom_path: Vec<String>,
+}
+
+/// Field bounds for [`HtmlAnchor::validate`]. These exist because the payload
+/// crosses a trust boundary — it is authored inside a document frame that may
+/// be hostile (`amendments.md` decision #20) — not because the honest
+/// producer ever approaches them.
+const MAX_HTML_SELECTOR_BYTES: usize = 1024;
+const MAX_HTML_FALLBACK_SELECTORS: usize = 8;
+const MAX_HTML_SCOPE_PREVIEW_BYTES: usize = 256;
+const MAX_HTML_DOM_PATH_SEGMENTS: usize = 32;
+const MAX_HTML_DOM_PATH_SEGMENT_BYTES: usize = 64;
+const MAX_HTML_TAG_NAME_BYTES: usize = 64;
+const MAX_HTML_ROLE_BYTES: usize = 64;
+
+/// Rejected an untrusted HTML anchor payload.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HtmlAnchorValidationError(String);
+
+impl fmt::Display for HtmlAnchorValidationError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for HtmlAnchorValidationError {}
+
+impl HtmlAnchor {
+    /// Current wire version emitted by this build.
+    pub const VERSION: u32 = 1;
+
+    /// Bound every field of an anchor proposed by a document frame. Callers
+    /// must invoke this before persisting or syncing.
+    ///
+    /// This checks *shape and size only*. Whether the selectors actually
+    /// address anything is unknowable here by design — HTML anchors are
+    /// unverified-by-authority (`html-annotation.md` §7).
+    pub fn validate(&self) -> Result<(), HtmlAnchorValidationError> {
+        if self.v == 0 || self.v > Self::VERSION {
+            return Err(HtmlAnchorValidationError(format!(
+                "unsupported html anchor version {}",
+                self.v
+            )));
+        }
+        bound("cssSelector", &self.css_selector, MAX_HTML_SELECTOR_BYTES)?;
+        if self.css_selector.trim().is_empty() {
+            return Err(HtmlAnchorValidationError(
+                "cssSelector must not be empty".into(),
+            ));
+        }
+        if self.fallback_selectors.len() > MAX_HTML_FALLBACK_SELECTORS {
+            return Err(HtmlAnchorValidationError(format!(
+                "at most {MAX_HTML_FALLBACK_SELECTORS} fallbackSelectors allowed"
+            )));
+        }
+        for selector in &self.fallback_selectors {
+            bound("fallbackSelectors[]", selector, MAX_HTML_SELECTOR_BYTES)?;
+        }
+        if let Some(position) = self.text_position
+            && position.end < position.start
+        {
+            return Err(HtmlAnchorValidationError(
+                "textPosition end precedes start".into(),
+            ));
+        }
+        if let Some(range) = &self.range {
+            bound(
+                "range.startSelector",
+                &range.start_selector,
+                MAX_HTML_SELECTOR_BYTES,
+            )?;
+            bound(
+                "range.endSelector",
+                &range.end_selector,
+                MAX_HTML_SELECTOR_BYTES,
+            )?;
+        }
+        self.context.validate()
+    }
+}
+
+impl HtmlAnchorContext {
+    fn validate(&self) -> Result<(), HtmlAnchorValidationError> {
+        bound("context.tagName", &self.tag_name, MAX_HTML_TAG_NAME_BYTES)?;
+        if self.tag_name.is_empty() {
+            return Err(HtmlAnchorValidationError(
+                "context.tagName must not be empty".into(),
+            ));
+        }
+        if let Some(role) = &self.role {
+            bound("context.role", role, MAX_HTML_ROLE_BYTES)?;
+        }
+        bound(
+            "context.scopePreview",
+            &self.scope_preview,
+            MAX_HTML_SCOPE_PREVIEW_BYTES,
+        )?;
+        if self.dom_path.len() > MAX_HTML_DOM_PATH_SEGMENTS {
+            return Err(HtmlAnchorValidationError(format!(
+                "at most {MAX_HTML_DOM_PATH_SEGMENTS} domPath segments allowed"
+            )));
+        }
+        for segment in &self.dom_path {
+            bound("domPath[]", segment, MAX_HTML_DOM_PATH_SEGMENT_BYTES)?;
+        }
+        Ok(())
+    }
+}
+
+fn bound(field: &str, value: &str, max: usize) -> Result<(), HtmlAnchorValidationError> {
+    if value.len() > max {
+        return Err(HtmlAnchorValidationError(format!(
+            "{field} exceeds {max} bytes"
+        )));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Anchor resolution
 // ---------------------------------------------------------------------------
 
@@ -997,6 +1252,12 @@ pub enum ResolvedAnchor {
 pub enum ExactReason {
     BaseHashMatch,
     MappedThroughLocalSteps,
+    /// The document frame found an HTML anchor exactly where it was authored.
+    /// Distinct from `base_hash_match`, which asserts the *document* is
+    /// unchanged — an HTML page can reflow around an anchor that still holds.
+    ///
+    /// Spec: `html-annotation.md` §7.
+    ClientResolved,
 }
 
 /// Reason a resolution earned a `remapped` status (which fallback hit).
@@ -1012,6 +1273,12 @@ pub enum RemappedReason {
     StructureQuoteMatch,
     ContextMatch,
     FuzzyQuoteMatch,
+    /// The document frame resolved an HTML anchor against its own DOM and
+    /// reported the outcome. The daemon cannot reproduce or check this — the
+    /// other reasons name a step *this* resolver ran, and none of them did.
+    ///
+    /// Spec: `html-annotation.md` §7.
+    ClientResolved,
 }
 
 /// One candidate range for an ambiguous anchor resolution.
@@ -1387,6 +1654,7 @@ mod tests {
             block: None,
             context: None,
             structure: None,
+            html: None,
         }
     }
 
@@ -1406,6 +1674,7 @@ mod tests {
             media_type: None,
             encoding: None,
             manifest: None,
+            annotation: None,
         }
     }
 
@@ -1417,6 +1686,7 @@ mod tests {
             media_type: Some("application/octet-stream".to_string()),
             encoding: Some(SnapshotAssetEncoding::Base64url),
             manifest: None,
+            annotation: None,
         }
     }
 
@@ -1445,6 +1715,7 @@ mod tests {
                 scope: WorkspaceManifestScope::Workspace,
                 entries,
             }),
+            annotation: None,
         }
     }
 
@@ -1788,5 +2059,261 @@ mod tests {
         let json: Value = serde_json::to_value(&body).expect("to_value");
         let obj = json.as_object().expect("object");
         assert!(!obj.contains_key("reason"));
+    }
+
+    // -----------------------------------------------------------------------
+    // HTML anchors (attn-80u)
+    // -----------------------------------------------------------------------
+
+    fn sample_html_anchor() -> HtmlAnchor {
+        HtmlAnchor {
+            v: HtmlAnchor::VERSION,
+            target: HtmlAnchorTarget::Element,
+            css_selector: "table.results > tbody > tr:nth-child(3)".into(),
+            fallback_selectors: vec!["#results tr:nth-child(3)".into()],
+            text_position: Some(HtmlTextPosition {
+                start: 1024,
+                end: 1090,
+            }),
+            range: Some(HtmlRangeSelector {
+                start_selector: "table.results tr:nth-child(3) td:nth-child(1)".into(),
+                start_offset: 0,
+                end_selector: "table.results tr:nth-child(3) td:nth-child(4)".into(),
+                end_offset: 12,
+            }),
+            context: HtmlAnchorContext {
+                tag_name: "tr".into(),
+                role: Some("row".into()),
+                scope_preview: "row 3 · Fuzzy quote · edit-distance match".into(),
+                dom_path: vec!["table".into(), "tbody".into(), "tr".into()],
+            },
+        }
+    }
+
+    #[test]
+    fn html_anchor_round_trips_through_canonical_json() {
+        let anchor = Anchor {
+            html: Some(sample_html_anchor()),
+            ..sample_anchor()
+        };
+        let encoded = to_canonical_string(&anchor).expect("canonical encode");
+        let decoded: Anchor = serde_json::from_str(&encoded).expect("decode");
+        assert_eq!(decoded, anchor);
+    }
+
+    /// The new layer must be purely additive: an anchor that does not carry it
+    /// serializes to exactly the bytes it did before `html` existed.
+    #[test]
+    fn markdown_anchor_omits_the_html_key_entirely() {
+        let json: Value = serde_json::to_value(sample_anchor()).expect("to_value");
+        let obj = json.as_object().expect("object");
+        assert!(!obj.contains_key("html"));
+    }
+
+    /// Empty collections are skipped so a minimal text anchor stays small on
+    /// the wire and canonical bytes do not depend on producer defaults.
+    #[test]
+    fn html_anchor_skips_empty_optional_fields() {
+        let anchor = HtmlAnchor {
+            v: HtmlAnchor::VERSION,
+            target: HtmlAnchorTarget::TextRange,
+            css_selector: "p".into(),
+            fallback_selectors: Vec::new(),
+            text_position: None,
+            range: None,
+            context: HtmlAnchorContext {
+                tag_name: "p".into(),
+                role: None,
+                scope_preview: "paragraph".into(),
+                dom_path: Vec::new(),
+            },
+        };
+        let json: Value = serde_json::to_value(&anchor).expect("to_value");
+        let obj = json.as_object().expect("object");
+        for absent in ["fallbackSelectors", "textPosition", "range"] {
+            assert!(!obj.contains_key(absent), "{absent} should be skipped");
+        }
+        let context = obj["context"].as_object().expect("context object");
+        assert!(!context.contains_key("role"));
+        assert!(!context.contains_key("domPath"));
+    }
+
+    #[test]
+    fn html_anchor_target_uses_snake_case_wire_vocabulary() {
+        let json: Value = serde_json::to_value(sample_html_anchor()).expect("to_value");
+        assert_eq!(json["target"], json!("element"));
+
+        let text = HtmlAnchor {
+            target: HtmlAnchorTarget::TextRange,
+            ..sample_html_anchor()
+        };
+        let json: Value = serde_json::to_value(&text).expect("to_value");
+        assert_eq!(json["target"], json!("text_range"));
+    }
+
+    #[test]
+    fn html_anchor_validate_accepts_representative_payload() {
+        sample_html_anchor().validate().expect("valid");
+    }
+
+    #[test]
+    fn html_anchor_validate_rejects_unsupported_version() {
+        let anchor = HtmlAnchor {
+            v: HtmlAnchor::VERSION + 1,
+            ..sample_html_anchor()
+        };
+        assert!(anchor.validate().is_err());
+
+        let anchor = HtmlAnchor {
+            v: 0,
+            ..sample_html_anchor()
+        };
+        assert!(anchor.validate().is_err());
+    }
+
+    #[test]
+    fn html_anchor_validate_rejects_empty_selector() {
+        let anchor = HtmlAnchor {
+            css_selector: "   ".into(),
+            ..sample_html_anchor()
+        };
+        assert!(anchor.validate().is_err());
+    }
+
+    /// The payload crosses a trust boundary — it is authored inside a document
+    /// frame that may be hostile (`amendments.md` #20) — so oversized fields
+    /// are rejected rather than truncated.
+    #[test]
+    fn html_anchor_validate_rejects_oversized_untrusted_fields() {
+        let anchor = HtmlAnchor {
+            css_selector: "a".repeat(MAX_HTML_SELECTOR_BYTES + 1),
+            ..sample_html_anchor()
+        };
+        assert!(anchor.validate().is_err());
+
+        let anchor = HtmlAnchor {
+            fallback_selectors: vec!["p".into(); MAX_HTML_FALLBACK_SELECTORS + 1],
+            ..sample_html_anchor()
+        };
+        assert!(anchor.validate().is_err());
+
+        let anchor = HtmlAnchor {
+            context: HtmlAnchorContext {
+                scope_preview: "x".repeat(MAX_HTML_SCOPE_PREVIEW_BYTES + 1),
+                ..sample_html_anchor().context
+            },
+            ..sample_html_anchor()
+        };
+        assert!(anchor.validate().is_err());
+
+        let anchor = HtmlAnchor {
+            context: HtmlAnchorContext {
+                dom_path: vec!["div".into(); MAX_HTML_DOM_PATH_SEGMENTS + 1],
+                ..sample_html_anchor().context
+            },
+            ..sample_html_anchor()
+        };
+        assert!(anchor.validate().is_err());
+    }
+
+    #[test]
+    fn html_anchor_validate_rejects_inverted_text_position() {
+        let anchor = HtmlAnchor {
+            text_position: Some(HtmlTextPosition { start: 90, end: 10 }),
+            ..sample_html_anchor()
+        };
+        assert!(anchor.validate().is_err());
+    }
+
+    /// A zero-length range is legitimate — it is how an element with no text
+    /// reports its position.
+    #[test]
+    fn html_anchor_validate_accepts_empty_text_position() {
+        let anchor = HtmlAnchor {
+            text_position: Some(HtmlTextPosition { start: 42, end: 42 }),
+            ..sample_html_anchor()
+        };
+        anchor.validate().expect("valid");
+    }
+
+    // -----------------------------------------------------------------------
+    // Snapshot annotation capability (attn-yob)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn html_snapshot_may_declare_client_side_annotation() {
+        let snapshot = SnapshotPlaintext {
+            annotation: Some(SnapshotAnnotation::HtmlSelectorsV1),
+            ..text_snapshot(DocType::Html, "<p>hi</p>")
+        };
+        snapshot.validate().expect("annotatable html is valid");
+    }
+
+    /// A peer on an older build publishes HTML without the capability. That has
+    /// to stay valid — it means read-only, not malformed.
+    #[test]
+    fn html_snapshot_without_annotation_is_still_valid() {
+        text_snapshot(DocType::Html, "<p>hi</p>")
+            .validate()
+            .expect("read-only html is valid");
+    }
+
+    /// Still true, and deliberately so: HTML never gets a Rust-built index.
+    #[test]
+    fn html_snapshot_still_rejects_an_anchor_index() {
+        let index = AnchorIndex {
+            doc_hash: id::<ContentHash>("hash-1"),
+            canonical_encoding: CanonicalEncoding::Utf8Bytes,
+            line_count: 1,
+            blocks: Vec::new(),
+            headings: Vec::new(),
+        };
+        let snapshot = SnapshotPlaintext {
+            anchor_index: Some(index),
+            ..text_snapshot(DocType::Html, "<p>hi</p>")
+        };
+        assert!(snapshot.validate().is_err());
+    }
+
+    /// Markdown anchors against the Rust-built index; declaring a client-side
+    /// capability too would be two sources of truth for one document.
+    #[test]
+    fn markdown_snapshot_rejects_annotation_capability() {
+        let snapshot = SnapshotPlaintext {
+            annotation: Some(SnapshotAnnotation::HtmlSelectorsV1),
+            ..text_snapshot(DocType::Markdown, "# hi")
+        };
+        assert!(snapshot.validate().is_err());
+    }
+
+    #[test]
+    fn asset_snapshot_rejects_annotation_capability() {
+        let snapshot = SnapshotPlaintext {
+            annotation: Some(SnapshotAnnotation::HtmlSelectorsV1),
+            ..binary_asset(b"\x00\x01")
+        };
+        assert!(snapshot.validate().is_err());
+    }
+
+    /// Additive on the wire: a snapshot that does not declare the capability
+    /// serializes to exactly the bytes it did before the field existed.
+    #[test]
+    fn snapshot_omits_the_annotation_key_when_absent() {
+        let json: Value =
+            serde_json::to_value(text_snapshot(DocType::Html, "<p>hi</p>")).expect("to_value");
+        assert!(!json.as_object().expect("object").contains_key("annotation"));
+    }
+
+    #[test]
+    fn snapshot_annotation_uses_snake_case_wire_vocabulary() {
+        let snapshot = SnapshotPlaintext {
+            annotation: Some(SnapshotAnnotation::HtmlSelectorsV1),
+            ..text_snapshot(DocType::Html, "<p>hi</p>")
+        };
+        let json: Value = serde_json::to_value(&snapshot).expect("to_value");
+        assert_eq!(json["annotation"], json!("html_selectors_v1"));
+
+        let decoded: SnapshotPlaintext = serde_json::from_value(json).expect("round trip");
+        assert_eq!(decoded, snapshot);
     }
 }

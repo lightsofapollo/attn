@@ -35,10 +35,48 @@
   const label = $derived(
     copied ? `Copied ${code}` : failed ? `Copy failed — select ${code} manually` : `Copy ${code}`,
   );
+  const commandHintId = $derived(`install-command-hint-${code.replace(/[^a-z0-9]+/giu, '-')}`);
+
+  function scrollCommand(event: KeyboardEvent): void {
+    const command = event.currentTarget as HTMLInputElement;
+    const distance = Math.max(48, Math.round(command.clientWidth * 0.8));
+
+    switch (event.key) {
+      case 'ArrowLeft':
+        event.preventDefault();
+        command.scrollBy({ left: -distance, behavior: 'auto' });
+        break;
+      case 'ArrowRight':
+        event.preventDefault();
+        command.scrollBy({ left: distance, behavior: 'auto' });
+        break;
+      case 'Home':
+        event.preventDefault();
+        command.scrollTo({ left: 0, behavior: 'auto' });
+        break;
+      case 'End':
+        event.preventDefault();
+        command.scrollTo({ left: command.scrollWidth, behavior: 'auto' });
+        break;
+    }
+  }
 </script>
 
 <div class="code">
-  <span>{code}</span>
+  <input
+    class="code-command"
+    type="text"
+    value={code}
+    readonly
+    aria-label={`Install command: ${code}`}
+    aria-describedby={commandHintId}
+    data-scrollable-command
+    onkeydown={scrollCommand}
+  />
+  <!-- Keep the command in the source text as well as in the readonly control.
+       The visual text lives in the input; this makes older text-based checks
+       and non-form fallback readers retain the same discoverable command. -->
+  <span class="visually-hidden">{code}</span>
   <button
     class="code-copy"
     type="button"
@@ -71,6 +109,9 @@
   <!-- Announced politely: a button's own name change is not reliably re-read by
        every screen reader after activation, and this page had no live region at
        all. -->
+  <span class="visually-hidden" id={commandHintId}>
+    Use the left and right arrow keys to read the full command.
+  </span>
   <span class="visually-hidden" role="status" aria-live="polite">
     {copied ? `Copied ${code}` : failed ? 'Copy failed. Select the command to copy it manually.' : ''}
   </span>

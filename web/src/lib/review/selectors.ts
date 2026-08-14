@@ -95,7 +95,7 @@ function compareEvents(a: ReviewEvent, b: ReviewEvent): number {
 // ---------------------------------------------------------------------------
 
 /**
- * Walk the append-only event log and group `CommentCreated` + `CommentResolved`
+ * Walk the append-only event log and group comment + suggestion lifecycle
  * events into `Thread` records.
  *
  * Rules (mirrors planning/collab/data-model.md §Comment Events):
@@ -103,8 +103,9 @@ function compareEvents(a: ReviewEvent, b: ReviewEvent): number {
  *   * The thread root is the earliest comment in the thread by
  *     `meta.createdAt` (with `eventId` as tie-breaker for determinism).
  *   * Replies are every other comment in the thread, ordered the same way.
- *   * Any `CommentResolved` event referencing the thread flips `resolved`
- *     to `true`. There is no un-resolve event in the spec today.
+ *   * A `CommentResolved` flips its `threadId`; a `SuggestionAccepted` or
+ *     `SuggestionRejected` flips its `suggestionId`. There is no un-resolve
+ *     event in the spec today.
  *   * `anchor` is the anchor authored on the root event; `null` only if
  *     the log was somehow built without a root comment.
  *   * `resolvedAnchor` is the latest verdict for the root event's id,
@@ -117,7 +118,7 @@ export function reconstructThreads(
   events: ReviewEvent[],
   anchorResolutions: Record<EventId, ReviewAnchorResolutionUpdate>,
 ): Thread[] {
-  // Bucket comments by threadId first, then collect resolution flips.
+  // Bucket roots by their stable thread id, then collect lifecycle terminals.
   const commentsByThread = new Map<string, ReviewEvent[]>();
   const resolvedThreadIds = new Set<string>();
 
@@ -142,6 +143,14 @@ export function reconstructThreads(
       }
     } else if (event.body.type === 'comment_resolved') {
       resolvedThreadIds.add(event.body.threadId);
+    } else if (
+      event.body.type === 'suggestion_accepted'
+      || event.body.type === 'suggestion_rejected'
+    ) {
+      // Suggestions are threads keyed by suggestionId above. Their terminal
+      // events must close that same thread in every projection; otherwise a
+      // passive tab renders an already-accepted suggestion as live work.
+      resolvedThreadIds.add(event.body.suggestionId);
     }
   }
 

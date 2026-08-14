@@ -567,16 +567,21 @@
                 />
                 <span class="min-w-0 truncate font-mono text-xs text-foreground">{relativePath(file.path)}</span>
                 <span class="text-micro text-muted-foreground">
-                  {file.path === filePath ? 'Current · ' : ''}{file.fileType === 'html' ? 'Read-only' : 'Markdown'}
+                  {file.path === filePath ? 'Current · ' : ''}{file.fileType === 'html' ? 'HTML · comments available after sharing' : 'Markdown'}
                 </span>
               </label>
             {/each}
           {/if}
         </ScrollArea>
 
+        <!-- `min-w-0` on both items, not just `truncate`: a flex item defaults
+             to `min-width:auto`, so it refuses to shrink below its min-content
+             width and a `nowrap` path pushes the row wider instead of
+             ellipsising. The project root is arbitrarily long, so it is the one
+             that has to give. -->
         <div class="flex shrink-0 items-center justify-between gap-3 text-xs" aria-live="polite">
-          <strong class="font-medium text-foreground">{selectionSummary}</strong>
-          <span class="truncate font-mono text-muted-foreground">{projectRoot}</span>
+          <strong class="min-w-0 shrink-0 font-medium text-foreground">{selectionSummary}</strong>
+          <span class="min-w-0 truncate font-mono text-muted-foreground" title={projectRoot}>{projectRoot}</span>
         </div>
       </section>
     {:else}

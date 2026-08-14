@@ -85,6 +85,32 @@ tasks:
         ATTN_DEV_SERVER_URL="${ATTN_DEV_SERVER_URL}" ATTN_RELAY_URL="${ATTN_RELAY_URL}" ATTN_BROWSER_REVIEW_URL="${ATTN_BROWSER_REVIEW_URL}" cargo run --bin attn -- --no-fork "${ATTN_PATH}"
         '
 
+  dev:site:
+    desc: Run the marketing site (site/) with Vite HMR — edit site/src files and the browser updates live
+    cmds:
+      - |
+        bash -lc '
+        set -euo pipefail
+        if [ ! -d "site/node_modules" ]; then
+          echo "==> Installing site dependencies..."
+          (cd site && npm ci)
+        fi
+        cd site && npm run dev
+        '
+
+  dev:app:
+    desc: Run the hosted browser app (web/ browser build) — the desk + /open import page; proxies to the staging relay
+    cmds:
+      - |
+        bash -lc '
+        set -euo pipefail
+        if [ ! -d "web/node_modules" ]; then
+          echo "==> Installing web dependencies..."
+          (cd web && npm ci)
+        fi
+        cd web && npm run dev:browser
+        '
+
   dev:collab:
     desc: One-command local collab harness — boots Miniflare relay + owner + reviewer attn daemons (attn-nnj.11.7). Ctrl+C cleans up.
     cmds:
@@ -129,6 +155,17 @@ tasks:
     desc: "Headless E2E for read-only HTML doc sharing (attn-qgd) — relay + owner shares .html + reviewer renders it read-only over the encrypted transport. Honors ATTN_SKIP_HTML_SHARE_E2E=1."
     cmds:
       - scripts/test-html-share-e2e.sh
+
+  test:html-annotation:
+    desc: "Headless E2E for HTML doc annotation — owner and reviewer both receive an annotatable HTML frame, while owner path mode retains local sub-resource resolution. Honors ATTN_SKIP_HTML_ANNOTATION_E2E=1."
+    cmds:
+      - scripts/test-html-annotation-e2e.sh
+
+  test:html-annotation:runtime:
+    desc: "Real-browser tests for the injected annotation runtime + shell bridge (attn-ges/attn-08r). Needs Chromium via `npx playwright install chromium`."
+    dir: web
+    cmds:
+      - npm run test:e2e:html-annotation
 
   test:webrtc:
     desc: "Run the WebRTC end-to-end test (Rust transport + bash daemon shape). Honors ATTN_SKIP_WEBRTC_E2E=1 on flaky CI."

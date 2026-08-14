@@ -72,7 +72,8 @@ export interface WorkspaceRecord {
   lastBackupAt?: number;
 }
 
-export type WorkspaceEntryKind = 'markdown' | 'asset';
+/** HTML is a read-only document, distinct from editable Markdown and binary assets. */
+export type WorkspaceEntryKind = 'markdown' | 'html' | 'asset';
 
 export interface WorkspaceEntryRecord {
   v: number;
@@ -80,7 +81,7 @@ export interface WorkspaceEntryRecord {
   /** Normalized relative path — the primary key with workspaceId. */
   path: string;
   kind: WorkspaceEntryKind;
-  /** Declared/sniffed MIME type for assets; absent for Markdown. */
+  /** Declared/sniffed MIME type for binary assets; absent for documents. */
   mediaType?: string;
   /** Head revision; every live entry has one. */
   headRevisionId: string;
@@ -278,7 +279,7 @@ export function validateWorkspaceEntryRecord(
   if (typeof record.path !== 'string' || normalizeEntryPath(record.path) !== record.path) {
     throw new BrowserStorageError('entry path is not in canonical form');
   }
-  if (record.kind !== 'markdown' && record.kind !== 'asset') {
+  if (record.kind !== 'markdown' && record.kind !== 'html' && record.kind !== 'asset') {
     throw new BrowserStorageError('entry kind is invalid');
   }
   if (record.mediaType !== undefined) {

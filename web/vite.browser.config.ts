@@ -1,4 +1,5 @@
 import { fileURLToPath } from 'node:url';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { defineConfig, type Connect, type Plugin } from 'vite';
 import { svelte } from '@sveltejs/vite-plugin-svelte';
@@ -8,6 +9,7 @@ import { THEME_PREFLIGHT_SCRIPT } from './src/lib/hosted/theme-preflight';
 
 const webRoot = fileURLToPath(new URL('.', import.meta.url));
 const hostedRoot = path.join(webRoot, 'hosted');
+const browserDistRoot = path.join(webRoot, 'dist-browser');
 const pushE2e = process.env.ATTN_PUSH_E2E === '1';
 const stagingRelayOrigin = 'https://relay-staging.attn.sh';
 const stagingWebOrigin = 'https://staging.attn.sh';
@@ -23,28 +25,50 @@ const devRelayProxy = {
   headers: { origin: devRelayOrigin },
 };
 
-// Mirror the Cloudflare worker's deep-path rewrites (worker.ts) in dev and
-// preview so `/app/w/:workspaceId/:filePath` and `/review/:roomId` resolve to
-// the right HTML entry locally. Only document navigations are rewritten:
-// module, asset, and Vite-internal requests never send `Accept: text/html`.
+// Mirror the Cloudflare worker's strict document routing in dev and preview.
+// Valid deep paths resolve to their entry; malformed paths receive the landing
+// recovery document with a real 404 status. Module, asset, and Vite-internal
+// requests never send `Accept: text/html`, so they retain ordinary static 404s.
 function hostedEntryRewrites(): Plugin {
-  const rewrite: Connect.NextHandleFunction = (req, _res, next) => {
+  const rewrite = (renderNotFound: () => Promise<string>): Connect.NextHandleFunction => (req, res, next) => {
     const accept = req.headers.accept ?? '';
     if ((req.method === 'GET' || req.method === 'HEAD') && accept.includes('text/html')) {
       const pathname = (req.url ?? '/').split(/[?#]/u)[0];
       const entry = hostedEntryForPath(pathname);
-      if (entry !== 'landing') req.url = entryHtmlPath(entry);
-      else if (!pathname.slice(1).includes('.')) req.url = entryHtmlPath('landing');
+      if (entry) {
+        req.url = entryHtmlPath(entry);
+      } else {
+        // Vite's static-file middleware always writes a 200 when it serves an
+        // HTML file, even when a prior middleware set `res.statusCode`. Render
+        // this one document here instead so development and preview preserve
+        // the Worker contract: branded recovery body AND real 404 status.
+        void renderNotFound()
+          .then((html) => {
+            res.statusCode = 404;
+            res.setHeader('Content-Type', 'text/html; charset=utf-8');
+            if (req.method === 'HEAD') res.end();
+            else res.end(html);
+          })
+          .catch(next);
+        return;
+      }
     }
     next();
   };
   return {
     name: 'attn-hosted-entry-rewrites',
     configureServer(server) {
-      server.middlewares.use(rewrite);
+      server.middlewares.use(
+        rewrite(async () =>
+          server.transformIndexHtml(
+            '/index.html',
+            await readFile(path.join(hostedRoot, 'index.html'), 'utf8'),
+          ),
+        ),
+      );
     },
     configurePreviewServer(server) {
-      server.middlewares.use(rewrite);
+      server.middlewares.use(rewrite(() => readFile(path.join(browserDistRoot, 'index.html'), 'utf8')));
     },
   };
 }

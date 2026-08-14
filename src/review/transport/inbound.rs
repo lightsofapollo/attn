@@ -111,6 +111,15 @@ pub enum InboundError {
     /// registration record.
     #[error("event is not authorized for the registered participant/device")]
     UnauthorizedEvent,
+    /// A comment/suggestion carried an `anchor.html` payload that fails
+    /// `HtmlAnchor::validate()`. The sender's own client enforces the same
+    /// bounds before signing (`ReviewCommand::CreateComment`), so a violation
+    /// here means a modified client tried to sync an oversized or malformed
+    /// selector blob — refuse it before it reaches `events.jsonl` and every
+    /// peer's doc-frame selector engine.
+    /// @see planning/collab/html-annotation.md §3
+    #[error("event anchor failed validation: {0}")]
+    InvalidAnchor(String),
     /// Signal envelope's cleartext `target.deviceId` does not match the
     /// receiver's local `deviceId`. Per `planning/collab/security-review.md`
     /// §H2 (v2 mitigation): `target.deviceId` is not AAD-bound, so a malicious
@@ -661,6 +670,17 @@ impl InboundPipeline {
     }
 }
 
+/// Bound the opaque `anchor.html` selector blob on RECEIPT, not just at
+/// authoring time. The signature only proves who sent it, not that their
+/// client enforced the caps — a modified client can sign anything.
+fn validate_html_anchor(anchor: &crate::review::model::Anchor) -> Result<(), InboundError> {
+    if let Some(html) = anchor.html.as_ref() {
+        html.validate()
+            .map_err(|err| InboundError::InvalidAnchor(err.to_string()))?;
+    }
+    Ok(())
+}
+
 fn authorize_event(
     event: &ReviewEvent,
     authorizations: &mut HashMap<String, RegisteredDeviceAuthorization>,
@@ -695,11 +715,11 @@ fn authorize_event(
         _ if registered.kind != ParticipantKind::Owner && !registered.attested => {
             Err(InboundError::UnauthorizedEvent)
         }
-        ReviewEventBody::CommentCreated { .. } => Ok(()),
-        ReviewEventBody::SuggestionCreated { .. }
+        ReviewEventBody::CommentCreated { anchor, .. } => validate_html_anchor(anchor),
+        ReviewEventBody::SuggestionCreated { anchor, .. }
             if registered.grant_tier.unwrap_or(GrantTier::Suggest) == GrantTier::Suggest =>
         {
-            Ok(())
+            validate_html_anchor(anchor)
         }
         ReviewEventBody::CommentResolved { resolved_by, .. }
             if registered.kind != ParticipantKind::Agent
@@ -915,6 +935,7 @@ mod tests {
                     block: None,
                     context: None,
                     structure: None,
+                    html: None,
                 },
                 body: "hello".to_string(),
             },
@@ -1044,6 +1065,70 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn oversized_html_anchor_rejected_before_persistence() {
+        use crate::review::model::{HtmlAnchor, HtmlAnchorContext, HtmlAnchorTarget};
+
+        let (pipeline, store, signer, room_id, _tmp) = fresh_pipeline_with_signer();
+        pipeline
+            .authorizations
+            .write()
+            .await
+            .values_mut()
+            .next()
+            .expect("authorization")
+            .grant_tier = Some(GrantTier::Comment);
+        // A signature proves authorship, not client honesty: this envelope is
+        // validly signed but its html anchor blows the selector byte cap — the
+        // payload class a modified client would use to feed pathological
+        // selectors to every peer's doc frame.
+        let envelope = mint_event_envelope_with_body(
+            pipeline.event_key,
+            signer,
+            &room_id,
+            ReviewEventBody::CommentCreated {
+                thread_id: "thread-html".to_string(),
+                anchor: Anchor {
+                    v: 2,
+                    file_id: id::<FileId>("f-file-01"),
+                    snapshot_id: id::<SnapshotId>("eQ7pDCC-mekpz-we7gDYag"),
+                    base_hash: id::<ContentHash>("fB6AfMm0EkvWvuNrQNlXoK1cxgj8AjmFiOVq8P1Td3Y"),
+                    position: PositionAnchor {
+                        byte_range: [0, 9],
+                        line_range: [0, 0],
+                        pm_range: None,
+                    },
+                    quote: None,
+                    block: None,
+                    context: None,
+                    structure: None,
+                    html: Some(HtmlAnchor {
+                        v: HtmlAnchor::VERSION,
+                        target: HtmlAnchorTarget::Element,
+                        css_selector: "x".repeat(64 * 1024),
+                        fallback_selectors: vec![],
+                        text_position: None,
+                        range: None,
+                        context: HtmlAnchorContext {
+                            tag_name: "p".into(),
+                            role: None,
+                            scope_preview: "preview".into(),
+                            dom_path: vec!["p".into()],
+                        },
+                    }),
+                },
+                body: "hostile".to_string(),
+            },
+        );
+
+        let error = pipeline
+            .import_event_envelope(&room_id, &envelope)
+            .await
+            .expect_err("oversized html anchor must be refused");
+        assert!(matches!(error, InboundError::InvalidAnchor(_)));
+        assert_eq!(store.iter_events(&room_id).expect("events").count(), 0);
+    }
+
+    #[tokio::test]
     async fn caller_policy_rejects_before_event_log_append() {
         let (pipeline, store, signer, room_id, _tmp) = fresh_pipeline_with_signer();
         let envelope = mint_event_envelope(pipeline.event_key, signer, &room_id);
@@ -1086,6 +1171,7 @@ mod tests {
                     block: None,
                     context: None,
                     structure: None,
+                    html: None,
                 },
                 operation: crate::review::model::SuggestionOperation::Replace {
                     expected_text: "old".to_string(),

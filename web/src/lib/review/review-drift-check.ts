@@ -78,9 +78,35 @@ export function fingerprintsDrifted(
   return a.count !== b.count || a.eventsHash !== b.eventsHash;
 }
 
-interface DriftMessage {
-  tabId: string;
-  fingerprint: ReviewDriftFingerprint;
+/**
+ * BroadcastChannel delivery is asynchronous. A bare fingerprint can therefore
+ * be an old observation by the time another tab receives it: a pair of tabs
+ * that have already converged would still produce a loud, false drift warning.
+ *
+ * Use a tiny probe/ack exchange instead. The tab that reports a mismatch reads
+ * its state when the ack arrives, while the peer read its state when handling
+ * the probe. Both sides of a comparison are consequently current at the
+ * exchange boundary; no durable state or replay path participates here.
+ */
+type DriftMessage =
+  | { v: 1; kind: 'probe'; tabId: string; sequence: number }
+  | {
+      v: 1;
+      kind: 'ack';
+      tabId: string;
+      targetTabId: string;
+      sequence: number;
+      fingerprint: ReviewDriftFingerprint;
+    };
+
+function isFingerprint(value: unknown): value is ReviewDriftFingerprint {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return false;
+  const fingerprint = value as Partial<ReviewDriftFingerprint>;
+  return (fingerprint.roomId === null || typeof fingerprint.roomId === 'string')
+    && Number.isSafeInteger(fingerprint.count)
+    && (fingerprint.count ?? -1) >= 0
+    && Number.isSafeInteger(fingerprint.eventsHash)
+    && (fingerprint.eventsHash ?? -1) >= 0;
 }
 
 /**
@@ -116,15 +142,16 @@ export function startReviewDriftMonitor(options: {
       );
     });
 
+  let sequenceNumber = 0;
   const broadcast = (): void => {
-    let fingerprint: ReviewDriftFingerprint;
     try {
-      fingerprint = computeReviewFingerprint(options.read());
-    } catch {
-      return; // Never let the monitor throw into the poll loop.
-    }
-    try {
-      channel.postMessage({ tabId, fingerprint } satisfies DriftMessage);
+      sequenceNumber = (sequenceNumber + 1) >>> 0;
+      channel.postMessage({
+        v: 1,
+        kind: 'probe',
+        tabId,
+        sequence: sequenceNumber,
+      } satisfies DriftMessage);
     } catch {
       // Advisory only.
     }
@@ -132,16 +159,51 @@ export function startReviewDriftMonitor(options: {
 
   channel.onmessage = (event: MessageEvent): void => {
     const message = event.data as Partial<DriftMessage> | null;
-    if (!message || typeof message.tabId !== 'string' || message.tabId === tabId) return;
-    const other = message.fingerprint;
-    if (!other || typeof other.count !== 'number') return;
+    if (
+      !message
+      || message.v !== 1
+      || typeof message.tabId !== 'string'
+      || message.tabId === tabId
+      || !Number.isSafeInteger(message.sequence)
+      || (message.sequence ?? -1) < 0
+    ) return;
+    if (message.kind === 'probe') {
+      const probeSequence = message.sequence;
+      if (probeSequence === undefined) return;
+      let fingerprint: ReviewDriftFingerprint;
+      try {
+        fingerprint = computeReviewFingerprint(options.read());
+      } catch {
+        return;
+      }
+      try {
+        channel.postMessage({
+          v: 1,
+          kind: 'ack',
+          tabId,
+          targetTabId: message.tabId,
+          sequence: probeSequence,
+          fingerprint,
+        } satisfies DriftMessage);
+      } catch {
+        // Advisory only.
+      }
+      return;
+    }
+    if (
+      message.kind !== 'ack'
+      || message.targetTabId !== tabId
+      || !isFingerprint(message.fingerprint)
+    ) return;
     let self: ReviewDriftFingerprint;
     try {
       self = computeReviewFingerprint(options.read());
     } catch {
       return;
     }
-    if (fingerprintsDrifted(self, other)) warn(self, other, message.tabId);
+    if (fingerprintsDrifted(self, message.fingerprint)) {
+      warn(self, message.fingerprint, message.tabId);
+    }
   };
 
   const interval = options.intervalMs ?? 2_000;

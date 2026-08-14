@@ -142,6 +142,55 @@ function makeResolve(threadId: string, createdAt: number): ReviewEvent {
   };
 }
 
+function makeSuggestion(suggestionId: string, createdAt: number): ReviewEvent {
+  return {
+    meta: {
+      v: 2,
+      eventId: makeEventId('evt-s'),
+      roomId: ROOM_A,
+      authorId: AUTHOR,
+      deviceId: 'd-alice',
+      createdAt,
+      parentEventIds: [],
+    },
+    body: {
+      type: 'suggestion_created',
+      suggestionId,
+      anchor: anchorOn(FILE_1, SNAP_A, 0, 5),
+      operation: { kind: 'replace', expectedText: 'hello', replacement: 'changed' },
+      note: 'suggested change',
+    },
+    auth: { signature: 'sig', signingKeyId: 'k' },
+  };
+}
+
+function makeSuggestionTerminal(
+  suggestionId: string,
+  disposition: 'accepted' | 'rejected',
+  createdAt: number,
+): ReviewEvent {
+  return {
+    meta: {
+      v: 2,
+      eventId: makeEventId('evt-st'),
+      roomId: ROOM_A,
+      authorId: AUTHOR,
+      deviceId: 'd-alice',
+      createdAt,
+      parentEventIds: [],
+    },
+    body: disposition === 'accepted'
+      ? {
+          type: 'suggestion_accepted',
+          suggestionId,
+          appliedRevisionId: 'revision-accepted',
+          resultingHash: BASE_HASH,
+        }
+      : { type: 'suggestion_rejected', suggestionId },
+    auth: { signature: 'sig', signingKeyId: 'k' },
+  };
+}
+
 function ambiguousUpdate(
   eventId: EventId,
   reason = 'tied_top_candidates',
@@ -305,6 +354,35 @@ defineCase('comment_resolved flips resolved=true on the matching thread only', (
   assert(
     unresolvedThreadCount(threads) === 1,
     `unresolved count should be 1, got ${unresolvedThreadCount(threads)}`,
+  );
+});
+
+defineCase('suggestion terminals resolve only their matching suggestion thread', () => {
+  const accepted = makeSuggestion('suggestion-accepted', 100);
+  const rejected = makeSuggestion('suggestion-rejected', 110);
+  const stillOpen = makeSuggestion('suggestion-open', 120);
+  const acceptedTerminal = makeSuggestionTerminal('suggestion-accepted', 'accepted', 130);
+  const rejectedTerminal = makeSuggestionTerminal('suggestion-rejected', 'rejected', 140);
+
+  const threads = reconstructThreads(
+    [accepted, rejected, stillOpen, acceptedTerminal, rejectedTerminal],
+    {},
+  );
+  assert(
+    threads.find((thread) => thread.id === 'suggestion-accepted')?.resolved === true,
+    'accepted suggestion must become resolved',
+  );
+  assert(
+    threads.find((thread) => thread.id === 'suggestion-rejected')?.resolved === true,
+    'rejected suggestion must become resolved',
+  );
+  assert(
+    threads.find((thread) => thread.id === 'suggestion-open')?.resolved === false,
+    'unrelated suggestion must stay open',
+  );
+  assert(
+    unresolvedThreadCount(threads) === 1,
+    `one suggestion should remain unresolved, got ${unresolvedThreadCount(threads)}`,
   );
 });
 

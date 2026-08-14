@@ -44,12 +44,17 @@ import {
 } from './browser-snapshot-publisher';
 import type { BrowserStorage } from './browser-storage';
 import { BrowserStorageError, StorageConflictError } from './browser-storage-errors';
+import type { WorkspaceEntryRecord } from './browser-workspace-schema';
 import type { InviteCapability, ShareRecordView } from './browser-workspace-share';
 import type { CommittedRevision, CommitRevisionInput } from './browser-workspace-store';
 import type { LeaseHandle, WorkspaceLeaseManagerOptions } from './browser-workspace-lease';
 import type { CollabController } from '../prosemirror/collab-controller';
 import type { BrowserReviewTerminalPort } from './browser-review-actions';
 import { LocalCollabHub } from './browser-local-collab';
+import {
+  BrowserReviewEphemeraBus,
+  type BrowserReviewEphemeraSignal,
+} from './browser-review-ephemera';
 import { createHostedOwnerSessionStoreSink } from './browser-review-log';
 import { SHARE_RECORDS_CHANNEL_PREFIX, ringDoorbell } from '../tab-channels';
 import {
@@ -58,6 +63,12 @@ import {
   type BrowserWorkspaceShareView,
   type BrowserWorkspaceSharingDependencies,
 } from './browser-workspace-sharing';
+
+const HTML_MEDIA = /^text\/html(?:;\s*charset=[^;]+)?$/iu;
+
+function entryIsHtml(entry: WorkspaceEntryRecord): boolean {
+  return entry.kind === 'html' || (entry.kind === 'asset' && HTML_MEDIA.test(entry.mediaType ?? ''));
+}
 
 export type BrowserOwnerWorkspaceRuntimeStatus =
   | 'starting'
@@ -148,6 +159,9 @@ export interface BrowserOwnerWorkspaceAuthority extends BrowserReviewTerminalPor
   start(): Promise<boolean>;
   close(): Promise<void>;
   getState(): BrowserOwnerAuthorityState;
+  /** Current authenticated binding, including a just-promoted epoch before
+   * the outer workspace runtime has published its presentation snapshot. */
+  getBinding(pathOrFileId: string): BrowserOwnerAuthorityFile | null;
   readonly controller: CollabController | null;
   transitionPublishedEpoch(
     fileId: string,
@@ -158,9 +172,8 @@ export interface BrowserOwnerWorkspaceAuthority extends BrowserReviewTerminalPor
   replyToComment(anchor: Anchor, body: string, threadId: string): Promise<ReviewEvent>;
   resolveComment(threadId: string): Promise<ReviewEvent>;
   retryOutbox(): Promise<void>;
-  /** Presence bridge, tabs → room (attn-37f9): best-effort forward of a
-   *  follower tab's cursor payload over this leader's live session. */
-  mirrorCursorToRoom(payload: string): void;
+  /** Best-effort owner egress for a bounded local-tab ephemeral signal. */
+  sendEphemera(signal: BrowserReviewEphemeraSignal): void;
 }
 
 export type BrowserOwnerWorkspaceRuntimeSubscriber = (
@@ -186,6 +199,8 @@ export class BrowserOwnerWorkspaceRuntime {
   private credentials: BrowserOwnerCredentials | null = null;
   private authority: BrowserOwnerWorkspaceAuthority | null = null;
   private localHub: LocalCollabHub | null = null;
+  /** One loss-only bus for room roster + cursors in this browser context. */
+  private ephemera: BrowserReviewEphemeraBus | null = null;
   private localCollabSyncGeneration = 0;
   private controllerValue: CollabController | null = null;
   private mutationTail: Promise<void> = Promise.resolve();
@@ -252,6 +267,13 @@ export class BrowserOwnerWorkspaceRuntime {
   }
 
   getBinding(pathOrFileId: string): BrowserOwnerAuthorityFile | null {
+    // An authority transition builds its next controller before the runtime
+    // broadcasts its next presentation state. For collab seeding, that narrow
+    // interval must use the authority's authenticated binding rather than the
+    // previous state snapshot; otherwise a fresh controller can be handed an
+    // old-epoch editor and quite properly reject it.
+    const authoritative = this.authority?.getBinding(pathOrFileId) ?? null;
+    if (authoritative) return authoritative;
     const binding = this.stateValue.bindings.find(
       (item) => item.path === pathOrFileId || item.fileId === pathOrFileId,
     );
@@ -265,14 +287,14 @@ export class BrowserOwnerWorkspaceRuntime {
     // Local multi-tab mode: the hub's seed cache is the single base every
     // participant (this editor included) binds from.
     if (this.localHub) return this.localHub.seedFor(path);
-    return this.getPublishedCollabSeed(path);
+    return this.getPublishedCollabSeed(path, this.getBinding(path));
   }
 
   private async getPublishedCollabSeed(
     path: string,
+    binding = this.getBinding(path),
   ): Promise<{ fileId: string; epoch: string; markdown: string } | null> {
-    const binding = this.getBinding(path);
-    if (!binding) return null;
+    if (!binding || binding.docType === 'html') return null;
     const bytes = await this.options.storage.workspaces.getRevisionBody(
       this.options.workspaceId,
       binding.path,
@@ -698,6 +720,7 @@ export class BrowserOwnerWorkspaceRuntime {
       // re-handshake instead of waiting out the lease.
       this.localCollabSyncGeneration += 1;
       await this.stopLocalCollab();
+      this.closeEphemera();
       // A pending debounced republish must not fire after teardown; flush it
       // now (best-effort) so reviewers get the final content. This is the
       // one moment plain-typing heads are published as a fresh generation:
@@ -825,6 +848,7 @@ export class BrowserOwnerWorkspaceRuntime {
     lease: LeaseHandle,
   ): Promise<boolean> {
     this.stopLocalHeartbeat();
+    this.startEphemera();
     this.share = discovered.share;
     this.credentials = discovered.credentials;
     const factory = this.options.authorityFactory
@@ -855,10 +879,9 @@ export class BrowserOwnerWorkspaceRuntime {
         store: createHostedOwnerSessionStoreSink(),
       },
       collab: this.options.collab,
-      // Presence bridge, room → tabs (attn-37f9): reviewer cursors arriving
-      // over the relay re-post onto the local tab channel so follower tabs
-      // render them too (they dedupe by clientID).
-      onCursorDelivery: (payload) => this.localHub?.mirrorCursorPayload(payload),
+      // Authenticated room cursor → loss-only workspace bus. Document state
+      // remains in the authority and durable review projection only.
+      onEphemeraDelivery: (signal) => this.ephemera?.publish(signal),
       rollover: {
         onRequired: (input) => this.commitRolloverAndPublish(
           input.fileId,
@@ -1021,19 +1044,20 @@ export class BrowserOwnerWorkspaceRuntime {
         } finally {
           bytes.fill(0);
         }
-        if (entry.kind === 'markdown') {
+        if (entry.kind === 'markdown' || entryIsHtml(entry)) {
           bindings.push({
             fileId: published.fileId,
             path: published.path,
             revisionId: published.revisionId,
             contentHash: published.contentHash,
             epoch: published.snapshotId,
+            docType: entryIsHtml(entry) ? 'html' : 'markdown',
           });
         }
         if (entry.headRevisionId !== published.revisionId) localHeadsMoved = true;
       }
       if (bindings.length === 0) {
-        throw new StorageConflictError('published share has no Markdown authority binding');
+        throw new StorageConflictError('published share has no document authority binding');
       }
       return {
         share,
@@ -1182,7 +1206,15 @@ export class BrowserOwnerWorkspaceRuntime {
           entry.path,
           entry.headRevisionId,
         );
-        if (entry.kind === 'asset') {
+        if (entryIsHtml(entry)) {
+          entries.push({
+            path: entry.path,
+            docType: 'html',
+            bytes,
+            fileId: published.fileId,
+            revisionId: entry.headRevisionId,
+          });
+        } else if (entry.kind === 'asset') {
           if (!entry.mediaType) {
             bytes.fill(0);
             throw new BrowserStorageError('shared asset is missing its media type');
@@ -1291,31 +1323,41 @@ export class BrowserOwnerWorkspaceRuntime {
   private onAuthorityState(authorityState: BrowserOwnerAuthorityState): void {
     if (this.closing) return;
     this.refreshController();
-    const status = authorityState.status === 'active'
+    const authorityStatus = authorityState.status === 'active'
       ? 'active'
       : authorityState.status === 'transitioning'
         ? 'transitioning'
         : authorityState.status === 'paused' || authorityState.status === 'closed'
           ? 'paused'
           : 'starting';
+    // The authority rebuilds its controller before `transitionPublishedEpoch`
+    // returns the new bindings. Do not expose that controller as editable to
+    // the shell during this tiny interval: an old seed would be rejected by
+    // the new controller's authenticated-base check. `afterTransition()`
+    // publishes bindings and restores active editing atomically afterwards.
+    const completingPublishedTransition = authorityStatus === 'active'
+      && this.stateValue.status === 'transitioning';
+    const status = completingPublishedTransition ? 'transitioning' : authorityStatus;
     const leaseLost = authorityState.pauseKind === 'lease_lost';
     if (leaseLost) this.lease = null;
     this.patchState({
       status,
       leaseRole: leaseLost ? 'passive' : 'owner',
       writable: !leaseLost,
-      liveEditingAvailable: status === 'active',
+      liveEditingAvailable: !completingPublishedTransition && status === 'active',
       reason: authorityState.pauseReason,
       authority: authorityState,
     });
     if (leaseLost) {
       this.localCollabSyncGeneration += 1;
       void this.stopLocalCollab();
-    } else {
+    } else if (!completingPublishedTransition) {
       this.syncPublishedLocalCollab();
-      // Roster mirror (attn-90qq): follower tabs have no session, so the
-      // leader re-broadcasts its presence roster on every authority tick.
-      this.localHub?.broadcastPresence(authorityState.session?.peers ?? []);
+      // Followers have no room session; mirror the current roster through the
+      // same workspace ephemera bus that carries cursor presence.
+      this.ephemera?.publish({
+        kind: 'presence', peers: authorityState.session?.peers ?? [],
+      });
       if (status === 'active') this.roomRecoveryStreak = 0;
       else if (status === 'paused') this.maybeRecoverExpiredRoom(authorityState);
     }
@@ -1474,7 +1516,7 @@ export class BrowserOwnerWorkspaceRuntime {
 
   private requireBinding(pathOrFileId: string): BrowserOwnerAuthorityFile {
     const binding = this.getBinding(pathOrFileId);
-    if (!binding) throw new StorageConflictError('path is not part of the active Markdown share');
+    if (!binding) throw new StorageConflictError('path is not part of the active document share');
     return binding;
   }
 
@@ -1503,11 +1545,13 @@ export class BrowserOwnerWorkspaceRuntime {
     // still starting. Its onState callback attaches this channel once the
     // authenticated controller exists.
     if (this.authority && !publishedController) return false;
+    const ephemera = this.startEphemera();
     const hub = new LocalCollabHub({
       workspaceId: this.options.workspaceId,
       holderId: this.options.holderId,
       selfLabel: this.options.collab.selfLabel,
       selfColor: this.options.collab.selfColor,
+      ephemera,
       ...(this.options.schedule === undefined ? {} : { schedule: this.options.schedule }),
       ...(this.options.cancelScheduled === undefined
         ? {}
@@ -1547,9 +1591,10 @@ export class BrowserOwnerWorkspaceRuntime {
             controller: publishedController,
             seedForPath: (path: string) => this.getPublishedCollabSeed(path),
             pathForFileId: (fileId: string) => this.getBinding(fileId)?.path ?? null,
-            // Presence bridge, tabs → room (attn-37f9): follower cursors ride
-            // this leader's live session out to reviewers.
-            forwardCursor: (payload: string) => this.authority?.mirrorCursorToRoom(payload),
+            // Local-tab cursor → authenticated room egress. The generic bus
+            // already bounded/validated the cursor and never persists it.
+            forwardEphemera: (signal: BrowserReviewEphemeraSignal) =>
+              this.authority?.sendEphemera(signal),
           }
         : {}),
     });
@@ -1568,6 +1613,30 @@ export class BrowserOwnerWorkspaceRuntime {
     this.localHub = null;
     await hub.close();
     this.refreshController();
+  }
+
+  /**
+   * Own one bus for this workspace-runtime lifetime. It intentionally stays
+   * open across hub/controller rotations: cursor loss is acceptable, but a
+   * second per-type bridge would reintroduce divergent presence paths.
+   */
+  private startEphemera(): BrowserReviewEphemeraBus | null {
+    if (this.ephemera) return this.ephemera;
+    const bus = new BrowserReviewEphemeraBus({
+      workspaceId: this.options.workspaceId,
+      senderId: this.options.holderId,
+    });
+    if (!bus.available) {
+      bus.close();
+      return null;
+    }
+    this.ephemera = bus;
+    return bus;
+  }
+
+  private closeEphemera(): void {
+    this.ephemera?.close();
+    this.ephemera = null;
   }
 
   private nextPublicationTimestamp(): number {
@@ -1592,6 +1661,7 @@ export class BrowserOwnerWorkspaceRuntime {
     if (authority) await authority.close().catch(() => undefined);
     this.localCollabSyncGeneration += 1;
     await this.stopLocalCollab().catch(() => undefined);
+    this.closeEphemera();
     this.controllerValue = null;
     this.stopLocalHeartbeat();
     this.pagehideTarget?.removeEventListener('pagehide', this.pagehideHandler);

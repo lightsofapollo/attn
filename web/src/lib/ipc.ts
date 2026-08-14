@@ -227,6 +227,28 @@ export function reviewResolveAnchor(
 }
 
 /**
+ * Report how the document frame resolved an HTML anchor against its own DOM.
+ *
+ * Local-only by design: unlike {@link reviewResolveAnchor} this mints no
+ * durable event and reaches no peer. An HTML anchor resolves against *this*
+ * client's rendered DOM, so the verdict is a local observation — two peers can
+ * legitimately disagree, and propagating one peer's view would overwrite the
+ * other's correct one.
+ *
+ * @see planning/collab/html-annotation.md §5, §7
+ */
+export function reviewReportHtmlAnchorResolution(
+  roomId: RoomId,
+  eventId: EventId,
+  status: 'exact' | 'remapped' | 'ambiguous' | 'stale',
+  confidence: number,
+  range?: PositionAnchor,
+): Promise<void> {
+  send({ type: 'review_html_anchor_resolution', roomId, eventId, status, confidence, range });
+  return Promise.resolve();
+}
+
+/**
  * Mark a comment thread resolved. The daemon mints a `CommentResolved` event
  * that propagates to peers; `reconstructThreads` flips the thread's `resolved`
  * flag off it, collapsing the card to its resolved strip.

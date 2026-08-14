@@ -60,4 +60,10 @@
     background: color-mix(in srgb, var(--primary) 12%, transparent);
     color: var(--primary);
   }
+
+  @media (pointer: coarse) {
+    .review-file-tab {
+      min-height: 44px;
+    }
+  }
 </style>

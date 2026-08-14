@@ -105,6 +105,7 @@ self.addEventListener('fetch', (event: FetchEvent) => {
       try {
         const response = await fetch(event.request);
         if (
+          decision.shellPath &&
           mayCacheShellResponse({
             ok: response.ok,
             status: response.status,
@@ -114,25 +115,27 @@ self.addEventListener('fetch', (event: FetchEvent) => {
         ) {
           await cache.put(decision.shellPath, response.clone());
         }
-        /* A 404 on a navigation means the host is not rewriting deep paths to
-           the SPA shell, not that the route does not exist (attn-n01r.45).
-           This block used to fall back only when fetch THREW, so a 404 — a
-           successful HTTP response — was passed straight through: /app/storage
-           and every /app/w/<id>/<file> reload rendered the host's error page,
-           losing the workspace. Serving the cached shell lets the client router
-           resolve the path it already knows how to handle.
-
-           Deliberately narrow: only 404/410 on a navigation, only when a shell
-           is actually cached. Anything else (500s, redirects, the offline case)
-           keeps its existing behaviour, so this cannot mask a real outage. */
+        /* A 404 on a VALID navigation can mean a host has missed a deep-link
+           rewrite. Recover only when the shared route parser supplied a shell
+           key. Unknown and malformed paths deliberately retain their 404 —
+           they must never become a plausible desk or review page. */
         if ((response.status === 404 || response.status === 410) && decision.shellPath) {
           const shell = await cache.match(decision.shellPath);
           if (shell) return shell;
         }
         return response;
       } catch {
-        const fallback = await cache.match(decision.shellPath);
-        if (fallback) return fallback;
+        if (decision.shellPath) {
+          const fallback = await cache.match(decision.shellPath);
+          if (fallback) return fallback;
+        } else {
+          // Never answer an offline unknown navigation with whichever entry
+          // happened to be cached first. That would erase the 404 contract.
+          return new Response('Page not found.', {
+            status: 404,
+            headers: { 'content-type': 'text/plain; charset=utf-8' },
+          });
+        }
         return new Response('attn is offline and no shell is cached yet.', {
           status: 503,
           headers: { 'content-type': 'text/plain; charset=utf-8' },

@@ -37,6 +37,12 @@ pub enum ResolveError {
     /// the manager must route anchors to the right replica first.
     #[error("anchor is for a different fileId than the supplied index")]
     WrongFile,
+    /// The anchor carries an HTML selector layer, which only a DOM can resolve.
+    /// Those resolve client-side in the document frame; running one through the
+    /// markdown ladder would produce confident nonsense, because its offsets
+    /// index markdown *source* while an HTML anchor's index *rendered text*.
+    #[error("html anchors resolve client-side, not in the markdown resolver")]
+    HtmlAnchor,
 }
 
 // ---------------------------------------------------------------------------
@@ -249,6 +255,14 @@ pub fn resolve_anchor_with_config(
     pm_steps: Option<&PmStepJournal>,
     cfg: &ResolverConfig,
 ) -> Result<ResolvedAnchor, ResolveError> {
+    // HTML anchors index rendered text and are addressed by CSS selectors; the
+    // ladder below indexes markdown source. Resolving one here would not fail
+    // loudly, it would land somewhere plausible and wrong, so refuse outright.
+    // @see planning/collab/html-annotation.md §7
+    if anchor.html.is_some() {
+        return Err(ResolveError::HtmlAnchor);
+    }
+
     // Tiny safety net — the manager is supposed to route, but a misrouted
     // anchor produces nonsense quote searches if we don't bail.
     if anchor.file_id != current_index_file_id_placeholder(anchor) {
@@ -910,6 +924,7 @@ mod tests {
             block,
             context,
             structure,
+            html: None,
         }
     }
 
@@ -1740,5 +1755,52 @@ mod tests {
         assert_eq!(find_all_byte_matches(b"abcabc", b"abc"), vec![0, 3]);
         assert_eq!(find_all_byte_matches(b"abc", b""), Vec::<usize>::new());
         assert_eq!(find_all_byte_matches(b"", b"abc"), Vec::<usize>::new());
+    }
+
+    /// An HTML anchor's offsets index rendered text, not markdown source, so
+    /// the markdown ladder would land somewhere plausible and wrong rather than
+    /// failing. It must refuse instead. @see html-annotation.md §7
+    #[test]
+    fn html_anchors_are_refused_rather_than_misresolved() {
+        use crate::review::model::{
+            HtmlAnchor, HtmlAnchorContext, HtmlAnchorTarget, SnapshotAnnotation,
+        };
+        let _ = SnapshotAnnotation::HtmlSelectorsV1;
+
+        let md = b"# Title\n\nA paragraph of prose.\n";
+        let index = build_anchor_index(md, &snap_id("snap-1")).expect("index");
+        let hash = content_hash(md);
+        let mut anchor = make_anchor(
+            md,
+            "file-1",
+            "snap-1",
+            pos([9, 20], [3, 3]),
+            Some(quote("A paragraph")),
+            None,
+            None,
+            None,
+        );
+        // Sanity: without the HTML layer this same anchor resolves fine, so the
+        // refusal below is attributable to the layer and nothing else.
+        assert!(resolve_anchor(&anchor, &index, md, &hash, None).is_ok());
+
+        anchor.html = Some(HtmlAnchor {
+            v: HtmlAnchor::VERSION,
+            target: HtmlAnchorTarget::TextRange,
+            css_selector: "p".into(),
+            fallback_selectors: Vec::new(),
+            text_position: None,
+            range: None,
+            context: HtmlAnchorContext {
+                tag_name: "p".into(),
+                role: None,
+                scope_preview: "a paragraph".into(),
+                dom_path: Vec::new(),
+            },
+        });
+        assert_eq!(
+            resolve_anchor(&anchor, &index, md, &hash, None),
+            Err(ResolveError::HtmlAnchor)
+        );
     }
 }

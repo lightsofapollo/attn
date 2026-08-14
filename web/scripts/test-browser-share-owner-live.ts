@@ -6,7 +6,9 @@ import { IDBFactory } from 'fake-indexeddb';
 
 import {
   base64UrlEncode,
+  base64UrlDecode,
   buildAdmissionHeaderV3,
+  deriveReadKeysV3,
   deriveShareLinkKeys,
 } from '../src/lib/review/browser-crypto';
 import { createOwnedRoomV3, deleteOwnedRoomV3 } from '../src/lib/review/browser-owner-bootstrap';
@@ -15,6 +17,7 @@ import {
   BrowserShareOwnerRelayClient,
   EMPTY_SHARE_MANIFEST_DIGEST,
   buildShareBundleMutations,
+  digestShareSnapshotManifest,
   sealDurableShareSnapshot,
 } from '../src/lib/review/browser-share-owner';
 import { openShareCapabilityBundle } from '../src/lib/review/browser-share';
@@ -115,20 +118,21 @@ try {
 
   const fileId = base64UrlEncode(new Uint8Array(16).fill(21));
   const snapshotId = base64UrlEncode(new Uint8Array(16).fill(23));
-  const sealed = sealDurableShareSnapshot({
+  const sealed = await sealDurableShareSnapshot({
     shareId, epoch: 0, fileId, snapshotId, docType: 'markdown', content: '# Live browser owner\n',
     snapshotKey: room.keys.readKeys.snapshotKey,
   });
-  await client.uploadSnapshot(fileId, snapshotId, sealed);
+  const stagedSnapshot = await client.uploadSnapshot(fileId, snapshotId, sealed);
   sealed.fill(0);
-  const retained = await client.fetchWithViewCapability(shareSecret);
-  check(retained.revision === 1 && retained.snapshots.length === 1, 'relay retains opaque snapshot and advances revision');
-  const finalRevision = retained.revision + 1;
+  const staged = await client.fetchWithViewCapability(shareSecret);
+  check(staged.revision === 0 && staged.snapshots.length === 0, 'relay keeps staged ciphertext private until the atomic publish');
+  const finalRevision = staged.revision + 1;
+  const manifestDigest = digestShareSnapshotManifest([stagedSnapshot]);
   const active = await client.upsert({
-    v: 3, ownerSigningKey: retained.ownerSigningKey,
-    bundles: buildShareBundleMutations(context(finalRevision, retained.manifestDigest)),
+    v: 3, ownerSigningKey: staged.ownerSigningKey,
+    bundles: buildShareBundleMutations(context(finalRevision, manifestDigest)),
     epoch: 0, revision: finalRevision, currentRoomId: room.roomId,
-    snapshots: retained.snapshots, placeholders: retained.placeholders,
+    snapshots: [stagedSnapshot], placeholders: staged.placeholders,
     deviceId: room.identity.deviceId,
   });
   check(active.currentRoomId === room.roomId, 'final pointer flip activates stable share');
@@ -149,12 +153,18 @@ try {
     'Attn-Admission': buildAdmissionHeaderV3(viewKeys.readAdmissionKey, 'read', 'GET', snapshotPath, new Uint8Array(0)),
   } });
   const downloaded = new Uint8Array(await snapshotResponse.arrayBuffer());
-  const opened = decryptDurableShareSnapshot(shareId, 0, {
+  const bundleReadCapability = base64UrlDecode(bundle.readCapabilityKey);
+  const opened = await decryptDurableShareSnapshot(shareId, 0, {
     v: 3, shareId, bundleId: bundle.bundleId, epoch: 0, revision: finalRevision,
     manifestDigest: active.manifestDigest, roomId: room.roomId, tier: 'view',
     roomCapability: { ownerSigningKey: bundle.ownerSigningKey,
-      readCapabilityKey: room.keys.readKeys.readCapabilityKey, roomKeys: room.keys.readKeys },
+      // The durable bundle is rooted in the share's read capability, not the
+      // ordinary room's read capability. Derive the matching v3 keys exactly
+      // as the production resolver does.
+      readCapabilityKey: new Uint8Array(bundleReadCapability),
+      roomKeys: deriveReadKeysV3(bundleReadCapability) },
   }, fileId, snapshotId, downloaded);
+  bundleReadCapability.fill(0);
   check(opened.content === '# Live browser owner\n', 'view bearer resolves and decrypts browser-owned snapshot');
 
   const emptyCommentMailbox = await client.fetchMailbox(shareSecret, 'comment', 0);

@@ -10,6 +10,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import {
   COMPOSE_FILE_NOT_SHARED,
+  COMPOSE_HTML_SUGGEST_UNSUPPORTED,
   COMPOSE_PREPARING,
   COMPOSE_SUGGEST_NOT_GRANTED,
   resolveComposeAvailability,
@@ -89,6 +90,28 @@ defineCase('a file outside the share is blocked, and says which problem it is', 
 defineCase('an unhydrated snapshot is a wait, not a wall', () => {
   const a = resolveComposeAvailability('comment', ctx({ fileSnapshotHasAnchors: false }));
   assert(a.status === 'pending', 'a pointer snapshot resolves itself once its blob lands');
+});
+
+defineCase('an HTML selector capability is a ready-to-anchor snapshot', () => {
+  const a = resolveComposeAvailability('comment', ctx({
+    fileSnapshotHasAnchors: false,
+    fileSnapshotHasHtmlSelectors: true,
+  }));
+  assert(a.status === 'ready', 'HTML selector documents do not wait for a Markdown index');
+});
+
+defineCase('HTML documents permit comments but explicitly decline suggestions', () => {
+  const html = ctx({
+    fileSnapshotHasAnchors: false,
+    fileSnapshotHasHtmlSelectors: true,
+  });
+  assert(resolveComposeAvailability('comment', html).status === 'ready', 'HTML comments are ready');
+  const suggestion = resolveComposeAvailability('suggest', html);
+  assert(suggestion.status === 'blocked', 'HTML suggestions are intentionally unsupported');
+  assert(
+    suggestion.status === 'blocked' && suggestion.reason === COMPOSE_HTML_SUGGEST_UNSUPPORTED,
+    'the unsupported capability is named',
+  );
 });
 
 defineCase('transient and structural are never confused', () => {

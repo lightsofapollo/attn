@@ -28,6 +28,7 @@
   import { reviewStore } from './review/store.svelte';
   import type { SidebarPresenceLocation } from './sidebar-presence';
   import UnreadBadge from './UnreadBadge.svelte';
+  import type { FileIconResolver } from './file-icon-resolver';
 
   interface Props {
     entries: TreeNode[];
@@ -79,6 +80,9 @@
      * in their own headers. Defaults false so none of them change.
      */
     showBrand?: boolean;
+    /** The owning shell supplies its registry; Sidebar and FileTree remain
+     *  reusable without importing a platform-specific icon bundle. */
+    iconResolver?: FileIconResolver;
   }
 
   let {
@@ -110,6 +114,7 @@
     sharedProjects = new Set<string>(),
     showOutline = true,
     showBrand = false,
+    iconResolver,
   }: Props = $props();
   let sidebarView: 'files' | 'outline' = $state('files');
   let query = $state('');
@@ -521,7 +526,7 @@
             {#if filteredEntries.length > 0}
               <SidebarMenu class="sidebar-tree-menu">
                 {#key treeRenderKey}
-                  <FileTree nodes={filteredEntries} {activePath} {rootPath} {onNavigate} {onExpand} {onShare} {onRename} {onDelete} {sharedPaths} {unreadByPath} {collaboratorLocations} />
+                  <FileTree nodes={filteredEntries} {activePath} {rootPath} {onNavigate} {onExpand} {onShare} {onRename} {onDelete} {sharedPaths} {unreadByPath} {collaboratorLocations} {iconResolver} />
                 {/key}
               </SidebarMenu>
               {#if showBackendMatches && remoteSearchItems.length > 0}

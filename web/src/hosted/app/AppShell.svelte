@@ -81,7 +81,7 @@
     const existing = reuseEmpty ? await service.listWorkspaces() : [];
     for (const candidate of existing) {
       if (candidate.name !== 'Untitled') continue;
-      if (candidate.assetCount > 0 || candidate.markdownCount > 1) continue;
+      if (candidate.assetCount > 0 || candidate.htmlCount > 0 || candidate.markdownCount > 1) continue;
       const candidateDetail = await service.getWorkspace(candidate.id);
       if (!candidateDetail) continue;
       const body = await service.readBodyText(candidate.id, candidateDetail.openPath);
@@ -223,13 +223,19 @@
     return () => window.removeEventListener('popstate', handler);
   });
 
-  // Follow the writer: when ANOTHER tab commits to this workspace (the service
-  // never delivers this tab's own changes), re-read from storage so the
-  // read-only tab mirrors the writer live instead of showing a stale snapshot.
+  // Follow cross-tab durable changes. Content/structure keep a read-only
+  // workspace fresh; review is deliberately metadata-free and simply asks an
+  // already-open Desk to re-project its encrypted log for its count pills.
   $effect(() => {
-    const workspaceId = detail?.id;
-    if (!workspaceId) return;
     return service.subscribeWorkspaceChanges((change) => {
+      if (change.kind === 'review') {
+        void service.listWorkspaces().then((next) => {
+          workspaces = next;
+        }).catch(() => undefined);
+        return;
+      }
+      const workspaceId = detail?.id;
+      if (!workspaceId) return;
       if (change.workspaceId !== workspaceId) return;
       if (change.kind === 'structure') {
         void onWorkspaceChanged();

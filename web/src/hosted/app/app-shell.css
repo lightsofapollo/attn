@@ -340,6 +340,17 @@
   z-index: 1;
 }
 
+/* Desktop rows retain their compact six-column scan; small screens turn this
+   wrapper into one wrapping metadata group. */
+.detail-group,
+.row-desktop-actions {
+  display: contents;
+}
+
+.row-menu {
+  display: none;
+}
+
 /* Row admin is not resident chrome (attn-n01r.32). At a realistic workspace
    count the three most-repeated words on the desk were "Rename, Delete,
    Rename, Delete…". Revealed on hover or keyboard focus; always available to
@@ -360,6 +371,27 @@
   /* No hover on touch: the controls must simply be there. */
   .row-action {
     opacity: 1;
+  }
+}
+
+@media (pointer: coarse) {
+  /* Compact desktop-style controls keep their visual density, while their
+     touch acquisition area meets the shared 44px hosted contract. */
+  .app-header .brand,
+  .app-header .local-badge {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+  }
+
+  .folio-filter input {
+    min-height: 44px;
+  }
+
+  .workspace-row .row-action {
+    min-width: 44px;
+    min-height: 44px;
+    padding: 0.5rem;
   }
 }
 
@@ -876,6 +908,19 @@
   display: contents;
 }
 
+/* HTML is a read-only document surface, not an asset card. Keep its frame in
+   the same generous reading canvas as the editor while the iframe owns its
+   own document scrolling and annotation geometry. */
+.hosted-html-surface {
+  min-height: 720px;
+  height: calc(100vh - 9rem);
+}
+
+.hosted-native-document > .hosted-html-surface {
+  height: 100%;
+  min-height: 0;
+}
+
 .hosted-document-banner {
   width: min(760px, calc(100% - 2rem));
   margin: 0.75rem auto 0;
@@ -1159,6 +1204,12 @@
   font-size: 0.7rem;
 }
 
+/* The owner header is an accent plane. The saved-state chip is intentionally
+   quiet, but it still has to retain AA contrast against that plane. */
+[data-slot='owner-header'] .hosted-save-state.save-chip {
+  color: var(--primary-foreground);
+}
+
 .hosted-delete-confirm {
   display: grid;
   gap: 0.35rem;
@@ -1174,6 +1225,52 @@
   display: flex;
   justify-content: flex-end;
   gap: 0.25rem;
+}
+
+.review-history-placeholder {
+  display: grid;
+  align-content: start;
+  gap: 0.75rem;
+  min-height: 100%;
+  padding: 1.1rem 0.9rem;
+  color: var(--foreground);
+}
+
+.review-history-placeholder h2 {
+  margin: 0;
+  font: 600 1.05rem/1.3 var(--serif);
+}
+
+.review-history-label {
+  margin: 0;
+  /* This rail sits on --panel-surface, not the document paper. The generic
+     muted token only clears contrast on paper; use the panel-safe ink mix. */
+  color: var(--foreground);
+  font: 650 0.65rem/1.2 var(--sans);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.review-history-list {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.review-history-placeholder .review-card {
+  display: grid;
+  gap: 0.25rem;
+  margin: 0;
+}
+
+.review-history-placeholder .review-card p,
+.review-history-note {
+  margin: 0;
+  color: var(--foreground);
+  font: 0.78rem/1.5 var(--sans);
+}
+
+.review-history-placeholder .review-card strong {
+  color: var(--foreground);
 }
 
 .hosted-sidebar-error {
@@ -1306,6 +1403,13 @@
     font-size: 0.85rem;
   }
 
+  @media (pointer: coarse) {
+    .editor-top .share-action .button {
+      min-width: 44px;
+      min-height: 44px;
+    }
+  }
+
   .editor-shell {
     height: auto;
     min-height: 100dvh;
@@ -1347,6 +1451,7 @@
      between the last line and the thumb dock): the editor surface chain
      stretches so the ProseMirror IS the whole visible writing canvas. */
   .writing-sheet > .hosted-editor-surface,
+  .writing-sheet > .hosted-html-surface,
   .writing-sheet .editor-container,
   .writing-sheet .prosemirror-mount {
     display: flex;
@@ -2594,8 +2699,19 @@
      the rest. */
   .workspace-row {
     grid-template-columns: minmax(0, 1fr) auto;
-    gap: 0.35rem 1rem;
+    grid-template-areas:
+      'title actions'
+      'facts facts'
+      'review review'
+      'status status';
+    gap: 0.55rem 0.85rem;
     padding-block: 0.9rem;
+  }
+
+  .workspace-row .row-open,
+  .workspace-row .rename-input {
+    grid-area: title;
+    min-width: 0;
   }
 
   /* Reflowed onto a second line, NOT hidden. Dropping file count and
@@ -2603,20 +2719,103 @@
      device where the name is least likely to be unique — and the list is
      titled "Recently on this device", so recency was the one thing it could not
      afford to lose. */
-  /* Each detail is its own grid item, so they blockify onto their own lines —
-     a leading separator would be stranded. Two quiet lines under the name reads
-     fine and keeps both facts. */
-  .workspace-row .detail,
-  .workspace-row .review-pill {
-    grid-column: 1;
+  .workspace-row .detail-group {
+    display: flex;
+    grid-area: facts;
+    flex-wrap: wrap;
+    gap: 0.25rem 0.55rem;
+    min-width: 0;
+  }
+
+  .workspace-row .detail {
     color: var(--hosted-muted);
     font-size: 0.78rem;
     line-height: 1.35;
   }
 
+  .workspace-row .detail + .detail::before {
+    content: '·';
+    margin-right: 0.55rem;
+    color: var(--rule);
+  }
+
+  .workspace-row .review-pill {
+    grid-area: review;
+  }
+
   .workspace-row .row-tail {
-    grid-row: 1 / span 2;
-    grid-column: 2;
+    grid-area: status;
+    justify-content: flex-start;
+    min-width: 0;
+  }
+
+  .workspace-row .row-desktop-actions {
+    display: none;
+  }
+
+  .workspace-row .row-menu {
+    position: relative;
+    z-index: 1;
+    display: block;
+    grid-area: actions;
+  }
+
+  .row-menu summary {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 44px;
+    min-width: 44px;
+    height: 44px;
+    min-height: 44px;
+    border-radius: 7px;
+    color: var(--hosted-muted);
+    cursor: pointer;
+    list-style: none;
+  }
+
+  .row-menu summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .row-menu[open] summary {
+    background: color-mix(in srgb, var(--sheet) 72%, transparent);
+    color: var(--ink);
+  }
+
+  .row-menu-popover {
+    position: absolute;
+    z-index: 2;
+    top: calc(100% + 0.25rem);
+    right: 0;
+    display: grid;
+    min-width: 9rem;
+    overflow: hidden;
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    background: var(--sheet);
+    box-shadow: 0 8px 22px color-mix(in srgb, var(--ink) 16%, transparent);
+  }
+
+  .row-menu-popover button {
+    min-height: 44px;
+    border: 0;
+    background: transparent;
+    color: var(--ink);
+    cursor: pointer;
+    font: 600 0.82rem var(--sans);
+    text-align: left;
+    padding: 0.65rem 0.8rem;
+  }
+
+  .row-menu-popover button:hover,
+  .row-menu-popover button:focus-visible {
+    background: color-mix(in srgb, var(--rust) 10%, var(--sheet));
+    outline: 0;
+  }
+
+  .row-menu-popover .danger {
+    color: var(--danger-ink);
   }
 
   .storage-grid {

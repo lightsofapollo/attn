@@ -1,7 +1,6 @@
-import { DEFAULT_ICON_PACK, ICON_PACKS, type IconPack } from './vscode-icon-map.generated';
+import { DEFAULT_ICON_PACK, ICON_PACK_IDS, type IconPack } from './vscode-icon-map.generated';
 
 const STORAGE_KEY = 'attn.icon-pack';
-const ICON_PACK_IDS = Object.keys(ICON_PACKS) as IconPack[];
 
 let initialized = false;
 let currentPack: IconPack = DEFAULT_ICON_PACK;

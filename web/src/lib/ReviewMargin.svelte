@@ -86,6 +86,18 @@
     /** The underlying ProseMirror view used for coordsAtPos. */
     view?: EditorView | undefined;
     /**
+     * Externally supplied anchor tops (viewport coordinates), keyed by thread
+     * id. Consulted only when there is no `view` — an HTML document renders in
+     * a cross-origin frame whose DOM this component cannot touch, so the frame
+     * reports its own geometry and the shell forwards it here.
+     *
+     * A plain record rather than a Map so that replacing it triggers
+     * reactivity; mutating a Map in place would not.
+     *
+     * @see planning/collab/html-annotation.md §5
+     */
+    anchorTops?: Record<string, number>;
+    /**
      * `anchored` (default) positions each card at its anchor's editor y —
      * the right-rail overlay design. `stacked` renders a plain document-order
      * list instead, for hosts with no geometric relationship to the editor
@@ -112,6 +124,7 @@
   // Default cap is 50 per the task spec / §6 performance rule.
   let {
     view,
+    anchorTops,
     layout = 'anchored',
     maxRenderedCards = 50,
     readOnly = false,
@@ -355,6 +368,20 @@
         // is what keeps cards tied to their anchor text.
         out.set(t.id, y - containerTop);
       }
+    } else if (anchorTops) {
+      // No editor: an HTML document frame reported these tops itself, already
+      // in viewport coordinates, so the same container conversion applies.
+      for (const t of anchoredThreads) {
+        const y = anchorTops[t.id];
+        // Fall back to 0 rather than dropping the card — same reasoning as the
+        // resolved chips below, and it matters more here. Geometry crosses a
+        // MessagePort from another origin, so "not reported yet" is the normal
+        // state for a comment in the moment after it is made; skipping those
+        // rendered a brand-new comment nowhere at all, which is indis-
+        // tinguishable from it never having been saved. A card stacked at the
+        // top is a position problem; a missing card is a lost comment.
+        out.set(t.id, y === undefined ? 0 : y - containerTop);
+      }
     }
     // Resolved chips always get a y — fall back to 0 (the collision pass
     // stacks them from the top) when the view is missing or the position
@@ -365,6 +392,8 @@
       if (v) {
         const pos = pmStartForThread(t);
         if (pos !== null) y = anchorTopY(v, pos);
+      } else if (anchorTops) {
+        y = anchorTops[t.id] ?? null;
       }
       out.set(t.id, y === null ? 0 : y - containerTop);
     }

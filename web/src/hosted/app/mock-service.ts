@@ -62,6 +62,7 @@ const PRODUCT_DIRECTION: WorkspaceDetail = {
   name: 'Product direction',
   openPath: 'direction.md',
   markdownCount: 3,
+  htmlCount: 0,
   assetCount: 2,
   lastEditedLabel: 'Edited 8 min ago',
   sharing: 'shared',
@@ -98,6 +99,7 @@ const LAUNCH_NOTES: WorkspaceDetail = {
   name: 'Launch notes',
   openPath: 'launch-notes.md',
   markdownCount: 1,
+  htmlCount: 0,
   assetCount: 0,
   lastEditedLabel: 'Yesterday',
   sharing: 'local-only',
@@ -113,6 +115,7 @@ const RESEARCH_FOLIO: WorkspaceDetail = {
   name: 'Research folio',
   openPath: 'index.md',
   markdownCount: 9,
+  htmlCount: 0,
   assetCount: 3,
   lastEditedLabel: 'Jun 28',
   sharing: 'backed-up',
@@ -171,7 +174,10 @@ export class MockWorkspaceService implements WorkspaceAppService {
   async readBodyText(workspaceId: string, path: string): Promise<string | null> {
     const workspace = this.workspaces.find((candidate) => candidate.id === workspaceId);
     const entry = workspace?.entries.find((candidate) => candidate.path === path);
-    if (!entry || entry.presentation !== 'editable') return null;
+    if (!entry || (entry.presentation !== 'editable' && entry.presentation !== 'html')) return null;
+    if (entry.presentation === 'html') {
+      return '<!doctype html><html><body><h1>Hosted HTML preview</h1><p>Review this document after sharing.</p></body></html>';
+    }
     if (workspace?.id === 'ws-product' && path === 'direction.md') {
       return [
         '# Product direction',
@@ -202,12 +208,14 @@ export class MockWorkspaceService implements WorkspaceAppService {
 
   async importFiles(name: string, files: ImportFileInput[]): Promise<WorkspaceDetail> {
     const markdown = files.filter((file) => file.kind === 'markdown');
+    const html = files.filter((file) => file.kind === 'html');
     const detail: WorkspaceDetail = {
       id: `ws-import-${this.workspaces.length}`,
       name,
-      openPath: markdown[0]?.path ?? files[0]?.path ?? 'untitled.md',
+      openPath: markdown[0]?.path ?? html[0]?.path ?? files[0]?.path ?? 'untitled.md',
       markdownCount: markdown.length,
-      assetCount: files.length - markdown.length,
+      htmlCount: html.length,
+      assetCount: files.length - markdown.length - html.length,
       lastEditedLabel: 'Just now',
       sharing: 'local-only',
       sizeLabel: '—',
@@ -216,7 +224,7 @@ export class MockWorkspaceService implements WorkspaceAppService {
       entries: files.map((file) => ({
         path: file.path,
         kind: file.kind,
-        presentation: file.kind === 'markdown' ? 'editable' : 'preview',
+        presentation: file.kind === 'markdown' ? 'editable' : file.kind === 'html' ? 'html' : 'preview',
         sizeBytes: file.bytes.length,
         sizeLabel: `${file.bytes.length} B`,
         ...(file.mediaType === undefined ? {} : { mediaType: file.mediaType }),
@@ -254,7 +262,7 @@ export class MockWorkspaceService implements WorkspaceAppService {
       workspace?.entries.push({
         path: file.path,
         kind: file.kind,
-        presentation: file.kind === 'markdown' ? 'editable' : 'preview',
+        presentation: file.kind === 'markdown' ? 'editable' : file.kind === 'html' ? 'html' : 'preview',
         sizeBytes: file.bytes.length,
         sizeLabel: `${file.bytes.length} B`,
         ...(file.mediaType === undefined ? {} : { mediaType: file.mediaType }),
@@ -346,6 +354,8 @@ export class MockWorkspaceService implements WorkspaceAppService {
   subscribeWorkspaceChanges(): () => void {
     return () => undefined;
   }
+
+  announceReviewActivity(): void {}
 
   async openReviewProjection(): Promise<ReviewProjectionHandle> {
     // The mock never has a real share; an inert projection keeps EditorShell's
@@ -439,6 +449,7 @@ export class MockWorkspaceService implements WorkspaceAppService {
       name: 'Untitled',
       openPath: 'untitled.md',
       markdownCount: 1,
+      htmlCount: 0,
       assetCount: 0,
       lastEditedLabel: 'Just now',
       sharing: 'local-only',
@@ -455,6 +466,7 @@ export class MockWorkspaceService implements WorkspaceAppService {
     return {
       kind: 'workspace',
       markdownCount: workspace.markdownCount,
+      htmlCount: workspace.htmlCount,
       assetCount: workspace.assetCount,
       label: `Share the whole workspace · ${entryCount} ${entryCount === 1 ? 'entry' : 'entries'}`,
     };

@@ -13,7 +13,7 @@
   ("One click · no naming step New workspace Creates untitled.md locally and
   opens the editor. START HERE"). The <p> is still read in document order.
 -->
-<section class="entry-strip" aria-label="Ways to begin">
+<section class="secondary-start" aria-labelledby="secondary-start-heading">
   <!--
     The hero owns the "begin" decision (attn-n01r.14). /app#new used to be
     offered three times before the first section break — nav, hero, and here —
@@ -21,14 +21,17 @@
     two vocabularies 500px apart. The strip is now the OTHER two routes, so each
     affordance points somewhere different.
   -->
-  <a class="entry" href="/open" aria-labelledby="entry-import-label">
-    <span class="entry-head"><small>Files, folders, or zip</small></span>
-    <strong class="entry-title" id="entry-import-label">Import workspace</strong>
-    <p>Markdown plus referenced images and project assets.</p>
-  </a>
-  <a class="entry" href="/app#join" aria-labelledby="entry-join-label">
-    <span class="entry-head"><small>Have a link?</small></span>
-    <strong class="entry-title" id="entry-join-label">Join a review</strong>
-    <p>Open the same encrypted review as native attn, across every file in it.</p>
-  </a>
+  <p class="secondary-start-label" id="secondary-start-heading">Other ways to begin</p>
+  <div class="entry-strip">
+    <a class="entry" href="/open" aria-labelledby="entry-import-label">
+      <span class="entry-head"><small>Files, folders, or zip</small></span>
+      <strong class="entry-title" id="entry-import-label">Import workspace</strong>
+      <p>Markdown plus referenced images and project assets.</p>
+    </a>
+    <a class="entry" href="/app#join" aria-labelledby="entry-join-label">
+      <span class="entry-head"><small>Have a link?</small></span>
+      <strong class="entry-title" id="entry-join-label">Join a review</strong>
+      <p>Open the same encrypted review as native attn, across every file in it.</p>
+    </a>
+  </div>
 </section>

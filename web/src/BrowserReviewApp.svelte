@@ -35,6 +35,16 @@
   import PanelRightOpen from '@lucide/svelte/icons/panel-right-open';
   import Editor from './lib/Editor.svelte';
   import HtmlViewer from './lib/HtmlViewer.svelte';
+  import HtmlCommentComposer from './lib/HtmlCommentComposer.svelte';
+  import type {
+    HtmlAnnotationBridge,
+    AnnotationBridgeEvents,
+  } from './lib/review/html-annotation-bridge';
+  import type {
+    AnchorProposal,
+    AnchorResolution,
+    RenderableAnchor,
+  } from './lib/review/doc-protocol';
   import ReviewMargin from './lib/ReviewMargin.svelte';
   import BrandMark from './lib/BrandMark.svelte';
   import BottomSheet from './hosted/app/BottomSheet.svelte';
@@ -63,6 +73,9 @@
     type BrowserCollabDelivery,
     type BrowserSessionState,
   } from './lib/review/browser-session';
+  import { parseInviteUrl } from './lib/review/browser-invite';
+  import { parseShareInvite } from './lib/review/browser-share';
+  import { reviewerLifecyclePresentation } from './lib/review/reviewer-lifecycle';
   import type { DurableShareBrowserSessionFacade, RememberedPushShareSessionFacade } from './lib/review/browser-share-production';
   import type { BrowserPushConsentState } from './lib/review/browser-push-consent';
   import { CollabController } from './lib/prosemirror/collab-controller';
@@ -83,7 +96,15 @@
   } from './lib/review/selection-debug';
   import { resolveAnchor } from './lib/review/resolver';
   import type { ConstructAnchorContext } from './lib/review/anchors';
-  import type { Anchor, FileId, RoomId, ReviewStatusPeer, SuggestionDraft } from './lib/types';
+  import type {
+    Anchor,
+    FileId,
+    PositionAnchor,
+    ResolvedAnchor,
+    ReviewStatusPeer,
+    RoomId,
+    SuggestionDraft,
+  } from './lib/types';
   import { scrollViewToPos } from './lib/scroll-viewport';
   import { peerJumpPosition } from './lib/peer-strip-format';
 
@@ -433,15 +454,17 @@
   }
 
   void session.start().catch((err: unknown) => {
-    const message = err instanceof Error ? err.message : String(err);
     const revoked = err instanceof Error && err.name === 'ShareGoneError';
+    // State retains a safe generic explanation. Do not write relay or
+    // capability diagnostics to the browser console.
+    console.error('[attn] hosted reviewer start failed');
     session.close();
     // start() should never throw — but if it does, surface a terminal error
     // so the UI is not stuck in `connecting`.
     sessionState = {
       ...sessionState,
       status: 'error',
-      error: { kind: revoked ? 'share_revoked' : 'network', message },
+      error: { kind: revoked ? 'share_revoked' : 'network', message: 'connection failed' },
     };
   });
 
@@ -974,6 +997,171 @@
   let suggestionComposer = $state<ComposerState | null>(null);
   let toolbarSelection = $state<{ from: number; to: number } | null>(null);
 
+  // -------------------------------------------------------------------------
+  // HTML annotation (attn-08r).
+  //
+  // An HTML document renders in a cross-origin frame, so the shell owns none
+  // of its geometry: the frame reports anchor rects and proposals over a
+  // MessagePort and this state mirrors what it said. Every value here is
+  // untrusted input, already shape-validated by the bridge's parser.
+  //
+  // @see planning/collab/html-annotation.md §3, §5
+  // -------------------------------------------------------------------------
+  let htmlBridge = $state<HtmlAnnotationBridge | null>(null);
+  /** Viewport-relative card tops keyed by thread id; fed to ReviewMargin. */
+  let htmlAnchorTops = $state<Record<string, number>>({});
+  let htmlComposer = $state<{
+    proposal: AnchorProposal;
+    position: { top: number; left: number };
+    // Snapshot identity captured at open time: the proposal's offsets/quote
+    // were measured against the document as it was THEN, so a republish while
+    // the composer is open must not restamp them onto the new snapshot.
+    fileId: string;
+    snapshotId: string;
+    baseHash: string;
+  } | null>(null);
+
+  /** HTML snapshots carry no anchorIndex — they declare a capability instead. */
+  const htmlAnnotatable = $derived(
+    displayedDocType === 'html' &&
+      reviewerAvailability.reviewAuthoring &&
+      displayedSnapshot?.annotation === 'html_selectors_v1',
+  );
+
+  // A snapshot republish or file switch invalidates an open composer: its
+  // proposal no longer describes the displayed document. Close rather than
+  // silently mint a drifted-from-birth comment.
+  $effect(() => {
+    const current = displayedSnapshot?.snapshotId;
+    if (htmlComposer && htmlComposer.snapshotId !== current) {
+      htmlComposer = null;
+      htmlBridge?.dismissSelection();
+    }
+  });
+
+  /** Threads become renderable anchors; the thread id doubles as the anchorId. */
+  const htmlRenderableAnchors = $derived.by(() => {
+    if (displayedDocType !== 'html') return [];
+    const out: RenderableAnchor[] = [];
+    for (const thread of reviewStore.threadsForCurrentFile) {
+      const anchor = thread.anchor;
+      if (!anchor?.html) continue;
+      out.push({
+        anchorId: thread.id,
+        html: anchor.html,
+        state: thread.resolved ? 'resolved' : 'default',
+        quote: anchor.quote?.exact,
+        prefix: anchor.context?.prefix,
+        suffix: anchor.context?.suffix,
+        label: String(1 + thread.replies.length),
+      });
+    }
+    return out;
+  });
+
+  // Push the desired anchor set whenever it changes. renderAnchors is
+  // full-state by design, so the frame needs no incremental protocol and
+  // recovers from a reload by simply being sent the set again.
+  $effect(() => {
+    const bridge = htmlBridge;
+    const anchors = htmlRenderableAnchors;
+    if (!bridge) return;
+    bridge.renderAnchors(anchors);
+  });
+
+  // Hover chrome is always live in an annotating frame; taking the CLICK — so
+  // the page's own links stop firing — waits until the document is genuinely
+  // reviewable.
+  $effect(() => {
+    htmlBridge?.setInspect(htmlAnnotatable);
+  });
+
+  function applyHtmlGeometry(results: { anchorId: string; rects: { y: number }[] }[]): void {
+    const next: Record<string, number> = {};
+    for (const result of results) {
+      const first = result.rects[0];
+      if (first) next[result.anchorId] = first.y;
+    }
+    // Replaced wholesale rather than mutated so the ReviewMargin prop is
+    // seen as changed (a mutated object would not re-trigger the derived).
+    htmlAnchorTops = next;
+  }
+
+  const htmlAnnotationEvents: AnnotationBridgeEvents = {
+    onProposal: ({ proposal, rects, caret, explicit }) => {
+      // Dragging a selection is not a request for a composer — pressing the
+      // frame's Comment pill, or clicking an element, is.
+      if (!explicit) return;
+      // Unlike the native shell there is no unshared dead end to explain here:
+      // the runtime is only injected into the frame when `htmlAnnotatable`, so
+      // reaching this guard means a snapshot swapped mid-gesture.
+      if (!htmlAnnotatable) return;
+      const snapshot = displayedSnapshot;
+      if (!snapshot) return;
+      const near = caret ?? rects[rects.length - 1];
+      htmlComposer = {
+        proposal,
+        position: {
+          top: (near?.y ?? 0) + (near?.height ?? 0) + 8,
+          left: near?.x ?? 0,
+        },
+        fileId: snapshot.fileId,
+        snapshotId: snapshot.snapshotId,
+        baseHash: snapshot.baseHash,
+      };
+      reviewStore.panelOpen = true;
+    },
+    onProposalCleared: () => {
+      // Deliberately does NOT close an open composer. Focusing the shell's
+      // textarea can collapse the frame's selection, so treating that as
+      // "cancel" would tear the composer down the instant the user clicked
+      // into it. Closing is the user's call: Cancel, Escape, or submit.
+    },
+    onResolved: (results, toShellRects) => {
+      applyHtmlGeometry(
+        results.map((r) => ({ anchorId: r.anchorId, rects: toShellRects(r.rects) })),
+      );
+      reportHtmlResolutions(results);
+    },
+    onGeometry: (results) => applyHtmlGeometry(results),
+    onAnchorActivated: (anchorId) => {
+      const thread = reviewStore.threadsForCurrentFile.find((t) => t.id === anchorId);
+      if (thread) reviewStore.setFocusEventId(thread.rootEvent.meta.eventId);
+    },
+  };
+
+
+  /**
+   * Record each client-side verdict so the rail can show confidence and
+   * staleness (orphan tray, ambiguous chips). Local-only by design — the
+   * verdict describes *this* client's DOM, so it mints no event and reaches
+   * no peer. The hosted app has no daemon, so it applies verdicts straight to
+   * the store; the native shell routes the same data through IPC instead.
+   */
+  function reportHtmlResolutions(results: AnchorResolution[]): void {
+    const roomId = sessionState.roomId;
+    const fileId = displayedSnapshot?.fileId;
+    if (!roomId || !fileId) return;
+    // Placeholder range: HTML verdicts carry frame geometry, not byte offsets
+    // into source — mirrors the native daemon's mapping exactly.
+    const placeholder: PositionAnchor = { byteRange: [0, 0], lineRange: [0, 0] };
+    for (const result of results) {
+      const thread = reviewStore.threadsForCurrentFile.find((t) => t.id === result.anchorId);
+      const eventId = thread?.rootEvent.meta.eventId;
+      if (!eventId) continue;
+      const confidence = Math.min(1, Math.max(0, result.confidence ?? 0));
+      const resolved: ResolvedAnchor =
+        result.status === 'exact'
+          ? { status: 'exact', confidence: 1.0, currentRange: placeholder, reason: 'client_resolved' }
+          : result.status === 'remapped'
+            ? { status: 'remapped', confidence, currentRange: placeholder, reason: 'client_resolved' }
+            : result.status === 'ambiguous'
+              ? { status: 'ambiguous', candidates: [], reason: 'client_resolved' }
+              : { status: 'stale', reason: 'client_resolved' };
+      reviewStore.applyAnchorResolution({ roomId, fileId, eventId, resolved });
+    }
+  }
+
   function activeSnapshotForCompose() {
     const snapshot = displayedSnapshot;
     if (!snapshot?.anchorIndex) return null;
@@ -1174,29 +1362,38 @@
       sessionState.status === 'connecting' ||
       (sessionState.status === 'connected' && displayedContent === null),
   );
+  const lifecycle = $derived(reviewerLifecyclePresentation(sessionState.error));
+  let recoveryOpen = $state(false);
+  let recoveryInvite = $state('');
+  let recoveryError = $state<string | null>(null);
+  let recoveryInput = $state<HTMLInputElement | undefined>();
+  $effect(() => {
+    if (recoveryOpen) recoveryInput?.focus();
+  });
 
-  const errorMessage = $derived(formatError(sessionState.error));
+  function openInviteRecovery(): void {
+    recoveryError = null;
+    recoveryOpen = true;
+  }
 
-  function formatError(err: BrowserSessionState['error']): string | null {
-    if (!err) return null;
-    switch (err.kind) {
-      case 'invite_invalid':
-        return 'Invalid invite link';
-      case 'admission_rejected':
-        return 'Access denied';
-      case 'room_deleted':
-        return 'This review room has been deleted';
-      case 'room_expired':
-        return 'This review room has expired';
-      case 'cursor_too_old':
-        return 'Session expired — please re-open the invite link';
-      case 'share_revoked':
-        return 'This review has ended';
-      case 'device_register':
-      case 'network':
-      default:
-        return 'Could not reach the review relay';
+  function submitInviteRecovery(event: SubmitEvent): void {
+    event.preventDefault();
+    const value = recoveryInvite.trim();
+    try {
+      // A complete browser review or durable-share link may recover this
+      // state. Validate it first without persisting or exposing its fragment.
+      try {
+        parseInviteUrl(value);
+      } catch {
+        parseShareInvite(value);
+      }
+    } catch {
+      recoveryError = 'Paste the complete attn review link, including the part after #.';
+      return;
     }
+    // Do not persist, log, or render the capability. BrowserSession strips the
+    // fragment synchronously after this navigation and keeps it in memory.
+    window.location.assign(value);
   }
 </script>
 
@@ -1216,17 +1413,128 @@
   data-live-editing={reviewerAvailability.liveEditing ? 'true' : 'false'}
 >
   {#if sessionState.error}
-    <div class="browser-review-error flex h-full flex-col items-center justify-center gap-3 px-6 text-center"
+    <div class="browser-review-lifecycle flex h-full min-h-0 flex-col overflow-auto"
       data-slot="browser-review-error"
       data-error-kind={sessionState.error.kind}>
-      <p class="text-base font-medium text-foreground">{errorMessage}</p>
-      <p class="text-sm text-muted-foreground">{sessionState.error.message}</p>
+      <header
+        class="flex min-h-11 shrink-0 items-center gap-2 border-b border-[var(--panel-border)] bg-[var(--header-surface)] px-4"
+        data-slot="browser-review-header"
+        data-lifecycle="true"
+      >
+        <BrandMark size={18} />
+        <span class="font-serif text-sm font-bold text-foreground">attn</span>
+        <span class="h-3 w-px bg-border" aria-hidden="true"></span>
+        <span class="font-sans text-meta font-medium text-foreground">Review</span>
+      </header>
+      <section class="m-auto w-full max-w-xl px-6 py-12 sm:px-10" aria-labelledby="review-lifecycle-title">
+        <p class="m-0 font-sans text-label text-muted-foreground">Review invitation</p>
+        <h1 id="review-lifecycle-title" class="mt-3 font-serif text-3xl font-semibold tracking-tight text-foreground">
+          {lifecycle.title}
+        </h1>
+        <p class="mt-3 max-w-[42ch] font-sans text-base leading-7 text-muted-foreground">{lifecycle.diagnosis}</p>
+        <p class="mt-4 max-w-[48ch] border-t border-border pt-4 font-sans text-sm leading-6 text-muted-foreground">
+          {lifecycle.privacyNote}
+        </p>
+
+        {#if lifecycle.canPasteInvite}
+          <div class="mt-7">
+            <button
+              class="inline-flex min-h-[44px] items-center justify-center rounded-md bg-primary px-4 font-sans text-sm font-semibold text-primary-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+              type="button"
+              aria-expanded={recoveryOpen}
+              aria-controls="review-invite-recovery"
+              onclick={openInviteRecovery}
+            >
+              Paste complete link
+            </button>
+          </div>
+          {#if recoveryOpen}
+            <form id="review-invite-recovery" class="mt-4 grid gap-3" onsubmit={submitInviteRecovery}>
+              <label class="font-sans text-sm font-medium text-foreground" for="review-invite-input">
+                Complete review link
+              </label>
+              <input
+                id="review-invite-input"
+                bind:this={recoveryInput}
+                bind:value={recoveryInvite}
+                class="min-h-[44px] min-w-0 rounded-md border border-input bg-background px-3 font-sans text-base text-foreground outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                type="url"
+                inputmode="url"
+                autocomplete="off"
+                autocapitalize="off"
+                spellcheck="false"
+                aria-describedby="review-invite-help review-invite-error"
+                required
+              />
+              <p id="review-invite-help" class="m-0 font-sans text-sm leading-6 text-muted-foreground">
+                Include everything after #. It is used only in this browser.
+              </p>
+              {#if recoveryError}
+                <p id="review-invite-error" class="m-0 font-sans text-sm text-destructive" role="alert">{recoveryError}</p>
+              {/if}
+              <div class="flex flex-wrap gap-3">
+                <button
+                  class="inline-flex min-h-[44px] items-center justify-center rounded-md bg-primary px-4 font-sans text-sm font-semibold text-primary-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                  type="submit"
+                >
+                  Open review
+                </button>
+                <button
+                  class="inline-flex min-h-[44px] items-center justify-center rounded-md border border-border px-4 font-sans text-sm font-semibold text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                  type="button"
+                  onclick={() => {
+                    recoveryOpen = false;
+                    recoveryInvite = '';
+                    recoveryError = null;
+                  }}
+                >
+                  Cancel
+                </button>
+              </div>
+            </form>
+          {/if}
+        {/if}
+        {#if lifecycle.canRetry}
+          <div class="mt-4">
+            <button
+              class="inline-flex min-h-[44px] items-center justify-center rounded-md border border-border px-4 font-sans text-sm font-semibold text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              type="button"
+              onclick={() => window.location.reload()}
+            >
+              Retry connection
+            </button>
+          </div>
+        {/if}
+        <nav class="mt-8 flex flex-wrap gap-x-5 gap-y-3 font-sans text-sm" aria-label="Review recovery">
+          <a class="inline-flex min-h-[44px] items-center text-primary underline underline-offset-4" href="/app">Your Desk</a>
+          <a class="inline-flex min-h-[44px] items-center text-primary underline underline-offset-4" href="/">attn home</a>
+        </nav>
+      </section>
     </div>
   {:else if isLoading}
-    <div class="browser-review-loading flex h-full flex-col items-center justify-center gap-2 text-muted-foreground"
+    <div class="browser-review-lifecycle flex h-full min-h-0 flex-col overflow-auto"
       data-slot="browser-review-loading"
       data-status={sessionState.status}>
-      <p class="text-sm">Loading review…</p>
+      <header
+        class="flex min-h-11 shrink-0 items-center gap-2 border-b border-[var(--panel-border)] bg-[var(--header-surface)] px-4"
+        data-slot="browser-review-header"
+        data-lifecycle="true"
+      >
+        <BrandMark size={18} />
+        <span class="font-serif text-sm font-bold text-foreground">attn</span>
+        <span class="h-3 w-px bg-border" aria-hidden="true"></span>
+        <span class="font-sans text-meta font-medium text-foreground">Review</span>
+      </header>
+      <section class="m-auto w-full max-w-xl px-6 py-12 sm:px-10" aria-labelledby="review-lifecycle-title" aria-live="polite">
+        <p class="m-0 font-sans text-label text-muted-foreground">Review invitation</p>
+        <h1 id="review-lifecycle-title" class="mt-3 font-serif text-3xl font-semibold tracking-tight text-foreground">
+          {lifecycle.title}
+        </h1>
+        <p class="mt-3 max-w-[42ch] font-sans text-base leading-7 text-muted-foreground">{lifecycle.diagnosis}</p>
+        <p class="mt-4 max-w-[48ch] border-t border-border pt-4 font-sans text-sm leading-6 text-muted-foreground">
+          {lifecycle.privacyNote}
+        </p>
+      </section>
     </div>
   {:else}
     <div class="browser-review-body flex min-h-0 flex-1 flex-row overflow-hidden">
@@ -1278,7 +1586,7 @@
               onTogglePush={() => { void togglePushConsent(); }}
               onRetryOutbox={() => { void session.retryOutbox(); }}
             />
-            {#if desktopLayout && displayedDocType !== 'html'}
+            {#if desktopLayout && (displayedDocType !== 'html' || htmlAnnotatable)}
               <!-- Same glyph vocabulary and active treatment as the native
                    and hosted owner headers (attn-o17v): panel-right open/close
                    says "this opens and shuts a panel" where the old speech
@@ -1286,9 +1594,10 @@
                    ghost to the shared accent pill. The LABELS stay this
                    surface's own — a reviewer flips between reading and review
                    modes, which is more than show/hide. -->
+
               <button
                 type="button"
-                class="inline-flex h-7 items-center gap-1 rounded-md border px-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 {reviewStore.panelOpen
+                class="browser-review-rail-toggle inline-flex h-7 items-center gap-1 rounded-md border px-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 {reviewStore.panelOpen
                   ? 'border-primary/35 bg-primary/10 text-primary hover:bg-primary/15'
                   : 'border-transparent text-muted-foreground hover:bg-accent hover:text-foreground'}"
                 data-slot="browser-review-rail-toggle"
@@ -1343,9 +1652,19 @@
                 : 'min-width: 0; max-width: 100%;'}
             >
               {#if displayedDocType === 'html'}
-                <!-- Read-only HTML doc: render received bytes in a sandboxed iframe.
-                     No editor, no collab, no comment margin (yet). -->
-                <HtmlViewer content={displayedContent ?? ''} allowScripts={false} />
+                <!-- Shared HTML doc: received bytes render in a sandboxed,
+                     opaque-origin iframe. When the snapshot declares the
+                     annotation capability the runtime is injected and the
+                     comment margin mounts alongside; otherwise this stays the
+                     read-only, script-free viewer it has always been.
+                     @see planning/collab/html-annotation.md §1, §4 -->
+                <HtmlViewer
+                  content={displayedContent ?? ''}
+                  allowScripts={false}
+                  annotate={htmlAnnotatable}
+                  annotationEvents={htmlAnnotationEvents}
+                  onBridge={(bridge) => (htmlBridge = bridge)}
+                />
               {:else}
                 <Editor
                   markdown={reviewerCollabSeed?.markdown ?? displayedContent ?? ''}
@@ -1365,7 +1684,7 @@
                 />
               {/if}
             </div>
-            {#if displayedDocType !== 'html' && desktopLayout}
+            {#if (displayedDocType !== 'html' || htmlAnnotatable) && desktopLayout}
               <!-- Reserved for the whole life of the SURFACE, not the thread
                    set: the review page is always commentable, so the first
                    comment must not shift the document left (Docs rule — the
@@ -1384,7 +1703,8 @@
               >
                 <div class="review-rail-panel" data-expanded={railVisible}>
                   <ReviewMargin
-                    view={pmViewForReview}
+                    view={displayedDocType === 'html' ? undefined : pmViewForReview}
+                    anchorTops={htmlAnchorTops}
                     readOnly={true}
                     reviewerAuthoring={reviewerAvailability.reviewAuthoring}
                     onResolveComment={resolveBrowserComment}
@@ -1397,7 +1717,7 @@
         </div>
       </div>
     </div>
-    {#if displayedDocType !== 'html' && !desktopLayout}
+    {#if (displayedDocType !== 'html' || htmlAnnotatable) && !desktopLayout}
       <button
         type="button"
         class="fixed bottom-4 left-1/2 z-30 flex -translate-x-1/2 items-center gap-2 rounded-full border border-border bg-surface-raised px-4 py-2.5 text-sm font-semibold text-foreground shadow-lg"
@@ -1421,7 +1741,8 @@
         >
           <div class="review-sheet-margin">
             <ReviewMargin
-              view={pmViewForReview}
+              view={displayedDocType === 'html' ? undefined : pmViewForReview}
+              anchorTops={htmlAnchorTops}
               layout="stacked"
               readOnly={true}
               reviewerAuthoring={reviewerAvailability.reviewAuthoring}
@@ -1459,6 +1780,24 @@
   />
 {/if}
 
+<!-- HTML documents get their own composer: the anchor arrives prebuilt from
+     the document frame rather than being derived from a ProseMirror
+     selection. @see planning/collab/html-annotation.md §3 -->
+{#if htmlComposer && sessionState.roomId}
+  <HtmlCommentComposer
+    proposal={htmlComposer.proposal}
+    position={htmlComposer.position}
+    fileId={htmlComposer.fileId}
+    snapshotId={htmlComposer.snapshotId}
+    baseHash={htmlComposer.baseHash}
+    onCreateComment={createBrowserComment}
+    onClose={() => {
+      htmlComposer = null;
+      htmlBridge?.dismissSelection();
+    }}
+  />
+{/if}
+
 <NamePrompt
   bind:open={namePromptOpen}
   suggestion={userProfile.suggestion}
@@ -1487,3 +1826,12 @@
     onSubmit={collapseComposeSelection}
   />
 {/if}
+
+<style>
+  @media (pointer: coarse) {
+    .browser-review-rail-toggle {
+      min-width: 44px;
+      min-height: 44px;
+    }
+  }
+</style>

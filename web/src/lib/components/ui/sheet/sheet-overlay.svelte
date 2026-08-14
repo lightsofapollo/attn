@@ -13,7 +13,10 @@
 	bind:ref
 	data-slot="sheet-overlay"
 	class={cn(
-		"data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 fixed inset-0 z-50 bg-black/50",
+		// Matched to dialog-overlay: a sheet and a dialog are the same promise
+		// about attention, and two scrim weights would make the app look like it
+		// disagreed with itself about which one mattered more.
+		"data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 fixed inset-0 z-50 bg-black/70",
 		className
 	)}
 	{...restProps}

@@ -219,7 +219,11 @@ fi
 
 log "Booting owner + reviewer daemons (ATTN_HOME isolation)"
 start_dual
-wait_for_dual 'h1' 20000
+# Fixture-aware: FIXTURE_PATH may be an .html file (the HTML-annotation smoke
+# test opens one), whose <h1> lives inside a cross-origin frame the shell
+# cannot see. A flat `wait_for_dual 'h1'` timed out on a perfectly rendered
+# window and tore the harness down before the user could click Share.
+wait_for_dual_fixtures 20000
 log "Owner window opened — shows '$FIXTURE_PATH'; SHARE FROM THIS WINDOW. ATTN_HOME=$ATTN_DUAL_OWNER"
 log "Reviewer window opened — shows '$REVIEWER_FIXTURE_PATH' until it joins, then switches to the owner's doc. ATTN_HOME=$ATTN_DUAL_REVIEWER"
 

@@ -2738,9 +2738,12 @@ export class BrowserSession {
         this.persistedCursor = Math.max(this.persistedCursor, decoded.serverSeq);
         // attn-dgya doorbell: tell sibling tabs reading the same IndexedDB
         // that the durable review log advanced. Signals are transport
-        // plumbing and snapshot blobs pair with their pointer events, so
-        // only review events ring — anything else would just be noise.
-        if (envelope.kind === 'event') this.ringReviewInboundDoorbell(this.state.roomId!);
+        // plumbing, but snapshots are durable review state too. Ring for both
+        // their pointer events and blob payloads so every projection can
+        // hydrate an R2-spilled snapshot after its blob arrives.
+        if (envelope.kind === 'event' || envelope.kind === 'snapshot_blob') {
+          this.ringReviewInboundDoorbell(this.state.roomId!);
+        }
       } else {
         this.volatileInbound.set(envelope.envelopeId, {
           envelope: structuredClone(envelope),
@@ -3085,6 +3088,11 @@ export class BrowserSession {
       raw.fill(0);
       snapshot.content = inline.content;
       if (inline.docType === 'markdown') snapshot.anchorIndex = inline.anchorIndex;
+      // The annotation capability is what makes an HTML doc commentable
+      // (html_selectors_v1). Dropping it here silently downgrades a
+      // live-joining reviewer to the read-only viewer — and the log-replay
+      // path that DOES carry it cannot repair an already-hydrated entry.
+      if (inline.docType === 'html') snapshot.annotation = inline.annotation;
       this.setState({
         snapshotContent: inline.content,
         snapshotDocType: inline.docType,

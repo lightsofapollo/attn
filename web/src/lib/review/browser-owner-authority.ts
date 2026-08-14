@@ -40,6 +40,7 @@ import type { LeaseHandle } from './browser-workspace-lease';
 import type { PublishedManifestPointer } from './browser-snapshot-publisher';
 import type { SnapshotPublicationOutbox } from './browser-snapshot-publisher';
 import type { MailboxEnvelope } from './browser-ws';
+import type { BrowserReviewEphemeraSignal } from './browser-review-ephemera';
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 5_000;
 const DEFAULT_ROLLOVER_STEP_HEADROOM = 256;
@@ -53,6 +54,8 @@ export interface BrowserOwnerAuthorityFile {
   revisionId: string;
   contentHash: string;
   epoch: string;
+  /** HTML is a review-only document: it has durable anchors but no PM collab. */
+  docType?: 'markdown' | 'html';
 }
 
 export interface BrowserOwnerAuthorityStorage {
@@ -157,12 +160,11 @@ export interface BrowserOwnerAuthorityOptions {
     onState?: (state: BrowserSessionState) => void;
   };
   /**
-   * Cursor presence mirror (attn-37f9): the leader is the only node on both
-   * the relay wire and the local tab channel, so relay-borne cursor payloads
-   * are handed here for the runtime to re-post onto the tab channel. Without
-   * it a reviewer's caret/selection rendered only in the leader tab.
+   * The owner runtime may fan authenticated, non-durable cursor presence out
+   * through its workspace ephemera bus. No review event or storage authority
+   * crosses this boundary.
    */
-  onCursorDelivery?: (payload: string) => void;
+  onEphemeraDelivery?: (signal: BrowserReviewEphemeraSignal) => void;
   collab: {
     selfClientId: string;
     selfLabel: string;
@@ -246,6 +248,7 @@ export class BrowserOwnerAuthorityService {
   private readonly seeds = new Map<FileId, CollabAuthoritySeed>();
   private readonly bindings = new Map<FileId, BrowserOwnerAuthorityFile>();
   private readonly authorityFileIds: readonly FileId[];
+  private readonly docTypeByFileId = new Map<FileId, 'markdown' | 'html'>();
   private readonly inFlightAuthorityOperations = new Set<AuthorityOperation>();
   private transitionCollabBarrier: TransitionCollabBarrier | null = null;
   private lease: LeaseHandle | null = null;
@@ -280,6 +283,7 @@ export class BrowserOwnerAuthorityService {
         throw new Error('authority files must have complete unique published bindings');
       }
       fileIds.add(file.fileId);
+      this.docTypeByFileId.set(file.fileId, file.docType ?? 'markdown');
     }
     this.authorityFileIds = options.files.map((file) => file.fileId);
     this.options = options;
@@ -320,6 +324,16 @@ export class BrowserOwnerAuthorityService {
 
   get controller(): CollabController | null {
     return this.controllerValue;
+  }
+
+  /** The binding that authenticates the currently-installed controller. */
+  getBinding(pathOrFileId: string): BrowserOwnerAuthorityFile | null {
+    for (const binding of this.bindings.values()) {
+      if (binding.path === pathOrFileId || binding.fileId === pathOrFileId) {
+        return { ...binding };
+      }
+    }
+    return null;
   }
 
   prepareTerminalEvent(body: ReviewEventBody): AssembledBrowserEvent {
@@ -675,7 +689,7 @@ export class BrowserOwnerAuthorityService {
         throw new StorageConflictError('authority lease expired while loading binding set');
       }
       bindings.set(file.fileId, { ...file });
-      seeds.set(file.fileId, seed);
+      if (seed) seeds.set(file.fileId, seed);
     }
     if (bindings.size !== this.authorityFileIds.length) {
       throw new Error('promoted manifest does not cover the complete authority file set');
@@ -686,7 +700,7 @@ export class BrowserOwnerAuthorityService {
   private async loadVerifiedBinding(
     file: BrowserOwnerAuthorityFile,
     manifest: PublishedManifestPointer,
-  ): Promise<CollabAuthoritySeed> {
+  ): Promise<CollabAuthoritySeed | null> {
     const promoted = manifest.entries.find((entry) => entry.fileId === file.fileId && entry.path === file.path);
     if (
       !promoted ||
@@ -705,11 +719,14 @@ export class BrowserOwnerAuthorityService {
       bytes.fill(0);
       throw new StorageConflictError('authority lease expired while loading revision');
     }
-    let doc: PmNode;
+    let doc: PmNode | null = null;
     try {
       if (contentHash(bytes) !== file.contentHash) {
         throw new Error('authority revision bytes do not match the published content hash');
       }
+      // HTML participates in the same fenced publication and durable review
+      // session, but it deliberately has no ProseMirror collaboration seed.
+      if (file.docType === 'html') return null;
       const markdown = new TextDecoder('utf-8', { fatal: true }).decode(bytes);
       // Imported at the call site so the desk route does not pull the parser
       // (attn-n01r.41); this method is already async.
@@ -718,6 +735,7 @@ export class BrowserOwnerAuthorityService {
     } finally {
       bytes.fill(0);
     }
+    if (!doc) throw new Error('Markdown authority binding did not produce a document');
     const stored = await this.options.storage.getCollabCheckpoint(
       this.options.workspaceId,
       this.options.roomId,
@@ -759,6 +777,7 @@ export class BrowserOwnerAuthorityService {
         revisionId: promoted.revisionId,
         contentHash: promoted.contentHash,
         epoch: promoted.snapshotId,
+        docType: this.docTypeByFileId.get(fileId) ?? 'markdown',
       };
     });
   }
@@ -918,12 +937,14 @@ export class BrowserOwnerAuthorityService {
       debug[message.kind] = (debug[message.kind] ?? 0) + 1;
     }
     if (!message || (message.kind !== 'resync' && message.kind !== 'cursor')) return;
-    // Presence tee (attn-37f9): mirror relay cursors to follower tabs before
-    // any transition barrier — presence must not queue behind an epoch swap,
-    // and a dropped cursor frame self-heals on the next caret move.
+    // Fan authenticated relay cursors to sibling browser tabs before any
+    // transition barrier. The ephemera bus is lossy by definition, so a
+    // dropped frame self-heals on the next caret move.
     if (message.kind === 'cursor') {
       try {
-        this.options.onCursorDelivery?.(delivery.payload);
+        this.options.onEphemeraDelivery?.({
+          kind: 'cursor', source: 'room', payload: delivery.payload,
+        });
       } catch {
         // Presence is best-effort by definition.
       }
@@ -1001,15 +1022,16 @@ export class BrowserOwnerAuthorityService {
   }
 
   /**
-   * Best-effort presence relay for the local tab hub (attn-37f9): a follower
-   * tab's cursor arrives over the BroadcastChannel and must reach room peers
-   * through this leader's session. Fire-and-forget — no generation guard, no
-   * barrier: a lost cursor frame is repainted by the next caret move.
+   * Best-effort egress for a local-tab cursor that the workspace ephemera bus
+   * has already structurally validated. It stays out of review durability and
+   * bypasses epoch barriers because the next caret update repairs any loss.
    */
-  mirrorCursorToRoom(payload: string): void {
+  sendEphemera(signal: BrowserReviewEphemeraSignal): void {
+    if (signal.kind !== 'cursor' || signal.source !== 'local-tab') return;
+    if (parseCollabWireMessage(signal.payload)?.kind !== 'cursor') return;
     const session = this.sessionValue;
     if (!session || this.getState().status !== 'active') return;
-    void session.sendCollab(payload).catch(() => undefined);
+    void session.sendCollab(signal.payload).catch(() => undefined);
   }
 
   private async runAuthoritySend(

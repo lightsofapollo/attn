@@ -62,6 +62,15 @@ fn device_supports_webrtc(client: DeviceClient) -> bool {
 /// - `CreateComment` / `CreateSuggestion` → envelope assembly + outbox (3a)
 /// - `AcceptSuggestion` → guarded apply (Phase 5)
 /// - `ResolveAnchor` → anchor engine override (3.4)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HtmlResolutionStatus {
+    Exact,
+    Remapped,
+    Ambiguous,
+    Stale,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ReviewCommand {
     /// Share the current path as a new review room.
@@ -129,6 +138,24 @@ pub enum ReviewCommand {
         room_id: RoomId,
         event_id: EventId,
         range: PositionAnchor,
+    },
+    /// The document frame resolved an HTML anchor against its own DOM and is
+    /// reporting the outcome so the rail can show position and confidence.
+    ///
+    /// Deliberately **local-only**: unlike [`Self::ResolveAnchor`] this mints
+    /// no durable event. An HTML anchor resolves against *this* client's
+    /// rendered DOM, so the verdict is a local observation rather than a
+    /// shared fact — two peers can legitimately disagree, and propagating one
+    /// peer's view would overwrite the other's correct one.
+    ///
+    /// Spec: `html-annotation.md` §5, §7.
+    ReportHtmlAnchorResolution {
+        room_id: RoomId,
+        event_id: EventId,
+        status: HtmlResolutionStatus,
+        confidence: f64,
+        /// Resolved rendered-text offsets. Absent when nothing was found.
+        range: Option<PositionAnchor>,
     },
     /// Mark a comment thread resolved. Mints a durable `CommentResolved`
     /// event so the resolution persists and propagates to every peer (a
@@ -965,6 +992,23 @@ impl ReviewManager {
                 Some(bootstrapper),
                 Some(_runtime),
             ) => {
+                // An HTML anchor is authored inside a document frame that shares
+                // a JS context with untrusted page scripts, so it is bounded here
+                // before it can be persisted or synced to peers. Rust cannot
+                // check that the selectors address anything — that needs a DOM —
+                // but it can refuse a malformed or oversized payload.
+                // @see planning/collab/html-annotation.md §3
+                if let Some(html) = anchor.html.as_ref()
+                    && let Err(err) = html.validate()
+                {
+                    self.emit_event_outcome(
+                        room_id.clone(),
+                        Err(crate::review::bootstrap::BootstrapError::Crypto(format!(
+                            "invalid html anchor: {err}"
+                        ))),
+                    );
+                    return;
+                }
                 // A reply reuses the parent's thread id; a new comment mints one.
                 let thread_id = parent_thread_id.clone().unwrap_or_else(mint_thread_id);
                 let event_body = crate::review::model::ReviewEventBody::CommentCreated {
@@ -982,6 +1026,22 @@ impl ReviewManager {
                 Some(bootstrapper),
                 Some(_runtime),
             ) => {
+                // Suggestions on HTML documents are a v1 non-goal
+                // (html-annotation.md §8): the apply pipeline cannot resolve
+                // an HTML anchor against source bytes, so an html-anchored
+                // suggestion would sync to every peer and then fail at accept
+                // time forever. Refuse it at the same trust boundary where
+                // CreateComment bounds its anchor — IPC input is
+                // attacker-adjacent.
+                if draft.anchor.html.is_some() {
+                    self.emit_event_outcome(
+                        room_id.clone(),
+                        Err(crate::review::bootstrap::BootstrapError::Crypto(
+                            "suggestions on HTML documents are not supported".to_string(),
+                        )),
+                    );
+                    return;
+                }
                 let suggestion_id = mint_thread_id();
                 let event_body = crate::review::model::ReviewEventBody::SuggestionCreated {
                     suggestion_id,
@@ -1027,6 +1087,26 @@ impl ReviewManager {
                 Some(_runtime),
             ) => {
                 self.resolve_anchor(bootstrapper, room_id, event_id, range);
+                return;
+            }
+            (
+                ReviewCommand::ReportHtmlAnchorResolution {
+                    room_id,
+                    event_id,
+                    status,
+                    confidence,
+                    range,
+                },
+                Some(_bootstrapper),
+                Some(_runtime),
+            ) => {
+                self.report_html_anchor_resolution(
+                    room_id,
+                    event_id,
+                    *status,
+                    *confidence,
+                    range.as_ref(),
+                );
                 return;
             }
             (
@@ -1893,6 +1973,96 @@ impl ReviewManager {
             event_id.as_str(),
             room_id.as_str()
         );
+    }
+
+    /// Record a client-side HTML anchor resolution and push it to the rail.
+    ///
+    /// Nothing durable is minted and nothing is sent to peers — see
+    /// [`ReviewCommand::ReportHtmlAnchorResolution`]. The daemon's only jobs
+    /// are to find the event's `fileId` (the frame does not know it) and to
+    /// translate the frame's verdict into the `ResolvedAnchor` vocabulary the
+    /// store already renders.
+    fn report_html_anchor_resolution(
+        &self,
+        room_id: &RoomId,
+        event_id: &EventId,
+        status: HtmlResolutionStatus,
+        confidence: f64,
+        range: Option<&crate::review::model::PositionAnchor>,
+    ) {
+        let want = event_id.as_str();
+        let mut file_id: Option<FileId> = None;
+        match self.store.iter_events(room_id) {
+            Ok(iter) => {
+                for ev in iter.flatten() {
+                    if ev.meta.event_id.as_str() != want {
+                        continue;
+                    }
+                    file_id = match &ev.body {
+                        crate::review::model::ReviewEventBody::CommentCreated {
+                            anchor, ..
+                        }
+                        | crate::review::model::ReviewEventBody::SuggestionCreated {
+                            anchor, ..
+                        } => Some(anchor.file_id.clone()),
+                        _ => None,
+                    };
+                    break;
+                }
+            }
+            Err(e) => {
+                (self.update_tx)(ReviewUpdate::Error {
+                    room_id: Some(room_id.clone()),
+                    code: "ATTN_HTML_ANCHOR_RESOLUTION".to_string(),
+                    message: format!("read events: {e}"),
+                });
+                return;
+            }
+        }
+        let Some(file_id) = file_id else {
+            (self.update_tx)(ReviewUpdate::Error {
+                room_id: Some(room_id.clone()),
+                code: "ATTN_HTML_ANCHOR_RESOLUTION".to_string(),
+                message: format!("event {want} not found or carries no anchor"),
+            });
+            return;
+        };
+
+        // The frame is untrusted, so clamp rather than trust its confidence.
+        let confidence = confidence.clamp(0.0, 1.0);
+        let resolved = match (status, range) {
+            (HtmlResolutionStatus::Exact, Some(range)) => ResolvedAnchor::Exact {
+                confidence,
+                current_range: range.clone(),
+                reason: crate::review::model::ExactReason::ClientResolved,
+            },
+            (HtmlResolutionStatus::Remapped, Some(range)) => ResolvedAnchor::Remapped {
+                confidence,
+                current_range: range.clone(),
+                reason: crate::review::model::RemappedReason::ClientResolved,
+            },
+            (HtmlResolutionStatus::Ambiguous, _) => ResolvedAnchor::Ambiguous {
+                candidates: Vec::new(),
+                reason: "document frame found more than one equally good match".to_string(),
+            },
+            (HtmlResolutionStatus::Stale, _) => ResolvedAnchor::Stale {
+                reason: "document frame could not find the anchored content".to_string(),
+            },
+            // A positive verdict with no range is incoherent; treat it as
+            // stale rather than inventing a position for the rail to point at.
+            (HtmlResolutionStatus::Exact | HtmlResolutionStatus::Remapped, None) => {
+                ResolvedAnchor::Stale {
+                    reason: "document frame reported a match without a range".to_string(),
+                }
+            }
+        };
+
+        (self.update_tx)(ReviewUpdate::AnchorResolutionChanged {
+            room_id: room_id.clone(),
+            event_id: event_id.clone(),
+            file_id,
+            resolved,
+        });
     }
 
     /// Send a live co-typing payload over the encrypted `signal` channel.
@@ -3550,6 +3720,7 @@ fn review_command_name(cmd: &ReviewCommand) -> &'static str {
         ReviewCommand::AcceptSuggestion { .. } => "AcceptSuggestion",
         ReviewCommand::RejectSuggestion { .. } => "RejectSuggestion",
         ReviewCommand::ResolveAnchor { .. } => "ResolveAnchor",
+        ReviewCommand::ReportHtmlAnchorResolution { .. } => "ReportHtmlAnchorResolution",
         ReviewCommand::ResolveComment { .. } => "ResolveComment",
         ReviewCommand::SendCollab { .. } => "SendCollab",
         ReviewCommand::PublishSnapshot { .. } => "PublishSnapshot",
@@ -3689,6 +3860,39 @@ fn stub_update_for(cmd: &ReviewCommand) -> ReviewUpdate {
                 confidence: 1.0,
                 current_range: range.clone(),
                 reason: crate::review::model::RemappedReason::QuoteMatch,
+            },
+        },
+        // Client-reported HTML resolution needs no bootstrapper (it mints
+        // nothing), but it does need the store to find the event's fileId, so
+        // without one the stub echoes the verdict against a placeholder file.
+        ReviewCommand::ReportHtmlAnchorResolution {
+            room_id,
+            event_id,
+            status,
+            confidence,
+            range,
+        } => ReviewUpdate::AnchorResolutionChanged {
+            room_id: room_id.clone(),
+            event_id: event_id.clone(),
+            file_id: stub_file_id(),
+            resolved: match (status, range) {
+                (HtmlResolutionStatus::Exact, Some(range)) => ResolvedAnchor::Exact {
+                    confidence: confidence.clamp(0.0, 1.0),
+                    current_range: range.clone(),
+                    reason: crate::review::model::ExactReason::ClientResolved,
+                },
+                (HtmlResolutionStatus::Remapped, Some(range)) => ResolvedAnchor::Remapped {
+                    confidence: confidence.clamp(0.0, 1.0),
+                    current_range: range.clone(),
+                    reason: crate::review::model::RemappedReason::ClientResolved,
+                },
+                (HtmlResolutionStatus::Ambiguous, _) => ResolvedAnchor::Ambiguous {
+                    candidates: Vec::new(),
+                    reason: "document frame found more than one equally good match".to_string(),
+                },
+                _ => ResolvedAnchor::Stale {
+                    reason: "document frame could not find the anchored content".to_string(),
+                },
             },
         },
         // ResolveComment goes through the real bootstrap path in `submit`
@@ -4584,6 +4788,7 @@ mod tests {
             media_type: None,
             encoding: None,
             manifest: None,
+            annotation: None,
         };
         let blob_bytes = crate::review::crypto::canonical::to_canonical_bytes(&plaintext)
             .expect("canonical snapshot");
@@ -4855,6 +5060,7 @@ mod tests {
             media_type: Some("application/octet-stream".to_string()),
             encoding: Some(SnapshotAssetEncoding::Base64url),
             manifest: None,
+            annotation: None,
         };
         let markdown_raw = b"# Nested\n\nHello workspace.\n";
         let markdown_payload = SnapshotPlaintext {
@@ -4870,6 +5076,7 @@ mod tests {
             media_type: None,
             encoding: None,
             manifest: None,
+            annotation: None,
         };
 
         let mut asset_event = persist_snapshot_event(
@@ -4972,6 +5179,7 @@ mod tests {
             media_type: None,
             encoding: None,
             manifest: Some(manifest),
+            annotation: None,
         };
         let mut manifest_event = persist_snapshot_event(
             &store,
@@ -5058,6 +5266,7 @@ mod tests {
             media_type: None,
             encoding: None,
             manifest: None,
+            annotation: None,
         };
         let mut event = persist_snapshot_event(
             &store,
@@ -5109,6 +5318,7 @@ mod tests {
             media_type: None,
             encoding: None,
             manifest: None,
+            annotation: None,
         };
         let blob_bytes = crate::review::crypto::canonical::to_canonical_bytes(&plaintext)
             .expect("canonical snapshot");
@@ -5456,7 +5666,13 @@ mod tests {
             update_sink,
         );
         let (notification_tx, notification_rx) = mpsc::channel();
-        let debounce = std::time::Duration::from_millis(15);
+        // The debounce is real wall-clock in a worker thread, and the property
+        // under test is that a room's burst folds into ONE notification. So the
+        // window has to outlast every scheduling hiccup between two events of
+        // the same room, on a CI runner running the rest of the suite beside
+        // it. At 15ms it did not: the window closed mid-burst and first_room
+        // posted "1 new comment" twice instead of "2 new comments" once.
+        let debounce = std::time::Duration::from_millis(500);
         manager.notifications = ReviewNotifications::new(
             Arc::clone(&store),
             Arc::new(ChannelSink(notification_tx)),
@@ -5476,12 +5692,18 @@ mod tests {
         // remote envelope. An empty view map models a resident daemon with no
         // window: every fresh remote attention event enters unread accounting
         // and the native notification coordinator.
-        for (room_id, event_id, thread_id) in [
+        // Every durable append happens BEFORE the burst, so what the debounce
+        // window has to cover is the forwarding alone. Appending inside the
+        // loop put a file write and an fsync between two events of the same
+        // room, which is the expensive part of this test and the thing most
+        // likely to outlast the window under load.
+        let imports = [
             (&first_room, "evt-resident-a1", "thread-a1"),
             (&second_room, "evt-resident-b1", "thread-b1"),
             (&first_room, "evt-resident-a2", "thread-a2"),
             (&muted_room, "evt-resident-muted", "thread-muted"),
-        ] {
+        ]
+        .map(|(room_id, event_id, thread_id)| {
             let mut event = verdicts_test_event(
                 room_id,
                 event_id,
@@ -5498,6 +5720,10 @@ mod tests {
                     .append_event(room_id, &event)
                     .expect("verified import is durable")
             );
+            (room_id, event)
+        });
+
+        for (room_id, event) in imports {
             forward_transport_event(
                 &manager.update_tx,
                 &manager.store,
@@ -5542,10 +5768,10 @@ mod tests {
 
         let posted = [
             notification_rx
-                .recv_timeout(std::time::Duration::from_secs(1))
+                .recv_timeout(debounce.saturating_mul(8))
                 .expect("first debounced native notification"),
             notification_rx
-                .recv_timeout(std::time::Duration::from_secs(1))
+                .recv_timeout(debounce.saturating_mul(8))
                 .expect("second debounced native notification"),
         ];
         let by_room = posted
@@ -5553,13 +5779,22 @@ mod tests {
             .map(|notification| (notification.room_id.clone(), notification))
             .collect::<std::collections::HashMap<_, _>>();
         assert_eq!(by_room.len(), 2, "bursts collapse independently per room");
-        assert!(by_room[&first_room].body.starts_with("2 new comments"));
+        // Named, because a split burst still yields two notifications from two
+        // rooms and passes the count above: the body is what says whether the
+        // fold happened.
+        assert!(
+            by_room[&first_room].body.starts_with("2 new comments"),
+            "first room's two comments must fold into one notification, got {:?}",
+            by_room[&first_room].body
+        );
         assert!(by_room[&second_room].body.starts_with("1 new comment"));
         assert!(!by_room.contains_key(&muted_room));
+        // Both batches have already fired, so the muted room's — enqueued last,
+        // and therefore due by now too — would arrive immediately if it were
+        // ever going to. One more window is a generous wait for a post that
+        // should never come.
         assert!(
-            notification_rx
-                .recv_timeout(debounce.saturating_mul(4))
-                .is_err(),
+            notification_rx.recv_timeout(debounce).is_err(),
             "muted room and burst duplicates must not post"
         );
 
@@ -5662,7 +5897,7 @@ mod tests {
         )));
         assert!(
             restart_notification_rx
-                .recv_timeout(debounce.saturating_mul(4))
+                .recv_timeout(debounce.saturating_mul(2))
                 .is_err(),
             "resident restart must not replay historical OS notifications"
         );
@@ -6032,6 +6267,7 @@ mod tests {
             block: None,
             context: None,
             structure: None,
+            html: None,
         }
     }
 
@@ -7422,6 +7658,7 @@ mod request_snapshot_tests {
                 media_type: None,
                 encoding: None,
                 manifest: None,
+                annotation: None,
             }),
         }
     }

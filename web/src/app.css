@@ -951,7 +951,10 @@
        theme, and keeps ghost text in the same family as the suggestion cards
        and inline marks it previews. */
     background-color: var(--suggestion-bg);
-    color: color-mix(in oklab, var(--review-card-suggestion-accent) 90%, var(--foreground));
+    /* The ghost needs ordinary body-text contrast too: it sits directly on
+       the soft suggestion wash, where the accent mix falls below AA in the
+       landing review demo. The wash and underline keep its suggested state. */
+    color: var(--foreground);
     border-radius: 2px;
     padding: 0 2px;
     margin-inline-start: 2px;

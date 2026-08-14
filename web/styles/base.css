@@ -593,6 +593,25 @@ a:focus-visible {
   animation: review-rail-fade-in 160ms ease-out;
 }
 
+/* The hosted owner workspace treats opening a saved review as a deliberate
+   reading-layout change, not a transient annotation overlay. Its rail gets a
+   real grid column, so the review panel may never cover the document beneath
+   it. Browser review rooms retain the transparent marker-margin treatment
+   above; they do not carry this data attribute. */
+.review-rail-panel[data-layout='docked'][data-expanded='true'] {
+  position: relative;
+  top: auto;
+  right: auto;
+  bottom: auto;
+  width: 100%;
+  height: 100%;
+  z-index: auto;
+  pointer-events: auto;
+  /* A docked column changes the reading geometry; it should arrive as one
+     stable layout rather than inheriting the overlay's fade-through state. */
+  animation: none;
+}
+
 /* Cards, chips, trays re-enable interaction; the empty space between them
    stays click-through to the document. */
 .review-rail-panel[data-expanded='true'] .review-margin > * {

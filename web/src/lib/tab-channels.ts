@@ -12,6 +12,15 @@ export const LEASE_CHANNEL_NAME = 'attn-workspace-lease';
 export const LOCAL_COLLAB_CHANNEL_PREFIX = 'attn:local-collab:v1:';
 
 /**
+ * Lossy, workspace-scoped collaboration signals shared by hosted browser
+ * tabs. This is deliberately separate from LOCAL_COLLAB_CHANNEL_PREFIX:
+ * that channel carries document authority handshakes, seeds, and steps;
+ * this one carries only bounded presence/cursor updates and never backs a
+ * durable review record.
+ */
+export const REVIEW_EPHEMERA_CHANNEL_PREFIX = 'attn:review-ephemera:v1:';
+
+/**
  * Review inbound-log doorbell, suffixed with the roomId. The workspace
  * lease holder's live session rings it after each durable review-event
  * commit; sibling tabs of the same profile replay the shared IndexedDB

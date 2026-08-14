@@ -28,6 +28,7 @@
     WorkspaceShareRequest,
     WorkspaceShareView,
   } from './types';
+  import type { WorkspaceReviewProjectionState } from '../../lib/review/browser-review-log';
   import type EditorComponentType from '../../lib/Editor.svelte';
   import type ReviewMarginComponentType from '../../lib/ReviewMargin.svelte';
   import type ReviewApplyExpandComponentType from '../../lib/ReviewApplyExpand.svelte';
@@ -40,6 +41,16 @@
   import { scrollViewToPos } from '../../lib/scroll-viewport';
   import { peerJumpPosition } from '../../lib/peer-strip-format';
   import { attachCollabPresenceSinks } from '../../lib/prosemirror/collab-presence-sinks';
+  import HtmlViewer from '../../lib/HtmlViewer.svelte';
+  import HtmlCommentComposer from '../../lib/HtmlCommentComposer.svelte';
+  import type {
+    AnnotationBridgeEvents,
+    HtmlAnnotationBridge,
+  } from '../../lib/review/html-annotation-bridge';
+  import type {
+    AnchorProposal,
+    RenderableAnchor,
+  } from '../../lib/review/doc-protocol';
 
   interface Props {
     service: WorkspaceAppService;
@@ -189,6 +200,12 @@
   let collabSeedRequest = 0;
   let loadedCollabGenerationKey: string | null = null;
   let boundCollabKey: string | null = null;
+  // The request token alone only rejects older calls. It does not prevent an
+  // owner seed fetched while the controller is rotating from resolving after
+  // a different reactive turn has already installed a newer request. Keep the
+  // exact controller identity too: an authenticated seed is meaningful only
+  // for the controller that supplied it.
+  let collabSeedController: ReturnType<EditingSession['getController']> | null = null;
   let autosave: AutosaveController | null = null;
   // Durable commits completed this session — observable for tests/status.
   let commitCount = $state(0);
@@ -218,19 +235,29 @@
       || ownerState?.reason?.startsWith('The review room expired') === true,
   );
   // Review surfaces render in EVERY tab of a shared workspace, not just the
-  // lease holder: follower tabs have no authority session but the durable
-  // review-log watcher (attn-dgya) hydrates the store and stamps the room.
+  // lease holder. This projection state is intentionally the only source for
+  // room identity and file bindings; the authority only describes whether
+  // THIS tab currently has a live authoring connection.
+  let reviewProjection = $state<WorkspaceReviewProjectionState>({
+    roomId: null,
+    bindings: [],
+    replay: 'idle',
+  });
   const reviewRoomActive = $derived(
-    Boolean(ownerState?.roomId ?? reviewStoreRef?.currentRoomId),
+    reviewProjection.roomId !== null && reviewProjection.replay === 'ready',
   );
   // A follower tab showing hydrated threads: reply/resolve stay available —
   // the handlers promote this tab through the normal lease handoff on use.
   const reviewFollowerTab = $derived(
-    !ownerState?.roomId && Boolean(reviewStoreRef?.currentRoomId),
+    !ownerState?.roomId && reviewRoomActive,
   );
-  // Promoted-manifest path → fileId map from the review-log watcher: the
-  // follower's substitute for the leader-only authority bindings.
-  let reviewLogBindings = $state<Array<{ path: string; fileId: string }>>([]);
+  const reviewLogBindings = $derived(reviewProjection.bindings);
+  // Mock shells carry illustrative cards, but a real workspace only ever
+  // reaches review UI through its durable projection.
+  const fixtureReviewHistory = $derived(
+    !reviewRoomActive && workspace.reviewCards.length > 0,
+  );
+  const durableReviewHistory = $derived(reviewRoomActive);
 
   // ————— multi-file rail state (attn-7xl.3.4) —————
   let addingMarkdown = $state(false);
@@ -257,10 +284,14 @@
   let docTitle = $state('');
   let showDocTitle = $state(false);
 
+  // A review thread is durable work; “live” describes the connection below,
+  // not whether this count or its history exists.
   const reviewCount = $derived(
     reviewRoomActive && reviewStoreRef
       ? reviewStoreRef.roomActiveThreadCount
-      : workspace.reviewCards.length,
+      : fixtureReviewHistory
+        ? workspace.reviewCards.length
+        : 0,
   );
   let badgePop = $state(false);
   let lastReviewCount = -1;
@@ -787,35 +818,18 @@
   // The runtime bindings map workspace path → published share fileId.
   $effect(() => {
     const store = reviewStoreRef;
-    const state = ownerState;
     const path = activeEntry?.path;
     if (!store || !path) return;
-    // Leader: authority bindings. Follower (no session): the promoted
-    // manifest's bindings from the review-log watcher — same map, read
-    // from storage instead of the live authority (attn-dgya follow-up).
-    const bindings = state?.roomId
-      ? store.currentRoomId === state.roomId
-        ? state.bindings
-        : null
-      : store.currentRoomId !== null
-        ? reviewLogBindings
-        : null;
-    if (!bindings) return;
-    const binding = bindings.find((item) => item.path === path);
+    if (!reviewRoomActive) return;
+    const binding = reviewLogBindings.find((item) => item.path === path);
     if (!binding) return;
     untrack(() => {
       if (store.currentFileId === binding.fileId) return;
-      if (state?.roomId) {
-        store.setCurrentFile(binding.fileId);
-      } else {
-        // Follower tabs replay content-less snapshot POINTERS (blob
-        // hydration stays with the live session), so setCurrentFile's
-        // renderability guard would refuse this pin — but the document
-        // body here comes from the local workspace, not the snapshot.
-        // Pin directly, mirroring the guard-free parts of setCurrentFile.
-        store.currentFileId = binding.fileId;
-        store.currentSnapshotId = null;
-      }
+      // The local workspace is the rendered document. Pin the matching
+      // promoted file directly so every projection — leader or follower —
+      // scopes threads identically even before a snapshot is renderable.
+      store.currentFileId = binding.fileId;
+      store.currentSnapshotId = null;
     });
   });
 
@@ -837,6 +851,128 @@
 
   let ownerToolbarSelection = $state<{ from: number; to: number } | null>(null);
   let ownerCommentComposer = $state<OwnerComposerState | null>(null);
+
+  // HTML uses the same review store and margin as Markdown, but its selection
+  // and geometry live inside an opaque-origin document frame. The frame may
+  // only propose anchors; this shell remains the sole comment author.
+  let htmlBridge = $state<HtmlAnnotationBridge | null>(null);
+  let htmlAnchorTops = $state<Record<string, number>>({});
+  let htmlComposer = $state<{
+    proposal: AnchorProposal;
+    position: { top: number; left: number };
+    fileId: string;
+    snapshotId: string;
+    baseHash: string;
+  } | null>(null);
+  const ownerHtmlSnapshot = $derived.by(() => {
+    const store = reviewStoreRef;
+    const path = activeEntry?.path;
+    if (!store || !path || activeEntry?.presentation !== 'html') return null;
+    const candidates = store.snapshots.filter(
+      (snapshot) => snapshot.docType === 'html' && snapshot.ownerDisplayPath === path,
+    );
+    if (candidates.length === 0) return null;
+    return candidates.reduce((latest, snapshot) =>
+      snapshot.createdAt > latest.createdAt ? snapshot : latest,
+    );
+  });
+  const htmlAnnotatable = $derived(
+    durableReviewAvailable && ownerHtmlSnapshot?.annotation === 'html_selectors_v1',
+  );
+  const htmlRenderableAnchors = $derived.by(() => {
+    const store = reviewStoreRef;
+    if (!store || activeEntry?.presentation !== 'html') return [] as RenderableAnchor[];
+    return store.threadsForCurrentFile.flatMap((thread) => {
+      if (!thread.anchor?.html) return [];
+      return [{
+        anchorId: thread.id,
+        html: thread.anchor.html,
+        state: (thread.resolved ? 'resolved' : 'default') as RenderableAnchor['state'],
+        quote: thread.anchor.quote?.exact,
+        prefix: thread.anchor.context?.prefix,
+        suffix: thread.anchor.context?.suffix,
+        label: String(1 + thread.replies.length),
+      }];
+    });
+  });
+
+  $effect(() => {
+    const store = reviewStoreRef;
+    const snapshot = ownerHtmlSnapshot;
+    if (!store || !snapshot) return;
+    // HTML has a signed authority binding for publication and durable review,
+    // but no live co-typing seed. It still needs to become the focused review
+    // file for its rail cards and comment events to scope correctly.
+    if (store.currentFileId !== snapshot.fileId) store.setCurrentFile(snapshot.fileId);
+  });
+
+  $effect(() => {
+    const bridge = htmlBridge;
+    if (bridge) bridge.renderAnchors(htmlRenderableAnchors);
+  });
+
+  // Hover chrome is always live in an annotating frame; taking the CLICK — so
+  // the page's own links stop firing — waits until the document is genuinely
+  // reviewable.
+  $effect(() => {
+    htmlBridge?.setInspect(htmlAnnotatable);
+  });
+
+  $effect(() => {
+    const snapshotId = ownerHtmlSnapshot?.snapshotId;
+    if (htmlComposer && htmlComposer.snapshotId !== snapshotId) {
+      htmlComposer = null;
+      htmlBridge?.dismissSelection();
+    }
+  });
+
+  const htmlAnnotationEvents: AnnotationBridgeEvents = {
+    onProposal: ({ proposal, rects, caret, explicit }) => {
+      // Dragging a selection is not a request for a composer — pressing the
+      // frame's Comment pill, or clicking an element, is. The runtime is only
+      // injected when `htmlAnnotatable`, so the guard below is a mid-gesture
+      // snapshot swap rather than an unshared document.
+      if (!explicit) return;
+      const snapshot = ownerHtmlSnapshot;
+      if (!htmlAnnotatable || !snapshot) return;
+      const near = caret ?? rects.at(-1);
+      htmlComposer = {
+        proposal,
+        position: { top: (near?.y ?? 0) + (near?.height ?? 0) + 8, left: near?.x ?? 0 },
+        fileId: snapshot.fileId,
+        snapshotId: snapshot.snapshotId,
+        baseHash: snapshot.baseHash,
+      };
+      if (reviewStoreRef) reviewStoreRef.panelOpen = true;
+    },
+    onProposalCleared: () => undefined,
+    onResolved: (results, toShellRects) => {
+      const next: Record<string, number> = {};
+      for (const result of results) {
+        const first = toShellRects(result.rects)[0];
+        if (first) next[result.anchorId] = first.y;
+      }
+      htmlAnchorTops = next;
+    },
+    onGeometry: (results) => {
+      const next: Record<string, number> = {};
+      for (const result of results) {
+        const first = result.rects[0];
+        if (first) next[result.anchorId] = first.y;
+      }
+      htmlAnchorTops = next;
+    },
+    onAnchorActivated: (anchorId) => {
+      const thread = reviewStoreRef?.threadsForCurrentFile.find((item) => item.id === anchorId);
+      if (thread) reviewStoreRef?.setFocusEventId(thread.rootEvent.meta.eventId);
+    },
+  };
+
+  async function createHtmlComment(anchor: ReviewAnchor, body: string): Promise<void> {
+    const granted = session;
+    if (!granted) throw new Error('The editing session is unavailable.');
+    await granted.createComment(anchor, body);
+  }
 
   function ownerComposeSnapshot() {
     const store = reviewStoreRef;
@@ -1249,15 +1385,27 @@
       // NOW even in a never-lease tab — otherwise the projection-hydrated
       // threads have no component to render into.
       unsubscribe = handle.subscribe((state) => {
-        reviewLogBindings = [...state.bindings];
+        reviewProjection = {
+          roomId: state.roomId,
+          bindings: [...state.bindings],
+          replay: state.replay,
+        };
         if (state.roomId !== null) void ensureEditorGraph(true);
       });
-    }).catch(() => undefined);
+    }).catch(() => {
+      reviewProjection = { roomId: null, bindings: [], replay: 'failed' };
+    });
     return () => {
       cancelled = true;
       unsubscribe?.();
       projection?.close();
+      reviewProjection = { roomId: null, bindings: [], replay: 'idle' };
     };
+  });
+
+  $effect(() => {
+    if (activeEntry?.presentation !== 'html' || !reviewRoomActive) return;
+    untrack(() => { void ensureEditorGraph(true); });
   });
 
   // Dev-only drift guard (attn-73xq): every hosted tab broadcasts a
@@ -1493,6 +1641,7 @@
     untrack(() => {
       collabSeedRequest += 1;
       collabSeed = null;
+      collabSeedController = null;
       collabClientId = null;
       boundCollabKey = null;
       loadedCollabGenerationKey = null;
@@ -1526,6 +1675,7 @@
       }
       untrack(() => {
         collabSeed = seed;
+        collabSeedController = null;
         collabClientId = crypto.randomUUID();
         boundCollabKey = null;
         collabEpoch += 1;
@@ -1600,6 +1750,7 @@
         untrack(() => {
           collabSeedRequest += 1;
           collabSeed = null;
+          collabSeedController = null;
           collabClientId = null;
           boundCollabKey = null;
           collabEpoch += 1;
@@ -1626,6 +1777,7 @@
         || activeEntry?.path !== entry.path
       ) return;
       collabSeed = seed;
+      collabSeedController = currentSession.getController();
       collabClientId = seed ? crypto.randomUUID() : null;
       boundCollabKey = null;
       collabEpoch += 1;
@@ -1649,7 +1801,7 @@
       || readyCollabEpoch !== epoch
     ) return;
     const controller = currentSession.getController();
-    if (!controller) return;
+    if (!controller || controller !== collabSeedController) return;
     const key = `${state.controllerGeneration}:${seed.fileId}:${seed.epoch}:${epoch}`;
     if (boundCollabKey === key) return;
     const bridge: EditorBridge = {
@@ -1813,7 +1965,7 @@
       review: {
         activePath: activeEntry?.path ?? null,
         ownerRoomId: ownerState?.roomId ?? null,
-        bindings: (ownerState?.bindings ?? []).map((b) => ({ path: b.path, fileId: b.fileId })),
+        bindings: [...reviewLogBindings],
         storeRoomId: reviewStoreRef?.currentRoomId ?? null,
         storeFileId: reviewStoreRef?.currentFileId ?? null,
         threads: reviewStoreRef?.threads.length ?? null,
@@ -1886,8 +2038,7 @@
         // and the bridge's deliveries rendered nowhere.
         const path = activeEntry?.path;
         const activeFileId =
-          ownerState?.bindings.find((binding) => binding.path === path)?.fileId
-          ?? reviewLogBindings.find((binding) => binding.path === path)?.fileId;
+          reviewLogBindings.find((binding) => binding.path === path)?.fileId;
         const scoped = cursors.filter(
           (cursor) => !cursor.location?.fileId || cursor.location.fileId === activeFileId,
         );
@@ -1935,6 +2086,10 @@
       const { reviewStore } = await import('../../lib/review/store.svelte');
       reviewStore.openThreeWayApply(result.verdict);
     }
+    // The action is durably committed before the runtime returns. Ring Desk
+    // only after that point so another tab re-projects a terminal event, not
+    // an optimistic UI dismissal.
+    service.announceReviewActivity(workspace.id);
     return result;
   }
 
@@ -1945,10 +2100,12 @@
     if (!currentSession || !entry || root.type !== 'suggestion_created') {
       throw new Error('Suggestion is not available.');
     }
-    return currentSession.rejectSuggestion({
+    const result = await currentSession.rejectSuggestion({
       path: entry.path,
       suggestionId: root.suggestionId,
     });
+    service.announceReviewActivity(workspace.id);
+    return result;
   }
 
   async function applyReviewedSuggestion(
@@ -1958,11 +2115,13 @@
     const currentSession = session;
     const entry = activeEntry;
     if (!currentSession || !entry) throw new Error('Owner apply is unavailable.');
-    return currentSession.applySuggestion({
+    const result = await currentSession.applySuggestion({
       path: entry.path,
       suggestionId: verdict.suggestionId,
       replacement,
     });
+    service.announceReviewActivity(workspace.id);
+    return result;
   }
 
   async function replyToReview(anchor: import('../../lib/types').Anchor, body: string, threadId: string): Promise<void> {
@@ -1977,6 +2136,7 @@
     const currentSession = session ?? (await ensureOwnerSession());
     if (!currentSession) throw new Error('Review authoring is unavailable.');
     await currentSession.resolveComment(threadId);
+    service.announceReviewActivity(workspace.id);
   }
 
   async function retryReviewDelivery(): Promise<void> {
@@ -2071,23 +2231,18 @@
     void switchTo(relativePath);
   }
 
-  // path ↔ fileId across the leader authority bindings and the follower-tab
-  // review-log bindings (same union the cursor-scope filter uses).
+  // Path ↔ fileId comes exclusively from the promoted-manifest projection.
   function activeOwnerFileId(): FileId | null {
     const path = activeEntry?.path;
     if (!path) return null;
     return (
-      (ownerState?.bindings.find((b) => b.path === path)?.fileId
-        ?? reviewLogBindings.find((b) => b.path === path)?.fileId
-        ?? null) as FileId | null
+      (reviewLogBindings.find((b) => b.path === path)?.fileId ?? null) as FileId | null
     );
   }
 
   function pathForFileId(fileId: FileId): string | null {
     return (
-      ownerState?.bindings.find((b) => b.fileId === fileId)?.path
-      ?? reviewLogBindings.find((b) => b.fileId === fileId)?.path
-      ?? null
+      reviewLogBindings.find((b) => b.fileId === fileId)?.path ?? null
     );
   }
 
@@ -2159,9 +2314,11 @@
   }
 
   // Files-sheet grouping (attn-7xl / iOS parity): a monospace badge, the file
-  // basename, a capability subtitle, and the size — grouped Markdown vs Assets.
+  // basename, a capability subtitle, and the size — grouped Markdown, HTML,
+  // and Assets so a read-only document never disappears from mobile nav.
   function entryBadge(entry: WorkspaceEntry): string {
     if (entry.kind === 'markdown') return 'MD';
+    if (entry.kind === 'html') return 'HTML';
     return entry.presentation === 'preview' ? 'IMG' : 'BIN';
   }
   function entryBasename(entry: WorkspaceEntry): string {
@@ -2171,9 +2328,10 @@
     if (entry.presentation === 'preview') return 'Preview inline';
     if (entry.presentation === 'download-only') return 'Download only';
     const slash = entry.path.lastIndexOf('/');
-    return slash > 0 ? entry.path.slice(0, slash) : 'Markdown';
+    return slash > 0 ? entry.path.slice(0, slash) : entry.kind === 'html' ? 'HTML document' : 'Markdown';
   }
   const markdownEntries = $derived(workspace.entries.filter((e) => e.kind === 'markdown'));
+  const htmlEntries = $derived(workspace.entries.filter((e) => e.kind === 'html'));
   const assetEntries = $derived(workspace.entries.filter((e) => e.kind === 'asset'));
 
   function openShare(trigger: HTMLButtonElement | undefined): void {
@@ -2252,6 +2410,15 @@
       paletteOpen = !paletteOpen;
       return;
     }
+    // File deletion is deliberately an inline tree confirmation rather than a
+    // modal dialog. Keep Escape recovery explicit so keyboard users return to
+    // the active file row instead of a transient destructive state.
+    if (event.key === 'Escape' && confirmingEntryDelete) {
+      event.preventDefault();
+      confirmingEntryDelete = false;
+      focusSidebarAnchor('[data-path][data-active="true"]');
+      return;
+    }
     // Escape steps back from a click-opened thread (collapse expanded
     // resolved card → clear focus → re-hide click-revealed cards). Never
     // while a modal or a text field owns the keyboard, and never while
@@ -2306,7 +2473,7 @@
     // A thread on another shared file: switch to that file first — the
     // active-file scoping effect re-points the store, then focus follows.
     if (toast.fileId !== null) {
-      const binding = ownerState?.bindings.find((item) => item.fileId === toast.fileId);
+      const binding = reviewLogBindings.find((item) => item.fileId === toast.fileId);
       if (binding) onSelectEntry?.(binding.path);
     }
     reviewStoreRef?.setFocusEventId(toast.eventId);
@@ -2360,11 +2527,31 @@
       const name = store.displayNameFor(arrival.authorId);
       const verb = arrival.kind === 'suggestion' ? 'suggested an edit' : 'commented';
       const binding = arrival.fileId !== null
-        ? ownerState?.bindings.find((item) => item.fileId === arrival.fileId)
+        ? reviewLogBindings.find((item) => item.fileId === arrival.fileId)
         : undefined;
       const suffix = binding ? ` · ${binding.path.split('/').at(-1)}` : '';
       pushToast(`${name} ${verb}${suffix}`, arrival.eventId, arrival.fileId);
     }
+  });
+
+  // A review projection changing is durable workspace activity, not a live
+  // connection signal. Tell other tabs to refresh their Desk summaries, but
+  // intentionally send no plaintext, event id, author, or count over the
+  // advisory channel. The receiving tab decrypts and tallies its own log.
+  let lastAnnouncedReviewFingerprint: string | null = null;
+  $effect(() => {
+    const store = reviewStoreRef;
+    const roomId = reviewProjection.roomId;
+    if (!store || !roomId || reviewProjection.replay !== 'ready') return;
+    const eventIds = store.events
+      .filter((event) => event.meta.roomId === roomId)
+      .map((event) => event.meta.eventId)
+      .sort()
+      .join(',');
+    const fingerprint = `${roomId}:${eventIds}`;
+    if (fingerprint === lastAnnouncedReviewFingerprint) return;
+    lastAnnouncedReviewFingerprint = fingerprint;
+    service.announceReviewActivity(workspace.id);
   });
 
   // Tapping an inline anchor marker (mobile reader) sets the store's focus
@@ -2564,6 +2751,21 @@
   />
 {/if}
 
+{#if htmlComposer}
+  <HtmlCommentComposer
+    proposal={htmlComposer.proposal}
+    position={htmlComposer.position}
+    fileId={htmlComposer.fileId}
+    snapshotId={htmlComposer.snapshotId}
+    baseHash={htmlComposer.baseHash}
+    onCreateComment={createHtmlComment}
+    onClose={() => {
+      htmlComposer = null;
+      htmlBridge?.dismissSelection();
+    }}
+  />
+{/if}
+
 {#if arrivalToasts.length > 0}
   <div class="arrival-toasts" aria-live="polite">
     {#each arrivalToasts as toast (toast.id)}
@@ -2666,6 +2868,16 @@
       </div>
     {:else if desktopLayout && activeEntry?.presentation === 'editable'}
       <div class="hosted-editor-loading" role="status">Opening editor…</div>
+    {:else if activeEntry?.presentation === 'html'}
+      <div class="hosted-html-surface" data-slot="hosted-html-document">
+        <HtmlViewer
+          content={bodyText ?? displayText ?? ''}
+          allowScripts={false}
+          annotate={htmlAnnotatable}
+          annotationEvents={htmlAnnotationEvents}
+          onBridge={(bridge) => (htmlBridge = bridge)}
+        />
+      </div>
     {:else if isNewDraft && (displayText === null || displayText.length === 0)}
       <div class="eyebrow">New workspace</div>
       <h1>Untitled</h1>
@@ -2772,22 +2984,24 @@
         }}
       />
     {:else if confirmingEntryDelete && activeEntry}
-      <!-- svelte-ignore a11y_no_noninteractive_element_interactions -->
       <div
         class="hosted-delete-confirm"
-        role="alertdialog"
-        aria-label={`Delete ${activeEntry.path}?`}
-        onkeydown={(event) => {
-          if (event.key !== 'Escape') return;
-          event.stopPropagation();
-          confirmingEntryDelete = false;
-          focusSidebarAnchor('[data-path][data-active="true"]');
-        }}
+        role="group"
+        aria-label={`Delete ${activeEntry.path}`}
       >
-        <span>Delete {activeEntry.path}?</span>
+        <span role="status">Delete {activeEntry.path}?</span>
         <div>
-          <!-- Safe action takes initial focus: Enter must never destroy. -->
-          <button use:autofocus type="button" onclick={() => (confirmingEntryDelete = false)}>Cancel</button>
+          <!-- This is an inline tree confirmation, not a modal. Safe action
+               gets focus and both it and the global Escape path return to the
+               active-file tree row; no fake dialog contract remains. -->
+          <button
+            use:autofocus
+            type="button"
+            onclick={() => {
+              confirmingEntryDelete = false;
+              focusSidebarAnchor('[data-path][data-active="true"]');
+            }}
+          >Cancel</button>
           <button class="danger" type="button" onclick={() => void deleteActiveEntry()}>Delete file</button>
         </div>
       </div>
@@ -2842,7 +3056,8 @@
       </div>
     {/if}
     <ReviewMarginComponent
-      view={pmViewForReview}
+      view={activeEntry?.presentation === 'html' ? undefined : pmViewForReview}
+      anchorTops={activeEntry?.presentation === 'html' ? htmlAnchorTops : undefined}
       readOnly={reviewFollowerTab ? false : !ownerState?.liveEditingAvailable}
       reviewerAuthoring={durableReviewAvailable || reviewFollowerTab}
       suggestionActions={ownerState?.liveEditingAvailable
@@ -2851,6 +3066,26 @@
       onResolveComment={resolveReview}
       onReplyComment={replyToReview}
     />
+  {:else if fixtureReviewHistory}
+    <section class="review-history-placeholder" aria-labelledby="review-history-heading">
+      <p class="review-history-label">Saved review</p>
+      <h2 id="review-history-heading">{workspace.reviewCards.length} {workspace.reviewCards.length === 1 ? 'thread' : 'threads'} from this workspace</h2>
+      <div class="review-history-list">
+        {#each workspace.reviewCards as card (card.author + card.body)}
+          <article class="review-card">
+            <strong>{card.author} · {card.ageLabel}</strong>
+            <p>{card.body}</p>
+          </article>
+        {/each}
+      </div>
+      <p class="review-history-note">Live review adds presence and replies; saved feedback stays here.</p>
+    </section>
+  {:else if reviewProjection.replay === 'failed'}
+    <section class="review-history-placeholder" aria-labelledby="review-history-heading">
+      <p class="review-history-label">Review history</p>
+      <h2 id="review-history-heading">Review history is temporarily unavailable</h2>
+      <p class="review-history-note">Your document is safe on this device. Reopen this workspace to try loading its saved feedback again.</p>
+    </section>
   {/if}
 {/snippet}
 
@@ -2877,6 +3112,7 @@
         onOpenDesk={() => window.location.assign('/app')}
         activeEntryPath={activeEntry?.path}
         {shareOpen}
+        reviewHistoryAvailable={durableReviewHistory || fixtureReviewHistory || reviewProjection.replay === 'failed'}
         actions={desktopHeaderActions}
         footer={desktopSidebarFooter}
         content={documentSurface}
@@ -2958,6 +3194,7 @@
         type="button"
         bind:this={shareButton}
         data-sharing={sharingActive}
+        data-slot="owner-mobile-share"
         onclick={() => openShare(shareButton)}
       >
         {#if sharingActive}<span class="share-live-dot" aria-hidden="true"></span>{/if}
@@ -3139,10 +3376,14 @@
 {#if filesSheetOpen}
   <BottomSheet
     title="Files"
-    subtitle={`${markdownEntries.length} Markdown · ${assetEntries.length} ${assetEntries.length === 1 ? 'asset' : 'assets'}`}
+    subtitle={`${markdownEntries.length} Markdown · ${htmlEntries.length} HTML · ${assetEntries.length} ${assetEntries.length === 1 ? 'asset' : 'assets'}`}
     onclose={closeFilesSheet}
   >
-    {#each [{ label: 'Markdown', items: markdownEntries }, { label: 'Assets', items: assetEntries }] as group (group.label)}
+    {#each [
+      { label: 'Markdown', items: markdownEntries },
+      { label: 'HTML', items: htmlEntries },
+      { label: 'Assets', items: assetEntries },
+    ] as group (group.label)}
       {#if group.items.length > 0}
         <div class="file-group">
           <div class="file-group-label">{group.label}</div>
@@ -3195,13 +3436,14 @@
 
 {#if reviewSheetOpen}
   <BottomSheet
-    title={ownerState?.roomId && reviewStoreRef ? `Review · ${reviewStoreRef.roomActiveThreadCount}` : `Review · ${workspace.reviewCards.length}`}
+    title={`Review · ${reviewCount}`}
     onclose={closeReviewSheet}
   >
     {#if reviewRoomActive && ReviewMarginComponent}
       <div class="review-sheet-margin">
         <ReviewMarginComponent
-          view={pmViewForReview}
+          view={activeEntry?.presentation === 'html' ? undefined : pmViewForReview}
+          anchorTops={activeEntry?.presentation === 'html' ? htmlAnchorTops : undefined}
           layout="stacked"
           readOnly={reviewFollowerTab ? false : !ownerState?.liveEditingAvailable}
           reviewerAuthoring={durableReviewAvailable || reviewFollowerTab}
@@ -3212,7 +3454,8 @@
           onReplyComment={replyToReview}
         />
       </div>
-    {:else}
+    {:else if fixtureReviewHistory}
+      <p class="review-history-note">Live review adds presence and replies; saved feedback stays here.</p>
       {#each workspace.reviewCards as card (card.author + card.body)}
         <div class="review-card">
           <strong>{card.author} · {card.ageLabel}</strong>
@@ -3223,10 +3466,14 @@
           No review yet. Share this workspace to open an encrypted room around it.
         </p>
       {/each}
+    {:else if reviewProjection.replay === 'failed'}
+      <p class="review-empty">Saved review history could not load. Reopen this workspace to try again.</p>
+    {:else}
+      <p class="review-empty">No review yet. Share this workspace to open an encrypted room around it.</p>
     {/if}
   </BottomSheet>
 {/if}
 
-{#if ownerState?.roomId && ReviewApplyExpandComponent}
+{#if reviewRoomActive && ReviewApplyExpandComponent}
   <ReviewApplyExpandComponent onApplySuggestion={applyReviewedSuggestion} />
 {/if}

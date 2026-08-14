@@ -355,7 +355,17 @@ export class BrowserShareOwnerRelayClient {
     ciphertext: Uint8Array,
   ): Promise<ManagedShareSnapshotRef> {
     const path = `${this.sharePath()}/snapshots/${encodeURIComponent(fileId)}/${encodeURIComponent(snapshotId)}`;
-    const response = await this.ownerRequest('PUT', path, ciphertext, ciphertext);
+    // Keep signing bytes distinct from the Fetch BodyInit. A Uint8Array is a
+    // BodyInit in browsers, but Node's Fetch accepts it as an object and the
+    // owner request helper would otherwise use the object when hashing the
+    // canonical request. An ArrayBuffer preserves the exact ciphertext on the
+    // wire while the explicit signing bytes remain a Uint8Array.
+    const response = await this.ownerRequest(
+      'PUT',
+      path,
+      ciphertext,
+      ciphertext.slice().buffer as ArrayBuffer,
+    );
     if (!response.ok) throw new BrowserShareOwnerRelayError(response.status, 'durable snapshot upload');
     const value = await response.json() as Partial<ManagedShareSnapshotRef>;
     return validateSnapshotRef(value);

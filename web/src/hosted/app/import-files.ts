@@ -27,6 +27,7 @@ interface DroppedFileEntry {
 }
 
 const MARKDOWN_EXTENSIONS = /\.(?:md|markdown)$/iu;
+const HTML_EXTENSIONS = /\.(?:html|htm)$/iu;
 const ZIP_EXTENSION = /\.zip$/iu;
 /** Per-file input cap: larger inputs are rejected, never silently truncated. */
 export const MAX_IMPORT_FILE_BYTES = 64 * 1024 * 1024;
@@ -121,7 +122,9 @@ export interface ZipEntryBudget {
 }
 
 export function kindForFile(name: string): WorkspaceEntryKind {
-  return MARKDOWN_EXTENSIONS.test(name) ? 'markdown' : 'asset';
+  if (MARKDOWN_EXTENSIONS.test(name)) return 'markdown';
+  if (HTML_EXTENSIONS.test(name)) return 'html';
+  return 'asset';
 }
 
 /**

@@ -15,10 +15,10 @@ import { BROWSER_OWNER_OFFLINE_STATUS } from '../../lib/review/browser-review-co
 
 /** How an entry may be presented. Safe raster types render inline; unknown or
  * active types are download-only. */
-export type EntryPresentation = 'editable' | 'preview' | 'download-only';
+export type EntryPresentation = 'editable' | 'html' | 'preview' | 'download-only';
 
 /** Entry kinds mirror the storage schema without importing it. */
-export type WorkspaceEntryKind = 'markdown' | 'asset';
+export type WorkspaceEntryKind = 'markdown' | 'html' | 'asset';
 
 export interface WorkspaceEntry {
   /** Normalized relative path within the workspace, e.g. `docs/notes.md`. */
@@ -64,6 +64,7 @@ export interface WorkspaceSummary {
   id: string;
   name: string;
   markdownCount: number;
+  htmlCount: number;
   assetCount: number;
   lastEditedLabel: string;
   sharing: SharingState;
@@ -108,6 +109,7 @@ export interface StorageHealth {
 export interface ShareScope {
   kind: 'workspace' | 'current-file' | 'selected';
   markdownCount: number;
+  htmlCount: number;
   assetCount: number;
   label: string;
 }
@@ -266,7 +268,11 @@ export interface LocalCollabJoinHandle {
  */
 export interface WorkspaceChange {
   workspaceId: string;
-  kind: 'content' | 'structure';
+  /**
+   * `review` carries no review plaintext: it is a cross-tab prompt for Desk
+   * to re-project the encrypted durable log and refresh its count pills.
+   */
+  kind: 'content' | 'structure' | 'review';
   path?: string;
 }
 
@@ -321,6 +327,12 @@ export interface WorkspaceAppService {
    * storage on delivery; the message itself carries no document content.
    */
   subscribeWorkspaceChanges(listener: (change: WorkspaceChange) => void): () => void;
+  /**
+   * Ring the advisory Desk doorbell after this tab's durable review
+   * projection changes. The receiving Desk always replays storage; the
+   * message itself contains neither review content nor event metadata.
+   */
+  announceReviewActivity(workspaceId: string): void;
   /**
    * Open the workspace review projection (attn-whdh): the ONE read path
    * every hosted tab — leader or follower — uses to materialize review

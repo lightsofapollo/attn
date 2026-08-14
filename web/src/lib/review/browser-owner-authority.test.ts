@@ -9,6 +9,7 @@ import type { AssembledBrowserEvent } from './browser-envelope';
 import type { BrowserCollabCheckpoint } from './browser-collab-checkpoint';
 import {
   BrowserOwnerAuthorityService,
+  type BrowserOwnerAuthorityFile,
   type BrowserPublishedEpochTerminalPort,
   type BrowserOwnerAuthorityLeaseManager,
   type BrowserOwnerAuthorityRollover,
@@ -281,7 +282,7 @@ function fixture(overrides: {
     onRequired: NonNullable<BrowserOwnerAuthorityRollover['onRequired']>;
   };
   attachedLease?: LeaseHandle;
-  files?: readonly typeof BINDING[];
+  files?: readonly BrowserOwnerAuthorityFile[];
   revisionBodies?: ReadonlyMap<string, Uint8Array>;
   now?: () => number;
   onState?: (state: BrowserOwnerAuthorityState, session: FakeSession | null) => void;
@@ -427,6 +428,27 @@ defineCase('corrupt checkpoint fails before owner transport construction', async
   const f = fixture({ checkpoint: corrupt });
   assertEqual(await f.service.start(), false, 'corrupt checkpoint rejected');
   assert(!f.events.includes('session:start'), 'transport started before checkpoint reconstruction');
+});
+
+defineCase('an HTML authority binding starts durable review without a Markdown collab seed', async () => {
+  const html = new TextEncoder().encode('<main><h1>Report</h1></main>');
+  const binding: BrowserOwnerAuthorityFile = {
+    fileId: 'file-owner-authority-html' as FileId,
+    path: 'report.html',
+    revisionId: 'revision-owner-authority-html',
+    contentHash: contentHash(html),
+    epoch: 'snapshot-owner-authority-html',
+    docType: 'html',
+  };
+  const f = fixture({
+    files: [binding],
+    revisionBodies: new Map([[binding.path, html]]),
+  });
+  assertEqual(await f.service.start(), true, 'HTML review authority starts');
+  assert(!f.events.includes('checkpoint:load'), 'HTML does not create a ProseMirror checkpoint');
+  await f.service.createComment({} as Anchor, 'Pin this chart');
+  assert(f.session().durableReviewCalls.includes('create'), 'HTML keeps durable comment authoring');
+  await f.service.close();
 });
 
 defineCase('startup rejects a lease that expires across preload await', async () => {

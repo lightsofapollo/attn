@@ -364,7 +364,9 @@ test('missing and malformed invite capabilities fail closed without relay contac
       .toBe('');
     const error = page.locator('[data-slot="browser-review-error"]');
     await expect(error).toHaveAttribute('data-error-kind', 'invite_invalid');
-    await expect(error.getByText('Invalid invite link', { exact: true })).toBeVisible();
+    await expect(error.getByRole('heading', { name: 'This review link is incomplete' })).toBeVisible();
+    await expect(error.getByRole('button', { name: 'Paste complete link' })).toBeVisible();
+    await expect(error).not.toContainText(/remembered room|no invite fragment/iu);
     // Negative network assertions need a bounded settle window so a future
     // delayed bootstrap task cannot schedule relay work just after the error
     // UI renders and escape the capture below.
@@ -755,7 +757,7 @@ test('native share opens in hosted reviewer without leaking plaintext or keys', 
   // Fragment-only keys are intentionally memory-only. A refresh after the
   // synchronous replaceState must fail closed instead of recovering a key.
   await page.reload({ waitUntil: 'domcontentloaded' });
-  await expect(page.getByText('Invalid invite link')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'This review link is incomplete' })).toBeVisible();
   await expect(page.getByText(contentCanary, { exact: false })).toHaveCount(0);
 
   // Re-open the invite and explicitly opt into encrypted local recovery.

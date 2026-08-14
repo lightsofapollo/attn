@@ -1006,6 +1006,7 @@ mod tests {
             block: None,
             context: None,
             structure: None,
+            html: None,
         }
     }
 
@@ -1256,6 +1257,7 @@ mod tests {
             block: None,
             context: None,
             structure: None,
+            html: None,
         };
         let op = SuggestionOperation::Replace {
             expected_text: "nonexistent token never appearing anywhere".into(),
@@ -2450,6 +2452,7 @@ second paragraph with new text inside
             block: None,
             context: None,
             structure: None,
+            html: None,
         };
         ReviewEventBody::SuggestionCreated {
             suggestion_id: suggestion_id.to_string(),

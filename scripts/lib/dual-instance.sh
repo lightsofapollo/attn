@@ -14,7 +14,7 @@
 #   source scripts/lib/dual-instance.sh
 #   trap stop_dual EXIT
 #   start_dual
-#   wait_for_dual 'h1'
+#   wait_for_dual_fixtures        # or: wait_for_dual 'h1' (markdown only)
 #   attn_owner    --click 'text=Suggest'
 #   attn_reviewer --fill '.composer textarea' 'fix the typo'
 #
@@ -33,7 +33,11 @@
 #   attn_owner      — run attn against the owner daemon
 #   attn_reviewer   — run attn against the reviewer daemon
 #   start_dual      — boot owner + reviewer; stash PIDs in env
-#   wait_for_dual   — block until both webviews respond to a selector
+#   wait_for_dual   — block until both webviews respond to ONE given selector
+#   wait_for_dual_fixtures
+#                   — same, but derive each window's selector from the fixture
+#                     it actually opened (use this unless both are markdown)
+#   dual_ready_selector — the readiness selector for a given fixture path
 #   stop_dual       — kill both daemons, remove both ATTN_HOMEs
 
 : "${ATTN_DUAL_OWNER:=/tmp/attn-dual-owner}"
@@ -127,6 +131,9 @@ start_dual() {
     # Resolve the reviewer fixture at call time so a caller that sets
     # ATTN_DUAL_FIXTURE after sourcing this lib still gets it as the default.
     local reviewer_fixture="${ATTN_DUAL_REVIEWER_FIXTURE:-$ATTN_DUAL_FIXTURE}"
+    # Stash what was actually booted so wait_for_dual_fixtures probes the right
+    # selector even if the caller mutates the env between the two calls.
+    ATTN_DUAL_REVIEWER_FIXTURE_RESOLVED="$reviewer_fixture"
 
     if [ ! -f "$ATTN_DUAL_FIXTURE" ]; then
         echo "dual-instance: fixture missing at $ATTN_DUAL_FIXTURE" >&2
@@ -169,6 +176,33 @@ wait_for_dual() {
     local timeout_ms="${2:-10000}"
     __attn_dual_wait_one "$ATTN_DUAL_OWNER"    "$selector" "$timeout_ms" || return 1
     __attn_dual_wait_one "$ATTN_DUAL_REVIEWER" "$selector" "$timeout_ms" || return 1
+}
+
+# The selector that proves a window has finished rendering a given fixture.
+#
+# `h1` works for markdown because markdown renders into the SHELL's own DOM.
+# An HTML document does not: it renders inside a sandboxed, opaque-origin
+# iframe (src=attn://… for a local file, srcdoc for a received snapshot), so
+# its <h1> lives in the frame's document and the automation bridge — which
+# evaluates in the shell's context — can never see it. Probing `h1` against an
+# .html fixture therefore ALWAYS times out on a window that rendered perfectly.
+# The viewer's own slot is the shell-visible equivalent.
+dual_ready_selector() {
+    case "${1:-}" in
+        *.html|*.htm) printf '%s' '[data-slot="html-viewer"]' ;;
+        *)            printf '%s' 'h1' ;;
+    esac
+}
+
+# Wait for both windows, each against the selector its OWN fixture warrants.
+# Prefer this over `wait_for_dual` whenever either side may open an .html file.
+wait_for_dual_fixtures() {
+    local timeout_ms="${1:-10000}"
+    local reviewer_fixture="${ATTN_DUAL_REVIEWER_FIXTURE_RESOLVED:-${ATTN_DUAL_REVIEWER_FIXTURE:-$ATTN_DUAL_FIXTURE}}"
+    __attn_dual_wait_one "$ATTN_DUAL_OWNER" \
+        "$(dual_ready_selector "$ATTN_DUAL_FIXTURE")" "$timeout_ms" || return 1
+    __attn_dual_wait_one "$ATTN_DUAL_REVIEWER" \
+        "$(dual_ready_selector "$reviewer_fixture")" "$timeout_ms" || return 1
 }
 
 stop_dual() {

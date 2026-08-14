@@ -10,6 +10,8 @@
 // network or the service worker — but the policy still refuses query strings
 // and unknown paths outright, so a future mistake fails closed.
 
+import { entryRequestPath, hostedEntryForPath } from './routes';
+
 export const SHELL_CACHE = 'attn-shell-v1';
 export const ASSET_CACHE = 'attn-assets-v1';
 
@@ -28,7 +30,7 @@ const STATIC_SHELL_FILES = new Set([
 
 export type FetchDecision =
   | { kind: 'asset-cache-first' }
-  | { kind: 'navigation-network-first'; shellPath: '/' | '/app/' | '/review/' }
+  | { kind: 'navigation-network-first'; shellPath: '/' | '/app/' | '/review/' | undefined }
   | { kind: 'bypass' };
 
 export function decideFetch(input: {
@@ -59,10 +61,9 @@ export function decideFetch(input: {
 }
 
 /** Which cached shell serves an offline navigation. */
-export function shellPathFor(pathname: string): '/' | '/app/' | '/review/' {
-  if (/^\/(?:review|s)(?:\/|$)/u.test(pathname)) return '/review/';
-  if (/^\/(?:app|open)(?:\/|$)/u.test(pathname)) return '/app/';
-  return '/';
+export function shellPathFor(pathname: string): '/' | '/app/' | '/review/' | undefined {
+  const entry = hostedEntryForPath(pathname);
+  return entry ? entryRequestPath(entry) : undefined;
 }
 
 /** A response may enter the shell cache only if it is a clean same-origin

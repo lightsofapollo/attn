@@ -15,7 +15,11 @@
 	bind:ref
 	data-slot="dialog-overlay"
 	class={cn(
-		"fixed inset-0 z-50 bg-black/50 transition-opacity duration-150 ease-out starting:opacity-0",
+		// 70%, not 50%: at half opacity the scrim barely separated a dialog from
+		// the INK theme, where the app surface is already near-black — the modal
+		// read as one more panel rather than the only thing to attend to. Still
+		// short of the shadcn default (80%), which crushes the paper theme.
+		"fixed inset-0 z-50 bg-black/70 transition-opacity duration-150 ease-out starting:opacity-0",
 		className
 	)}
 	{...restProps}

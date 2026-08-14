@@ -596,6 +596,44 @@ test.describe('HTML annotation runtime', () => {
   });
 
   /**
+   * Reviewability can be taken away while the chrome is on screen — the room is
+   * stopped or revoked, or its snapshot goes away. Refusing to raise NEW chrome
+   * is not enough: the chip handles its own clicks, so one left mounted goes on
+   * eating the page's clicks and proposing comments on a document that is no
+   * longer under review.
+   */
+  test('takes down chrome already on screen when inspection is revoked', async ({ page }) => {
+    await boot(page);
+    await inspect(page);
+    const frame = page.frameLocator('#doc');
+
+    await frame.locator('p.intro').hover();
+    await expect(frame.locator('.attn-chip')).toBeVisible();
+
+    await page.evaluate(() => {
+      (window as unknown as { __attn_send: (m: unknown) => void }).__attn_send({
+        type: 'inspect',
+        v: 1,
+        enabled: false,
+      });
+      (window as unknown as { __attn_clear: () => void }).__attn_clear();
+    });
+
+    await expect(frame.locator('.attn-chip')).toBeHidden();
+    await expect(frame.locator('.attn-outline')).toHaveCount(0);
+
+    // And the document has its own clicks back.
+    await frame.locator('#ping').click();
+    await page.waitForTimeout(200);
+    expect(await pageState(page)).toMatchObject({ clicks: 1 });
+    expect(
+      await page.evaluate(() =>
+        (window as unknown as { __attn_last: (t: string) => unknown }).__attn_last('scopePicked'),
+      ),
+    ).toBeNull();
+  });
+
+  /**
    * The reachable version of "a click committed to something the chip never
    * named": drag-select a sentence to read it, then click elsewhere to dismiss
    * the selection. Chrome is suppressed for the whole gesture, but by click

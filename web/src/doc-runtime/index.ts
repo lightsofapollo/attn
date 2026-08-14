@@ -838,9 +838,20 @@ function handleShellMessage(message: ShellMessage): void {
       pendingRange = null;
       hideSelectionPill();
       break;
-    case 'inspect':
-      inspectEnabled = message.enabled === true;
+    case 'inspect': {
+      const enabled = message.enabled === true;
+      // Turning inspection off has to take DOWN the chrome already on screen,
+      // not merely stop raising more. A stopped or revoked room leaves a
+      // visible chip whose own click handler bypasses `onDocumentClick` — so it
+      // would go on swallowing page clicks and emitting proposals for a
+      // document that is no longer reviewable.
+      if (inspectEnabled && !enabled) {
+        hideHover();
+        currentScopeId = null;
+      }
+      inspectEnabled = enabled;
       break;
+    }
     case 'theme':
       root.dataset.attnTheme = message.mode;
       break;

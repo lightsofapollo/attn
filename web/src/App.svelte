@@ -456,7 +456,20 @@
       return shareRoot ? shareTargetMatches(shareRoot, activePath) : true;
     });
     if (owned.length === 0) return null;
-    return owned.reduce((latest, snapshot) =>
+    // Overlapping shares (a folder share plus a separate share of the same
+    // file) can leave one document published in two owner rooms. Everything
+    // else on screen — the rail, the margin, `threadsForCurrentFile` — is
+    // scoped to the room this path resolves to, but the composer attaches to
+    // THIS snapshot's room, so picking purely by recency could post a comment
+    // into the review the person is not looking at, where it would never
+    // appear beside the text. The resolved room wins; recency only breaks ties
+    // within it, or decides when no room claims the path at all.
+    const preferredRoomId = ownerRoomIdForActivePath;
+    const scoped = preferredRoomId === null
+      ? owned
+      : owned.filter((snapshot) => snapshot.roomId === preferredRoomId);
+    const pool = scoped.length > 0 ? scoped : owned;
+    return pool.reduce((latest, snapshot) =>
       snapshot.createdAt > latest.createdAt ? snapshot : latest,
     );
   });

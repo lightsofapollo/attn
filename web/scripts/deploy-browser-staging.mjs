@@ -65,7 +65,23 @@ async function verifyBuild(expectedRelayOrigin) {
   return entryPath;
 }
 
+async function themePreflightSha256() {
+  // The worker's CSP allows the inline theme-preflight script by hash (see
+  // src/lib/hosted/csp.ts). Read the constant from its source of truth so the
+  // pinned policy below cannot drift from it again — hardcoding the old
+  // hash-less directive here is what made this verifier reject a healthy
+  // deploy.
+  const source = await readFile(
+    path.join(webRoot, 'src', 'lib', 'hosted', 'theme-preflight.ts'),
+    'utf8',
+  );
+  const match = source.match(/THEME_PREFLIGHT_SHA256 = '(sha256-[A-Za-z0-9+/=]+)'/u);
+  if (!match) throw new Error('THEME_PREFLIGHT_SHA256 not found in theme-preflight.ts');
+  return match[1];
+}
+
 async function verifyLiveDeployment(expectedWebOrigin, expectedRelayOrigin, expectedEntryPath) {
+  const preflightHash = await themePreflightSha256();
   const requiredCspDirectives = new Set([
     "default-src 'none'",
     "base-uri 'none'",
@@ -78,7 +94,7 @@ async function verifyLiveDeployment(expectedWebOrigin, expectedRelayOrigin, expe
     "manifest-src 'self'",
     "media-src 'self' blob: data:",
     "object-src 'none'",
-    "script-src 'self' 'wasm-unsafe-eval'",
+    `script-src 'self' 'wasm-unsafe-eval' '${preflightHash}'`,
     "style-src 'self' 'unsafe-inline'",
     "worker-src 'self'",
   ]);

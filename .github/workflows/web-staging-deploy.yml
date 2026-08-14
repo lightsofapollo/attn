@@ -26,7 +26,9 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          # web/ depends on wrangler 4.x, which requires Node >= 22; the deploy
+          # step dies with "Wrangler requires at least Node.js v22.0.0" on 20.
+          node-version: "22"
           cache: npm
           cache-dependency-path: web/package-lock.json
 

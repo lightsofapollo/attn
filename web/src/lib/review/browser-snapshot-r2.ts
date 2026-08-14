@@ -11,6 +11,7 @@ import {
 } from './browser-crypto';
 import { mintBrowserPowInWorker, type BrowserPowInputs } from './browser-pow';
 import type { MailboxEnvelope } from './browser-ws';
+import { decompressSnapshotIfNeeded } from './snapshot-compression';
 
 const EMPTY_BODY = new Uint8Array(0);
 const R2_BODY_OVERHEAD_BYTES = 24 + 16;
@@ -251,7 +252,17 @@ export async function resolveBrowserR2Snapshot(
       sealed = await fetchSealedBody(options, relay, path);
     }
 
-    if (sealed.length !== blobRef.byteLength + R2_BODY_OVERHEAD_BYTES) {
+    // The signed BlobRef describes the DECOMPRESSED canonical plaintext, but
+    // the owner compresses inside the R2 body seal when it wins
+    // (seal_snapshot_r2_body in src/review/envelope.rs), so the sealed body
+    // can only be bounded here — compress_if_smaller never grows the wire —
+    // and the exact byteLength/contentHash checks run after inflation.
+    // Comparing them against the pre-inflation wire made every R2-lane
+    // snapshot with compressible content fail integrity validation.
+    if (
+      sealed.length < R2_BODY_OVERHEAD_BYTES ||
+      sealed.length > blobRef.byteLength + R2_BODY_OVERHEAD_BYTES
+    ) {
       throw new Error('R2 snapshot failed integrity validation');
     }
 
@@ -261,6 +272,20 @@ export async function resolveBrowserR2Snapshot(
       recovered = aeadOpen(options.snapshotKey, nonce, ciphertext, aad);
     } catch {
       throw new Error('R2 snapshot failed integrity validation');
+    }
+
+    // The BlobRef's byteLength is the exact decompression ceiling: one byte
+    // over is already a mismatch, so the stream is cancelled rather than
+    // buffered past it.
+    let inflated: Uint8Array;
+    try {
+      inflated = await decompressSnapshotIfNeeded(recovered, blobRef.byteLength);
+    } catch {
+      throw new Error('R2 snapshot failed integrity validation');
+    }
+    if (inflated !== recovered) {
+      recovered.fill(0);
+      recovered = inflated;
     }
 
     if (

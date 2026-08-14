@@ -13,6 +13,7 @@ import {
   type ResolveBrowserR2SnapshotOptions,
 } from './browser-snapshot-r2';
 import type { MailboxEnvelope } from './browser-ws';
+import { compressSnapshotIfSmaller } from './snapshot-compression';
 
 const NOW = 1_700_000_000_000;
 const RELAY = 'https://relay.example.test';
@@ -196,6 +197,35 @@ test('v3 snapshot presign uses read-scoped admission and version-bound capabilit
     (calls[0]!.init.headers as Record<string, string>)['Attn-Admission']?.startsWith('v3.read.'),
     'v3 read-scoped presign header',
   );
+});
+
+test('opens a native vector whose sealed body holds the compressed wire', async () => {
+  // seal_snapshot_r2_body (src/review/envelope.rs) compresses INSIDE the seal
+  // when it wins, while the signed BlobRef describes the raw canonical
+  // plaintext. A resolver that validates byteLength/contentHash against the
+  // pre-inflation wire rejects every compressible R2 snapshot a real native
+  // owner publishes — which is exactly what shipped until this vector existed.
+  const raw = new TextEncoder().encode(
+    JSON.stringify({ docType: 'markdown', content: `# Compressible\n\n${'attn '.repeat(4000)}` }),
+  );
+  const compressed = await compressSnapshotIfSmaller(raw);
+  assert(compressed.length < raw.length, 'fixture must actually compress');
+  const vector = makeVector({
+    envelopeId: 'env-r2-gzip',
+    plaintext: compressed,
+    blobLength: raw.length,
+    blobHash: contentHash(raw),
+  });
+  let fetches = 0;
+  const result = await resolveBrowserR2Snapshot(
+    baseOptions(vector, async () => {
+      fetches += 1;
+      return fetches === 1
+        ? presign(`/v2/rooms/${ROOM}/blobs/${vector.wrapper.envelopeId}?cap=${CAP}`)
+        : binaryResponse(vector.sealed);
+    }),
+  );
+  equal([...result], [...raw], 'recovered bytes are the decompressed raw plaintext');
 });
 
 test('reuses a verified sealed cache entry without any network fetch', async () => {

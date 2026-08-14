@@ -2116,11 +2116,10 @@ fn inject_html_annotation_runtime(mut html: Vec<u8>) -> Vec<u8> {
     if let Some(index) = html
         .windows(needle.len())
         .rposition(|window| window.eq_ignore_ascii_case(needle))
+        && html[index..].contains(&b'>')
     {
-        if html[index..].contains(&b'>') {
-            html.splice(index..index, script.bytes());
-            return html;
-        }
+        html.splice(index..index, script.bytes());
+        return html;
     }
     html.extend_from_slice(script.as_bytes());
     html

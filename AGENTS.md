@@ -21,6 +21,10 @@ task dev
 task dev ATTN_PATH=tests/fixtures/basic.md
 ```
 
+For the marketing site (`site/`), use `task dev:site` — same HMR workflow against `site/src`.
+
+For the hosted browser app (desk, `/open` import page, review rooms), use `task dev:app` and visit `/open` — it proxies to the staging relay by default, so no local relay is needed.
+
 Optional overrides:
 
 * `DEV_HOST` (default `127.0.0.1`)

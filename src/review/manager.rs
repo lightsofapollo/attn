@@ -5666,7 +5666,13 @@ mod tests {
             update_sink,
         );
         let (notification_tx, notification_rx) = mpsc::channel();
-        let debounce = std::time::Duration::from_millis(15);
+        // The debounce is real wall-clock in a worker thread, and the property
+        // under test is that a room's burst folds into ONE notification. So the
+        // window has to outlast every scheduling hiccup between two events of
+        // the same room, on a CI runner running the rest of the suite beside
+        // it. At 15ms it did not: the window closed mid-burst and first_room
+        // posted "1 new comment" twice instead of "2 new comments" once.
+        let debounce = std::time::Duration::from_millis(500);
         manager.notifications = ReviewNotifications::new(
             Arc::clone(&store),
             Arc::new(ChannelSink(notification_tx)),
@@ -5686,12 +5692,18 @@ mod tests {
         // remote envelope. An empty view map models a resident daemon with no
         // window: every fresh remote attention event enters unread accounting
         // and the native notification coordinator.
-        for (room_id, event_id, thread_id) in [
+        // Every durable append happens BEFORE the burst, so what the debounce
+        // window has to cover is the forwarding alone. Appending inside the
+        // loop put a file write and an fsync between two events of the same
+        // room, which is the expensive part of this test and the thing most
+        // likely to outlast the window under load.
+        let imports = [
             (&first_room, "evt-resident-a1", "thread-a1"),
             (&second_room, "evt-resident-b1", "thread-b1"),
             (&first_room, "evt-resident-a2", "thread-a2"),
             (&muted_room, "evt-resident-muted", "thread-muted"),
-        ] {
+        ]
+        .map(|(room_id, event_id, thread_id)| {
             let mut event = verdicts_test_event(
                 room_id,
                 event_id,
@@ -5708,6 +5720,10 @@ mod tests {
                     .append_event(room_id, &event)
                     .expect("verified import is durable")
             );
+            (room_id, event)
+        });
+
+        for (room_id, event) in imports {
             forward_transport_event(
                 &manager.update_tx,
                 &manager.store,
@@ -5752,10 +5768,10 @@ mod tests {
 
         let posted = [
             notification_rx
-                .recv_timeout(std::time::Duration::from_secs(1))
+                .recv_timeout(debounce.saturating_mul(8))
                 .expect("first debounced native notification"),
             notification_rx
-                .recv_timeout(std::time::Duration::from_secs(1))
+                .recv_timeout(debounce.saturating_mul(8))
                 .expect("second debounced native notification"),
         ];
         let by_room = posted
@@ -5763,13 +5779,22 @@ mod tests {
             .map(|notification| (notification.room_id.clone(), notification))
             .collect::<std::collections::HashMap<_, _>>();
         assert_eq!(by_room.len(), 2, "bursts collapse independently per room");
-        assert!(by_room[&first_room].body.starts_with("2 new comments"));
+        // Named, because a split burst still yields two notifications from two
+        // rooms and passes the count above: the body is what says whether the
+        // fold happened.
+        assert!(
+            by_room[&first_room].body.starts_with("2 new comments"),
+            "first room's two comments must fold into one notification, got {:?}",
+            by_room[&first_room].body
+        );
         assert!(by_room[&second_room].body.starts_with("1 new comment"));
         assert!(!by_room.contains_key(&muted_room));
+        // Both batches have already fired, so the muted room's — enqueued last,
+        // and therefore due by now too — would arrive immediately if it were
+        // ever going to. One more window is a generous wait for a post that
+        // should never come.
         assert!(
-            notification_rx
-                .recv_timeout(debounce.saturating_mul(4))
-                .is_err(),
+            notification_rx.recv_timeout(debounce).is_err(),
             "muted room and burst duplicates must not post"
         );
 
@@ -5872,7 +5897,7 @@ mod tests {
         )));
         assert!(
             restart_notification_rx
-                .recv_timeout(debounce.saturating_mul(4))
+                .recv_timeout(debounce.saturating_mul(2))
                 .is_err(),
             "resident restart must not replay historical OS notifications"
         );

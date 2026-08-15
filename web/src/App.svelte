@@ -158,6 +158,7 @@
     shareTargetMatches,
   } from './lib/review/room-ui';
   import {
+    applyReviewHoverHighlight,
     clearPendingAnchorRange,
     pendingAnchorHighlightPlugin,
     requestReviewDecorationsRebuild,
@@ -567,6 +568,18 @@
     bridge.renderAnchors(anchors);
   });
 
+  // Card → document hover for HTML docs (attn-bb6t.3). The rail stores the
+  // hovered thread by ROOT EVENT id; the frame knows anchors by thread id.
+  $effect(() => {
+    const bridge = htmlBridge;
+    const hovered = reviewStore.hoveredEventId;
+    if (!bridge) return;
+    const thread = hovered === null
+      ? undefined
+      : reviewStore.threadsForCurrentFile.find((t) => t.rootEvent.meta.eventId === hovered);
+    bridge.setHoveredAnchor(thread?.id ?? null);
+  });
+
   // Debug/E2E mirror of the shell's own annotation wiring, in the same spirit
   // as `__attn_collab_debug__`. It exists because the daemon automation bridge
   // evaluates in the SHELL's context and cannot reach into the opaque-origin
@@ -674,6 +687,14 @@
     onAnchorActivated: (anchorId) => {
       const thread = reviewStore.threadsForCurrentFile.find((t) => t.id === anchorId);
       if (thread) reviewStore.setFocusEventId(thread.rootEvent.meta.eventId);
+    },
+    onAnchorHover: (anchorId) => {
+      // Document → card (attn-bb6t.3). An unknown id means "nothing", which
+      // is also what the frame sends on exit.
+      const thread = anchorId === null
+        ? undefined
+        : reviewStore.threadsForCurrentFile.find((t) => t.id === anchorId);
+      reviewStore.setHoveredEventId(thread?.rootEvent.meta.eventId ?? null);
     },
   };
 
@@ -1854,6 +1875,19 @@
     void reviewStore.focusEventId;
     if (!pmViewForReview) return;
     requestReviewDecorationsRebuild(pmViewForReview);
+  });
+
+  // Card → segment hover linking (attn-bb6t.2). Separate from the rebuild
+  // effect on purpose: this one runs on every mouseenter, and all it does is
+  // toggle a class on the marks for one thread. It also depends on the same
+  // inputs as the rebuild above so the class is re-applied after ProseMirror
+  // redraws the marks out from under it.
+  $effect(() => {
+    const hovered = reviewStore.hoveredEventId;
+    void reviewStore.anchorResolutions;
+    void reviewStore.events;
+    if (!pmViewForReview) return;
+    applyReviewHoverHighlight(pmViewForReview, hovered);
   });
 
   function emptyPlanStructure(): PlanStructure {

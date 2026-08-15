@@ -374,6 +374,7 @@ class FakeAuthority implements BrowserOwnerWorkspaceAuthority {
     throw new Error('not used');
   }
   async resolveComment(_threadId: string): Promise<ReviewEvent> { throw new Error('not used'); }
+  async reopenComment(_threadId: string): Promise<ReviewEvent> { throw new Error('not used'); }
   async retryOutbox(): Promise<void> {}
 
   /** Loss-only egress seam — recorded for cursor forwarding assertions. */

@@ -103,9 +103,11 @@ function compareEvents(a: ReviewEvent, b: ReviewEvent): number {
  *   * The thread root is the earliest comment in the thread by
  *     `meta.createdAt` (with `eventId` as tie-breaker for determinism).
  *   * Replies are every other comment in the thread, ordered the same way.
- *   * A `CommentResolved` flips its `threadId`; a `SuggestionAccepted` or
- *     `SuggestionRejected` flips its `suggestionId`. There is no un-resolve
- *     event in the spec today.
+ *   * A `CommentResolved` closes its `threadId` and a `CommentReopened`
+ *     reopens it; a `SuggestionAccepted` or `SuggestionRejected` closes its
+ *     `suggestionId`. Because resolve is reversible (attn-bb6t.4) these are
+ *     folded as LAST-WRITER-WINS in event order, not "any close wins" — see
+ *     `noteLifecycle` below.
  *   * `anchor` is the anchor authored on the root event; `null` only if
  *     the log was somehow built without a root comment.
  *   * `resolvedAnchor` is the latest verdict for the root event's id,
@@ -118,9 +120,29 @@ export function reconstructThreads(
   events: ReviewEvent[],
   anchorResolutions: Record<EventId, ReviewAnchorResolutionUpdate>,
 ): Thread[] {
-  // Bucket roots by their stable thread id, then collect lifecycle terminals.
+  // Bucket roots by their stable thread id, then collect lifecycle events.
   const commentsByThread = new Map<string, ReviewEvent[]>();
-  const resolvedThreadIds = new Set<string>();
+
+  // The winning open/closed verdict per thread. A Set of "closed ids" was
+  // enough while resolve was one-way; reopen makes the ORDER of these events
+  // load-bearing, and `events` is not guaranteed sorted (replay and live
+  // delivery interleave peers). So keep the latest lifecycle event by the
+  // same comparator that orders the log, and read its type at the end —
+  // resolve → reopen → resolve lands on resolved from any arrival order.
+  const lifecycleByThread = new Map<string, ReviewEvent>();
+
+  function noteLifecycle(threadId: string, event: ReviewEvent): void {
+    const prev = lifecycleByThread.get(threadId);
+    if (prev === undefined || compareEvents(prev, event) < 0) {
+      lifecycleByThread.set(threadId, event);
+    }
+  }
+
+  /** Closed unless the winning lifecycle event was a reopen. */
+  function isClosedByLifecycle(event: ReviewEvent | undefined): boolean {
+    if (event === undefined) return false;
+    return event.body.type !== 'comment_reopened';
+  }
 
   for (const event of events) {
     if (event.body.type === 'comment_created') {
@@ -141,8 +163,11 @@ export function reconstructThreads(
       } else {
         list.push(event);
       }
-    } else if (event.body.type === 'comment_resolved') {
-      resolvedThreadIds.add(event.body.threadId);
+    } else if (
+      event.body.type === 'comment_resolved'
+      || event.body.type === 'comment_reopened'
+    ) {
+      noteLifecycle(event.body.threadId, event);
     } else if (
       event.body.type === 'suggestion_accepted'
       || event.body.type === 'suggestion_rejected'
@@ -150,7 +175,8 @@ export function reconstructThreads(
       // Suggestions are threads keyed by suggestionId above. Their terminal
       // events must close that same thread in every projection; otherwise a
       // passive tab renders an already-accepted suggestion as live work.
-      resolvedThreadIds.add(event.body.suggestionId);
+      // (These have no inverse — only comment threads can reopen.)
+      noteLifecycle(event.body.suggestionId, event);
     }
   }
 
@@ -165,7 +191,7 @@ export function reconstructThreads(
       id: threadId,
       rootEvent,
       replies,
-      resolved: resolvedThreadIds.has(threadId),
+      resolved: isClosedByLifecycle(lifecycleByThread.get(threadId)),
       anchor: rootEventAnchor(rootEvent),
       resolvedAnchor: resolution !== undefined ? resolution.resolved : null,
     });

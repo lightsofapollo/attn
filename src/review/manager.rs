@@ -161,6 +161,10 @@ pub enum ReviewCommand {
     /// event so the resolution persists and propagates to every peer (a
     /// resolution is a shared fact, not a local view tweak).
     ResolveComment { room_id: RoomId, thread_id: String },
+    /// Reopen a resolved comment thread. Mints a durable `CommentReopened`
+    /// event; same reasoning as `ResolveComment` — reopening is a shared
+    /// fact, so it travels rather than living in one client's view state.
+    ReopenComment { room_id: RoomId, thread_id: String },
     /// Owner edited a shared file — republish a fresh snapshot so connected
     /// reviewers see the update. No-op when `path` isn't part of any share.
     PublishSnapshot { path: PathBuf },
@@ -1118,6 +1122,14 @@ impl ReviewManager {
                 return;
             }
             (
+                ReviewCommand::ReopenComment { room_id, thread_id },
+                Some(bootstrapper),
+                Some(_runtime),
+            ) => {
+                self.reopen_comment(bootstrapper, room_id, thread_id);
+                return;
+            }
+            (
                 ReviewCommand::SendCollab { room_id, payload },
                 Some(bootstrapper),
                 Some(_runtime),
@@ -1843,8 +1855,8 @@ impl ReviewManager {
     /// normal outbox path, so the resolution persists locally and propagates
     /// to peers. The frontend's `reconstructThreads` flips the thread's
     /// `resolved` flag off the same event, so the card collapses to its
-    /// resolved strip when the `EventImported` round-trips. Reopening is a
-    /// future `CommentReopened` event (not yet modeled).
+    /// resolved strip when the `EventImported` round-trips. The inverse is
+    /// [`Self::reopen_comment`], which mints `CommentReopened`.
     fn resolve_comment(&self, bootstrapper: &Arc<Bootstrapper>, room_id: &RoomId, thread_id: &str) {
         let emit_err = |msg: String| {
             (self.update_tx)(ReviewUpdate::Error {
@@ -1872,6 +1884,44 @@ impl ReviewManager {
 
         tracing::info!(
             "resolved comment thread {} (room={})",
+            thread_id,
+            room_id.as_str()
+        );
+    }
+
+    /// Reopen a resolved comment thread — the inverse of
+    /// [`Self::resolve_comment`] (attn-bb6t.4). Mints a durable
+    /// `CommentReopened` event carrying the reopener's participant id, so the
+    /// thread comes back for every peer rather than only in the clicking
+    /// client's view. Projections fold resolve/reopen in log order, so a
+    /// reopen after a resolve wins and a later resolve closes it again.
+    fn reopen_comment(&self, bootstrapper: &Arc<Bootstrapper>, room_id: &RoomId, thread_id: &str) {
+        let emit_err = |msg: String| {
+            (self.update_tx)(ReviewUpdate::Error {
+                room_id: Some(room_id.clone()),
+                code: "ATTN_REOPEN_COMMENT".to_string(),
+                message: msg,
+            });
+        };
+
+        let reopened_by = match bootstrapper
+            .config()
+            .identity_dir()
+            .and_then(|dir| crate::review::bootstrap::load_or_create_identity_in(&dir))
+        {
+            Ok(identity) => identity.typed_participant_id(),
+            Err(e) => return emit_err(format!("load identity: {e}")),
+        };
+
+        let body = crate::review::model::ReviewEventBody::CommentReopened {
+            thread_id: thread_id.to_string(),
+            reopened_by,
+        };
+        let send = bootstrapper.send_event_sync(room_id, body, unix_now_ms_for_manager());
+        self.emit_event_outcome(room_id.clone(), send);
+
+        tracing::info!(
+            "reopened comment thread {} (room={})",
             thread_id,
             room_id.as_str()
         );
@@ -3722,6 +3772,7 @@ fn review_command_name(cmd: &ReviewCommand) -> &'static str {
         ReviewCommand::ResolveAnchor { .. } => "ResolveAnchor",
         ReviewCommand::ReportHtmlAnchorResolution { .. } => "ReportHtmlAnchorResolution",
         ReviewCommand::ResolveComment { .. } => "ResolveComment",
+        ReviewCommand::ReopenComment { .. } => "ReopenComment",
         ReviewCommand::SendCollab { .. } => "SendCollab",
         ReviewCommand::PublishSnapshot { .. } => "PublishSnapshot",
         ReviewCommand::ReannounceIdentity => "ReannounceIdentity",
@@ -3901,6 +3952,10 @@ fn stub_update_for(cmd: &ReviewCommand) -> ReviewUpdate {
         ReviewCommand::ResolveComment { room_id, .. } => ReviewUpdate::RoomStatusChanged {
             room_id: room_id.clone(),
             status: "Pending resolve-comment — no bootstrap attached".to_string(),
+        },
+        ReviewCommand::ReopenComment { room_id, .. } => ReviewUpdate::RoomStatusChanged {
+            room_id: room_id.clone(),
+            status: "Pending reopen-comment — no bootstrap attached".to_string(),
         },
         // PublishSnapshot goes through the real bootstrap path in `submit`
         // when one is attached. Without a bootstrapper (smoke tests) it's a
@@ -4569,6 +4624,7 @@ fn review_event_body_name(body: &crate::review::model::ReviewEventBody) -> &'sta
         ReviewEventBody::SnapshotSuperseded { .. } => "snapshot_superseded",
         ReviewEventBody::CommentCreated { .. } => "comment_created",
         ReviewEventBody::CommentResolved { .. } => "comment_resolved",
+        ReviewEventBody::CommentReopened { .. } => "comment_reopened",
         ReviewEventBody::SuggestionCreated { .. } => "suggestion_created",
         ReviewEventBody::SuggestionAccepted { .. } => "suggestion_accepted",
         ReviewEventBody::SuggestionRejected { .. } => "suggestion_rejected",

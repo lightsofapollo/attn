@@ -54,6 +54,18 @@ const anchor = {} as never;
   check('resolving the same thread twice does not go negative', sink.counts().openComments, 1);
 }
 
+// Reopening puts the thread back in the open count (attn-bb6t.4).
+{
+  const sink = createReviewCountingSink();
+  sink.applyEvent(event({ type: 'comment_created', threadId: 't1', anchor, body: 'a' } as ReviewEventBody));
+  sink.applyEvent(event({ type: 'comment_resolved', threadId: 't1' } as ReviewEventBody));
+  check('resolved thread leaves the open count', sink.counts().openComments, 0);
+  sink.applyEvent(event({ type: 'comment_reopened', threadId: 't1' } as ReviewEventBody));
+  check('reopening restores the open count', sink.counts().openComments, 1);
+  sink.applyEvent(event({ type: 'comment_reopened', threadId: 't1' } as ReviewEventBody));
+  check('reopening twice does not double-count', sink.counts().openComments, 1);
+}
+
 // Pending suggestions are created minus accepted OR rejected — a rejected
 // suggestion is no longer waiting on the owner, which is what the row means.
 {

@@ -177,6 +177,9 @@
   let requestDecorationsRebuild = $state<
     typeof import('../../lib/prosemirror/review-decorations').requestReviewDecorationsRebuild | null
   >(null);
+  let applyHoverHighlight = $state<
+    typeof import('../../lib/prosemirror/review-decorations').applyReviewHoverHighlight | null
+  >(null);
   let ReviewApplyExpandComponent = $state<typeof ReviewApplyExpandComponentType | null>(null);
   let SelectionToolbarComponent = $state<typeof import('../../lib/SelectionToolbar.svelte').default | null>(null);
   let CommentComposerComponent = $state<typeof import('../../lib/CommentComposer.svelte').default | null>(null);
@@ -742,6 +745,7 @@
       ]).then(([editorModule, pmState, , decorationsModule]) => {
         EditorComponent = editorModule.default;
         requestDecorationsRebuild = decorationsModule.requestReviewDecorationsRebuild;
+        applyHoverHighlight = decorationsModule.applyReviewHoverHighlight;
         changeWatcher = [
           new pmState.Plugin({
             view: () => ({
@@ -933,6 +937,19 @@
     if (bridge) bridge.renderAnchors(htmlRenderableAnchors);
   });
 
+  // Card → document hover for HTML docs (attn-bb6t.3). The rail stores the
+  // hovered thread by ROOT EVENT id; the frame knows anchors by thread id.
+  $effect(() => {
+    const bridge = htmlBridge;
+    const store = reviewStoreRef;
+    const hovered = store?.hoveredEventId ?? null;
+    if (!bridge || !store) return;
+    const thread = hovered === null
+      ? undefined
+      : store.threadsForCurrentFile.find((item) => item.rootEvent.meta.eventId === hovered);
+    bridge.setHoveredAnchor(thread?.id ?? null);
+  });
+
   // Hover chrome is always live in an annotating frame; taking the CLICK — so
   // the page's own links stop firing — waits until the document is genuinely
   // reviewable.
@@ -987,6 +1004,14 @@
     onAnchorActivated: (anchorId) => {
       const thread = reviewStoreRef?.threadsForCurrentFile.find((item) => item.id === anchorId);
       if (thread) reviewStoreRef?.setFocusEventId(thread.rootEvent.meta.eventId);
+    },
+    onAnchorHover: (anchorId) => {
+      // Document → card (attn-bb6t.3). An unknown id means "nothing", which
+      // is also what the frame sends on exit.
+      const thread = anchorId === null
+        ? undefined
+        : reviewStoreRef?.threadsForCurrentFile.find((item) => item.id === anchorId);
+      reviewStoreRef?.setHoveredEventId(thread?.rootEvent.meta.eventId ?? null);
     },
   };
 
@@ -1226,6 +1251,22 @@
     const rebuild = requestDecorationsRebuild;
     if (!view || !rebuild) return;
     rebuild(view);
+  });
+
+  // Card → segment hover linking (attn-bb6t.2). Kept out of the rebuild
+  // effect above: it fires on every mouseenter and only toggles a class on
+  // one thread's marks. Reading resolutions/events re-applies it after a
+  // ProseMirror redraw, which discards the class.
+  $effect(() => {
+    const store = reviewStoreRef;
+    if (!store) return;
+    const hovered = store.hoveredEventId;
+    void store.anchorResolutions;
+    void store.events;
+    const view = pmViewForReview;
+    const apply = applyHoverHighlight;
+    if (!view || !apply) return;
+    apply(view, hovered);
   });
 
   function installOwnerSession(granted: EditingSession): void {
@@ -2161,6 +2202,13 @@
     service.announceReviewActivity(workspace.id);
   }
 
+  async function reopenReview(threadId: string): Promise<void> {
+    const currentSession = session ?? (await ensureOwnerSession());
+    if (!currentSession) throw new Error('Review authoring is unavailable.');
+    await currentSession.reopenComment(threadId);
+    service.announceReviewActivity(workspace.id);
+  }
+
   async function retryReviewDelivery(): Promise<void> {
     const currentSession = session;
     if (!currentSession) return;
@@ -3091,6 +3139,7 @@
         ? { accept: acceptSuggestion, reject: rejectSuggestion }
         : {}}
       onResolveComment={resolveReview}
+          onReopenComment={reopenReview}
       onReplyComment={replyToReview}
     />
   {:else if fixtureReviewHistory}
@@ -3485,6 +3534,7 @@
             ? { accept: acceptSuggestion, reject: rejectSuggestion }
             : {}}
           onResolveComment={resolveReview}
+          onReopenComment={reopenReview}
           onReplyComment={replyToReview}
         />
       </div>

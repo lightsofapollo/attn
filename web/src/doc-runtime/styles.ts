@@ -43,6 +43,12 @@ export const RUNTIME_STYLES = `
 ::highlight(attn-text-active) {
   background-color: oklch(0.80 0.16 82 / 52%);
 }
+/* Hover sits between base and active (attn-bb6t.3): strong enough to answer
+   "which segment is this card about?", quiet enough that it never reads as
+   the focused thread. */
+::highlight(attn-text-hover) {
+  background-color: oklch(0.81 0.15 84 / 42%);
+}
 
 /* Element overlay. The fill is inert so text underneath a commented element
    stays selectable — you can always comment on something inside something
@@ -62,6 +68,10 @@ export const RUNTIME_STYLES = `
 .attn-overlay[data-state="resolved"] {
   border-style: dashed;
   opacity: 0.55;
+}
+.attn-overlay[data-state="hovered"] {
+  border-color: color-mix(in oklch, var(--attn-element-accent) 85%, transparent);
+  background: color-mix(in oklch, var(--attn-element-accent) 13%, transparent);
 }
 
 /* Persistent marker for a committed comment: visible without hovering, so the
@@ -86,7 +96,8 @@ export const RUNTIME_STYLES = `
   transition: transform 120ms ease;
 }
 .attn-pin:hover,
-.attn-pin[data-state="active"] {
+.attn-pin[data-state="active"],
+.attn-pin[data-state="hovered"] {
   transform: scale(1.12);
 }
 .attn-pin[data-state="resolved"] {

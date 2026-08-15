@@ -1158,6 +1158,18 @@ export class BrowserSession {
     });
   }
 
+  /** Reopen a resolved thread (attn-bb6t.4) — same grant as resolving it. */
+  async reopenComment(threadId: string): Promise<ReviewEvent> {
+    if (this.state.grantTier === 'view') throw new Error('view grant cannot reopen comments');
+    if (threadId.length === 0) throw new Error('threadId cannot be empty');
+    const identity = this.requireIdentity();
+    return this.authorEvent({
+      type: 'comment_reopened',
+      threadId,
+      reopenedBy: identity.participantId,
+    });
+  }
+
   async createSuggestion(draft: SuggestionDraft): Promise<ReviewEvent> {
     if (this.state.grantTier !== 'suggest') {
       throw new Error('suggestion authoring requires suggest grant');

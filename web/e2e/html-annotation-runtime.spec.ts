@@ -145,6 +145,13 @@ async function selectText(page: import('@playwright/test').Page, needle: string)
   }, needle);
 }
 
+interface DocRectShape {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
 test.describe('HTML annotation runtime', () => {
   test('completes the handshake across an opaque-origin frame', async ({ page }) => {
     await boot(page);
@@ -701,6 +708,112 @@ test.describe('HTML annotation runtime', () => {
     await page.waitForTimeout(500);
 
     await expect(frame.locator('.attn-chip')).toBeHidden();
+  });
+
+  /**
+   * Card ↔ segment hover linking (attn-bb6t.3). A text-range highlight is a
+   * CSS Custom Highlight, not a DOM node, so it receives no events of its own
+   * — the runtime has to hit-test the range's rects against the pointer. This
+   * is the only place that geometry is exercised for real.
+   */
+  test('reports hover over a committed text-range anchor, and its exit', async ({ page }) => {
+    await boot(page);
+    const frame = page.frameLocator('#doc');
+    await page.evaluate(() => {
+      (window as unknown as { __attn_send: (m: unknown) => void }).__attn_send({
+        type: 'renderAnchors',
+        v: 1,
+        anchors: [
+          {
+            anchorId: 'ranged',
+            html: {
+              v: 1,
+              target: 'text_range',
+              cssSelector: 'p.intro',
+              context: { tagName: 'p', scopePreview: 'The quick brown fox' },
+            },
+            state: 'default',
+            quote: 'quick brown fox',
+          },
+        ],
+      });
+    });
+    await page.waitForFunction(() =>
+      (window as unknown as { __attn_last: (t: string) => unknown }).__attn_last('anchorsResolved'),
+    );
+
+    // Aim at the RANGE, not the paragraph: the highlight covers only the
+    // quoted phrase, and the frame reports its rects in frame coordinates,
+    // so they need the iframe's own offset to become page coordinates.
+    const rect = await page.evaluate(
+      () =>
+        (
+          window as unknown as {
+            __attn_last: (t: string) => { results: { rects: DocRectShape[] }[] };
+          }
+        ).__attn_last('anchorsResolved').results[0]!.rects[0]!,
+    );
+    const frameBox = (await page.locator('#doc').boundingBox())!;
+    await page.mouse.move(
+      frameBox.x + rect.x + rect.width / 2,
+      frameBox.y + rect.y + rect.height / 2,
+      { steps: 8 },
+    );
+    const entered = await page.waitForFunction(
+      () =>
+        (window as unknown as { __attn_last: (t: string) => { anchorId: string | null } | null })
+          .__attn_last('anchorHover')?.anchorId === 'ranged',
+    );
+    expect(await entered.jsonValue()).toBeTruthy();
+
+    // Leaving it must report null, or the shell keeps a card lit forever.
+    await page.mouse.move(
+      frameBox.x + rect.x + rect.width + 200,
+      frameBox.y + rect.y + rect.height / 2,
+      { steps: 8 },
+    );
+    const left = await page.waitForFunction(
+      () =>
+        (window as unknown as { __attn_last: (t: string) => { anchorId: string | null } | null })
+          .__attn_last('anchorHover')?.anchorId === null,
+    );
+    expect(await left.jsonValue()).toBeTruthy();
+  });
+
+  test('paints a hovered anchor distinctly from an active one', async ({ page }) => {
+    await boot(page);
+    const frame = page.frameLocator('#doc');
+    await page.evaluate(() => {
+      (window as unknown as { __attn_send: (m: unknown) => void }).__attn_send({
+        type: 'renderAnchors',
+        v: 1,
+        anchors: [
+          {
+            anchorId: 'pinned',
+            html: {
+              v: 1,
+              target: 'element',
+              cssSelector: '#title',
+              context: { tagName: 'h1', scopePreview: 'Quarterly report' },
+            },
+            state: 'default',
+            label: '1',
+          },
+        ],
+      });
+    });
+    await expect(frame.locator('.attn-overlay')).toHaveAttribute('data-state', 'default');
+
+    await page.evaluate(() => {
+      (window as unknown as { __attn_send: (m: unknown) => void }).__attn_send({
+        type: 'setAnchorState',
+        v: 1,
+        anchorId: 'pinned',
+        state: 'hovered',
+      });
+    });
+    await expect(frame.locator('.attn-overlay')).toHaveAttribute('data-state', 'hovered');
+    await expect(frame.locator('.attn-pin')).toHaveAttribute('data-state', 'hovered');
   });
 
   test('marks a dragged selection passive and a pressed pill explicit', async ({ page }) => {

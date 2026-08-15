@@ -43,8 +43,14 @@
             "snapshotId": "snap-vec-1",
             "baseHash": "hash-vec-1",
             "position": {
-              "byteRange": [0, 5],
-              "lineRange": [1, 1]
+              "byteRange": [
+                0,
+                5
+              ],
+              "lineRange": [
+                1,
+                1
+              ]
             }
           },
           "body": "hello"
@@ -70,7 +76,10 @@
           "authorId": "p-vec-2",
           "deviceId": "d-vec-2",
           "createdAt": 1700000001500,
-          "parentEventIds": ["evt-zzz", "evt-aaa"],
+          "parentEventIds": [
+            "evt-zzz",
+            "evt-aaa"
+          ],
           "snapshotId": "snap-vec-2"
         },
         "body": {
@@ -82,8 +91,14 @@
             "snapshotId": "snap-vec-2",
             "baseHash": "hash-vec-2",
             "position": {
-              "byteRange": [10, 14],
-              "lineRange": [3, 3]
+              "byteRange": [
+                10,
+                14
+              ],
+              "lineRange": [
+                3,
+                3
+              ]
             }
           },
           "operation": {
@@ -114,7 +129,9 @@
           "authorId": "p-vec-3",
           "deviceId": "d-vec-3",
           "createdAt": 1700000002000,
-          "parentEventIds": ["evt-parent-3"]
+          "parentEventIds": [
+            "evt-parent-3"
+          ]
         },
         "body": {
           "type": "comment_resolved",
@@ -171,7 +188,11 @@
           "authorId": "p-vec-5",
           "deviceId": "d-vec-5",
           "createdAt": 1700000004500,
-          "parentEventIds": ["evt-mid-5", "evt-aaa-5", "evt-zzz-5"],
+          "parentEventIds": [
+            "evt-mid-5",
+            "evt-aaa-5",
+            "evt-zzz-5"
+          ],
           "snapshotId": "snap-vec-5"
         },
         "body": {
@@ -185,6 +206,36 @@
         "canonicalSignedBytes": "{\"body\":{\"appliedRevisionId\":\"rev-vec-5\",\"resultingHash\":\"hash-after-apply-5\",\"suggestionId\":\"sug-vec-5\",\"type\":\"suggestion_accepted\"},\"meta\":{\"authorId\":\"p-vec-5\",\"createdAt\":1700000004500,\"deviceId\":\"d-vec-5\",\"parentEventIds\":[\"evt-aaa-5\",\"evt-mid-5\",\"evt-zzz-5\"],\"roomId\":\"room-vec-5\",\"snapshotId\":\"snap-vec-5\",\"v\":2}}",
         "signature": "doERvA05RpnAWdc5u1l2MZZQP2ZlpXXTds4ZHLh70w9m11mgOJSjahCXJrioirwj1jNr8vkXgFqmulTeA5zgBw",
         "signingKeyId": "tMHs6Jjs4k4k5gEjL5XGoYlxaJoN1mnm14IYU3whw4k"
+      }
+    },
+    {
+      "name": "CommentReopened with one parent — the resolve inverse (attn-bb6t.4); pins the reopen body shape",
+      "signingKey": {
+        "private": "ZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmZmY",
+        "public": "NLTZBDFWy23PC-sKKUm3VZyUDSvLbb6MU6mzAnjjp0Y"
+      },
+      "event": {
+        "meta": {
+          "v": 2,
+          "eventId": "placeholder-event-id-6",
+          "roomId": "room-vec-6",
+          "authorId": "p-vec-6",
+          "deviceId": "d-vec-6",
+          "createdAt": 1700000005000,
+          "parentEventIds": [
+            "evt-parent-6"
+          ]
+        },
+        "body": {
+          "type": "comment_reopened",
+          "threadId": "thr-vec-6",
+          "reopenedBy": "p-reopener-6"
+        }
+      },
+      "expected": {
+        "canonicalSignedBytes": "{\"body\":{\"reopenedBy\":\"p-reopener-6\",\"threadId\":\"thr-vec-6\",\"type\":\"comment_reopened\"},\"meta\":{\"authorId\":\"p-vec-6\",\"createdAt\":1700000005000,\"deviceId\":\"d-vec-6\",\"parentEventIds\":[\"evt-parent-6\"],\"roomId\":\"room-vec-6\",\"v\":2}}",
+        "signature": "79cQXHqjmkWD8oidDPTFbw2c80b-FT4oCzPYs0PbHOEdowA-g-OAREoPwBj07e_Wcx3xcgX4CqNxorUjJ3zmBw",
+        "signingKeyId": "97dnbJTffo_ZmY44-f_wTYWIsA0YAXZOPxh3o_6uRHc"
       }
     }
   ]

@@ -309,6 +309,37 @@ defineCase('counts bytes, not code units, for size limits', () => {
   assert(parsed === null, 'multi-byte payload slipped past the byte bound');
 });
 
+defineCase('accepts an anchorHover for a committed anchor', () => {
+  const parsed = parseDocMessage({
+    type: 'anchorHover',
+    v: DOC_PROTOCOL_VERSION,
+    anchorId: 'thread-42',
+  });
+  assert(parsed !== null, 'anchorHover was rejected');
+  assert(parsed.type === 'anchorHover', `expected anchorHover, got ${parsed.type}`);
+  assert(parsed.anchorId === 'thread-42', 'anchorId did not survive parsing');
+});
+
+defineCase('accepts a null anchorHover — the pointer left every anchor', () => {
+  const parsed = parseDocMessage({ type: 'anchorHover', v: DOC_PROTOCOL_VERSION, anchorId: null });
+  assert(parsed !== null, 'null anchorHover was rejected');
+  assert(parsed.type === 'anchorHover' && parsed.anchorId === null, 'null did not survive');
+});
+
+defineCase('rejects an oversized anchorHover id', () => {
+  const parsed = parseDocMessage({
+    type: 'anchorHover',
+    v: DOC_PROTOCOL_VERSION,
+    anchorId: 'x'.repeat(100_000),
+  });
+  assert(parsed === null, 'an unbounded anchorId slipped through');
+});
+
+defineCase('rejects a non-string, non-null anchorHover id', () => {
+  const parsed = parseDocMessage({ type: 'anchorHover', v: DOC_PROTOCOL_VERSION, anchorId: 7 });
+  assert(parsed === null, 'a numeric anchorId slipped through');
+});
+
 // ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------

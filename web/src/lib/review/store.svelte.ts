@@ -1080,6 +1080,18 @@ export class ReviewStore {
     this.locallyDismissed = next;
   }
 
+  /**
+   * Inverse of `dismissThreadLocally` — the optimistic half of Unresolve
+   * (attn-bb6t.4/.5). Without this the card stays hidden until the
+   * `CommentReopened` echo lands, so the click reads as a no-op.
+   */
+  restoreThreadLocally(threadId: string): void {
+    if (!this.locallyDismissed.has(threadId)) return;
+    const next = new Set(this.locallyDismissed);
+    next.delete(threadId);
+    this.locallyDismissed = next;
+  }
+
   /** Expand a resolved thread's chip into its full read-only card. Also
    *  expands the rail itself — clicking a chip in the collapsed gutter
    *  must surface the card, not expand it into 48px of hidden space. */

@@ -157,6 +157,9 @@ pub enum IpcMessage {
     #[serde(rename = "review_resolve_comment", rename_all = "camelCase")]
     ReviewResolveComment { room_id: RoomId, thread_id: String },
 
+    #[serde(rename = "review_reopen_comment", rename_all = "camelCase")]
+    ReviewReopenComment { room_id: RoomId, thread_id: String },
+
     #[serde(rename = "review_stop", rename_all = "camelCase")]
     ReviewStop {
         #[serde(default)]
@@ -570,6 +573,9 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
             }
             IpcMessage::ReviewResolveComment { room_id, thread_id } => {
                 submit_review_command(state, ReviewCommand::ResolveComment { room_id, thread_id });
+            }
+            IpcMessage::ReviewReopenComment { room_id, thread_id } => {
+                submit_review_command(state, ReviewCommand::ReopenComment { room_id, thread_id });
             }
             IpcMessage::ReviewStop { room_id } => {
                 submit_review_command(state, ReviewCommand::Stop { room_id });

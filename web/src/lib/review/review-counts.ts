@@ -96,6 +96,12 @@ export function createReviewCountingSink(): {
         case 'comment_resolved':
           openThreads.delete(body.threadId);
           break;
+        // Reopening puts the thread back in the open count (attn-bb6t.4).
+        // Safe to add unconditionally: the log always carries the
+        // comment_created that opened it, and the set is keyed by threadId.
+        case 'comment_reopened':
+          openThreads.add(body.threadId);
+          break;
         case 'suggestion_created':
           pending.add(body.suggestionId);
           break;

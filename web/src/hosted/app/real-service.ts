@@ -458,6 +458,7 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
       announceProfile: () => runtime.announceProfile(),
       replyToComment: (anchor, body, threadId) => runtime.replyToComment(anchor, body, threadId),
       resolveComment: (threadId) => runtime.resolveComment(threadId),
+      reopenComment: (threadId) => runtime.reopenComment(threadId),
       retryReviewOutbox: () => runtime.retryOutbox(),
       recoverReview: () => runtime.recoverReview(),
       inspectShare: () => runtime.inspectShare(browserReviewBase()),

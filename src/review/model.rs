@@ -1386,6 +1386,22 @@ pub enum ReviewEventBody {
         thread_id: String,
         resolved_by: ParticipantId,
     },
+    /// Reopen a resolved thread (attn-bb6t.4). Deliberately its own variant
+    /// rather than a `resolved: bool` on `CommentResolved`: the log is
+    /// append-only and every existing receiver already reads
+    /// `CommentResolved` as "this thread is closed", so flipping a field
+    /// would have changed the meaning of events already on disk. Projections
+    /// must therefore fold resolve/reopen in log order — last writer wins,
+    /// not "any resolve anywhere".
+    ///
+    /// Receivers older than this variant reject the event (the enum is
+    /// externally tagged and unknown tags fail to deserialize), so a reopen
+    /// in a mixed-version room is invisible to them and the thread stays
+    /// resolved on their side. Same compatibility family as attn-mz25.
+    CommentReopened {
+        thread_id: String,
+        reopened_by: ParticipantId,
+    },
     SuggestionCreated {
         suggestion_id: String,
         anchor: Anchor,

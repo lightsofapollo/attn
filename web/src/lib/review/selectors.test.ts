@@ -142,6 +142,26 @@ function makeResolve(threadId: string, createdAt: number): ReviewEvent {
   };
 }
 
+function makeReopen(threadId: string, createdAt: number): ReviewEvent {
+  return {
+    meta: {
+      v: 2,
+      eventId: makeEventId('evt-o'),
+      roomId: ROOM_A,
+      authorId: AUTHOR,
+      deviceId: 'd-alice',
+      createdAt,
+      parentEventIds: [],
+    },
+    body: {
+      type: 'comment_reopened',
+      threadId,
+      reopenedBy: AUTHOR,
+    },
+    auth: { signature: 'sig', signingKeyId: 'k' },
+  };
+}
+
 function makeSuggestion(suggestionId: string, createdAt: number): ReviewEvent {
   return {
     meta: {
@@ -354,6 +374,41 @@ defineCase('comment_resolved flips resolved=true on the matching thread only', (
   assert(
     unresolvedThreadCount(threads) === 1,
     `unresolved count should be 1, got ${unresolvedThreadCount(threads)}`,
+  );
+});
+
+defineCase('comment_reopened reopens a resolved thread (attn-bb6t.4)', () => {
+  const c1 = makeComment({ threadId: 't-1', createdAt: 100, anchor: anchorOn(FILE_1, SNAP_A, 0, 5) });
+  const threads = reconstructThreads([c1, makeResolve('t-1', 150), makeReopen('t-1', 200)], {});
+  const t1 = threads.find((t) => t.id === 't-1');
+  assert(t1 !== undefined, 't-1 must exist');
+  assert(t1.resolved === false, 't-1 must be open again after a reopen');
+  assert(
+    unresolvedThreadCount(threads) === 1,
+    `reopened thread must count as unresolved, got ${unresolvedThreadCount(threads)}`,
+  );
+});
+
+defineCase('resolve → reopen → resolve lands on resolved', () => {
+  const c1 = makeComment({ threadId: 't-1', createdAt: 100, anchor: anchorOn(FILE_1, SNAP_A, 0, 5) });
+  const threads = reconstructThreads(
+    [c1, makeResolve('t-1', 150), makeReopen('t-1', 200), makeResolve('t-1', 250)],
+    {},
+  );
+  assert(threads.find((t) => t.id === 't-1')?.resolved === true, 'last writer (resolve) must win');
+});
+
+defineCase('reopen wins over an EARLIER resolve delivered later (out-of-order log)', () => {
+  // The whole reason the fold compares events instead of trusting array
+  // order: replay and live delivery interleave peers, so a stale resolve can
+  // arrive after the reopen that superseded it.
+  const c1 = makeComment({ threadId: 't-1', createdAt: 100, anchor: anchorOn(FILE_1, SNAP_A, 0, 5) });
+  const reopen = makeReopen('t-1', 200);
+  const resolve = makeResolve('t-1', 150);
+  const threads = reconstructThreads([c1, reopen, resolve], {});
+  assert(
+    threads.find((t) => t.id === 't-1')?.resolved === false,
+    'the later-timestamped reopen must win regardless of arrival order',
   );
 });
 

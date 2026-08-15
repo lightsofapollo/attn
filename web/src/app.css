@@ -938,6 +938,28 @@
     text-decoration-thickness: 1px;
   }
 
+  /* ----- Card ↔ segment linking (attn-bb6t.2) -----
+     Both halves of the hover tie are painted here rather than baked into the
+     decoration set: the mark keeps whatever kind/confidence fill it already
+     has and gains a ring, so one rule covers comments, suggestions, deletions
+     and every confidence tier without inventing a second color per kind.
+     `box-decoration-break: clone` on the base classes makes the ring wrap
+     correctly around each line fragment of a multi-line range.
+
+     `is-hovered` is toggled directly on the mark DOM by
+     `applyReviewHoverHighlight` (hover must never rebuild decorations);
+     `is-focused` comes from the decoration set itself. Focus is declared last
+     so the stronger ring wins when a card is both hovered and focused. */
+  [data-event-id].is-hovered {
+    border-radius: 2px;
+    box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 42%, transparent);
+  }
+
+  [data-event-id].is-focused {
+    border-radius: 2px;
+    box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 72%, transparent);
+  }
+
   /* Inline ghost text for a proposed insertion/replacement — the editorial
      "suggesting mode" surface. Green to read as "added", slightly inset so
      it's visually distinct from the author's own prose. */

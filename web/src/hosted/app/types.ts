@@ -217,6 +217,8 @@ export interface EditingSession {
   announceProfile(): Promise<void>;
   replyToComment(anchor: Anchor, body: string, threadId: string): Promise<ReviewEvent>;
   resolveComment(threadId: string): Promise<ReviewEvent>;
+  /** Reopen a resolved thread (attn-bb6t.4). */
+  reopenComment(threadId: string): Promise<ReviewEvent>;
   retryReviewOutbox(): Promise<void>;
   /** Recreate a definitively expired live room under the stable share. */
   recoverReview(): Promise<void>;

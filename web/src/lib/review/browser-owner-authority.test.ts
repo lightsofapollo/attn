@@ -195,6 +195,10 @@ class FakeSession implements BrowserOwnerSession {
     this.durableReviewCalls.push(`resolve:${threadId}`);
     return {} as ReviewEvent;
   }
+  async reopenComment(threadId: string): Promise<ReviewEvent> {
+    this.durableReviewCalls.push(`reopen:${threadId}`);
+    return {} as ReviewEvent;
+  }
   async retryOutbox(): Promise<void> { this.durableReviewCalls.push('retry'); }
   async enqueuePublicationBatch(_envelopes: readonly MailboxEnvelope[]): Promise<number> {
     return 0;

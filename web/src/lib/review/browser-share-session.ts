@@ -163,6 +163,7 @@ export interface DurableLiveSession {
   createComment(anchor: Anchor, body: string, threadId?: string): Promise<ReviewEvent>;
   replyToComment(anchor: Anchor, body: string, threadId: string): Promise<ReviewEvent>;
   resolveComment(threadId: string): Promise<ReviewEvent>;
+  reopenComment(threadId: string): Promise<ReviewEvent>;
   createSuggestion(draft: SuggestionDraft): Promise<ReviewEvent>;
   retryOutbox?(): Promise<void>;
   /** Re-announce ParticipantJoined with the current display name. */
@@ -355,6 +356,13 @@ export class BrowserShareSession {
     this.requireWritable(resolution);
     if (!this.live) throw new Error('comments can only be resolved while the owner room is live');
     return this.live.resolveComment(threadId);
+  }
+
+  async reopenComment(threadId: string): Promise<ReviewEvent> {
+    const resolution = this.requireReady();
+    this.requireWritable(resolution);
+    if (!this.live) throw new Error('comments can only be reopened while the owner room is live');
+    return this.live.reopenComment(threadId);
   }
 
   async createSuggestion(draft: SuggestionDraft): Promise<ReviewEvent> {

@@ -141,10 +141,9 @@ export function zoomWindow(e: MouseEvent): void {
 // `rename_all = "camelCase"` on each variant — so the wire shape here is
 // `{ type: "review_*", camelCaseField: ... }`.
 //
-// Return type is `Promise<void>` for now: the Rust handlers in 2.9 are
-// `eprintln!` stubs and no response is wired back through the webview IPC
-// boundary. Real return-value wiring (snapshot ids, accept results) will be
-// added when `ReviewManager` lands in attn-nnj.2.8.
+// Every send is fire-and-forget, hence `Promise<void>`. Results (snapshot ids,
+// accept outcomes, errors) come back out-of-band on the `window.__attn__.review*`
+// callbacks, not as a return value.
 // ---------------------------------------------------------------------------
 
 export function reviewShare(
@@ -255,6 +254,16 @@ export function reviewReportHtmlAnchorResolution(
  */
 export function reviewResolveComment(roomId: RoomId, threadId: string): Promise<void> {
   send({ type: 'review_resolve_comment', roomId, threadId });
+  return Promise.resolve();
+}
+
+/**
+ * Reopen a resolved comment thread (attn-bb6t.4). The daemon mints a
+ * `CommentReopened` event; the projection folds it after the matching
+ * `CommentResolved`, so the thread returns to the open rail for every peer.
+ */
+export function reviewReopenComment(roomId: RoomId, threadId: string): Promise<void> {
+  send({ type: 'review_reopen_comment', roomId, threadId });
   return Promise.resolve();
 }
 

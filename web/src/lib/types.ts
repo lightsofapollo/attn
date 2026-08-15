@@ -161,6 +161,7 @@ export type IpcMessageType =
   | 'review_resolve_anchor'
   | 'review_html_anchor_resolution'
   | 'review_resolve_comment'
+  | 'review_reopen_comment'
   | 'review_set_display_name'
   | 'review_set_color'
   | 'review_stop'
@@ -340,6 +341,12 @@ export interface ReviewResolveCommentMessage {
   threadId: string;
 }
 
+export interface ReviewReopenCommentMessage {
+  type: 'review_reopen_comment';
+  roomId: RoomId;
+  threadId: string;
+}
+
 export interface ReviewSetDisplayNameMessage {
   type: 'review_set_display_name';
   /** Empty/whitespace clears the override back to the resolved default. */
@@ -403,6 +410,7 @@ export type IpcMessage =
   | ReviewResolveAnchorMessage
   | ReviewHtmlAnchorResolutionMessage
   | ReviewResolveCommentMessage
+  | ReviewReopenCommentMessage
   | ReviewSetDisplayNameMessage
   | ReviewSetColorMessage
   | ReviewStopMessage
@@ -996,6 +1004,21 @@ export interface CommentResolvedBody {
 }
 
 /**
+ * A resolved comment thread has been reopened (attn-bb6t.4) — the inverse of
+ * `CommentResolvedBody`, and its own event rather than a flag on the resolve,
+ * because the log is append-only.
+ *
+ * Projections must fold resolve and reopen in event order (last writer wins),
+ * not "any resolve closes the thread forever" — see `reconstructThreads`.
+ * @see planning/collab/data-model.md §Comment Events
+ */
+export interface CommentReopenedBody {
+  type: 'comment_reopened';
+  threadId: string;
+  reopenedBy: ParticipantId;
+}
+
+/**
  * Reviewer proposed an edit. Includes `expectedText` for apply-time safety.
  * @see planning/collab/data-model.md §Suggestion Events
  */
@@ -1071,6 +1094,7 @@ export type ReviewEventBody =
   | SnapshotSupersededBody
   | CommentCreatedBody
   | CommentResolvedBody
+  | CommentReopenedBody
   | SuggestionCreatedBody
   | SuggestionAcceptedBody
   | SuggestionRejectedBody

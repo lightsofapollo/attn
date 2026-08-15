@@ -171,6 +171,7 @@ export interface BrowserOwnerWorkspaceAuthority extends BrowserReviewTerminalPor
   announceProfile(): Promise<void>;
   replyToComment(anchor: Anchor, body: string, threadId: string): Promise<ReviewEvent>;
   resolveComment(threadId: string): Promise<ReviewEvent>;
+  reopenComment(threadId: string): Promise<ReviewEvent>;
   retryOutbox(): Promise<void>;
   /** Best-effort owner egress for a bounded local-tab ephemeral signal. */
   sendEphemera(signal: BrowserReviewEphemeraSignal): void;
@@ -693,6 +694,10 @@ export class BrowserOwnerWorkspaceRuntime {
 
   async resolveComment(threadId: string): Promise<ReviewEvent> {
     return this.requireDurableReviewAuthority().resolveComment(threadId);
+  }
+
+  async reopenComment(threadId: string): Promise<ReviewEvent> {
+    return this.requireDurableReviewAuthority().reopenComment(threadId);
   }
 
   async retryOutbox(): Promise<void> {

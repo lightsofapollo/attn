@@ -144,6 +144,12 @@ export interface AnnotationBridgeEvents {
   onGeometry?: (results: { anchorId: string; rects: ShellRect[] }[]) => void;
   /** The user clicked a pin or overlay chip in the document. */
   onAnchorActivated?: (anchorId: string) => void;
+  /**
+   * Pointer entered a committed anchor in the document, or left one
+   * (`anchorId: null`). Drives the document→card half of hover linking
+   * (attn-bb6t.3).
+   */
+  onAnchorHover?: (anchorId: string | null) => void;
 }
 
 /**
@@ -163,6 +169,8 @@ export class HtmlAnnotationBridge {
    * and port while the shell's review threads have not changed.
    */
   #rendered: RenderableAnchor[] | null = null;
+  /** Anchor currently painted as hovered, so it can be restored on exit. */
+  #hoveredAnchorId: string | null = null;
   /**
    * Retained for the same reason as `#rendered`: a reloaded frame boots with
    * inspection off, and a document that silently stopped answering clicks after
@@ -271,6 +279,9 @@ export class HtmlAnnotationBridge {
       case 'anchorActivated':
         this.#events.onAnchorActivated?.(message.anchorId);
         break;
+      case 'anchorHover':
+        this.#events.onAnchorHover?.(message.anchorId);
+        break;
       default:
         break;
     }
@@ -326,6 +337,33 @@ export class HtmlAnnotationBridge {
       v: DOC_PROTOCOL_VERSION,
       anchors: this.#rendered,
     });
+  }
+
+  /**
+   * Card → document hover (attn-bb6t.3). Owned by the bridge rather than each
+   * shell because un-hovering has to restore the anchor's BASE state, and the
+   * retained `#rendered` specs are the only record of what that was —
+   * `setAnchorState` overwrites the frame's copy, so a caller that forgot
+   * would leave a resolved anchor painted as unresolved.
+   *
+   * Deliberately not a `renderAnchors` re-send: that re-resolves every anchor
+   * in the document, which is far too much work for a mouseenter.
+   */
+  setHoveredAnchor(anchorId: string | null): void {
+    if (anchorId === this.#hoveredAnchorId) return;
+    const previous = this.#hoveredAnchorId;
+    this.#hoveredAnchorId = anchorId;
+    if (previous !== null) this.setAnchorState(previous, this.#baseStateOf(previous));
+    if (anchorId !== null) this.setAnchorState(anchorId, 'hovered');
+  }
+
+  /** The state an anchor should carry when it is not hovered. */
+  #baseStateOf(anchorId: string): AnchorRenderState {
+    const spec = this.#rendered?.find((anchor) => anchor.anchorId === anchorId);
+    // `hovered` is never a base state; if the last render said so, something
+    // raced and `default` is the safe floor.
+    if (!spec || spec.state === 'hovered') return 'default';
+    return spec.state;
   }
 
   setAnchorState(anchorId: string, state: AnchorRenderState): void {

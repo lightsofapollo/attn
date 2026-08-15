@@ -78,22 +78,21 @@ test('desktop editor reuses the native sidebar, editor, and review rail frame', 
   await expect(page.locator('.hosted-native-document .ProseMirror')).toBeVisible();
   await expect(page.locator('[data-action="edit"]')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Done', exact: true })).toHaveCount(0);
-  await expect(page.locator('[data-slot="right-rail"]')).toHaveCount(1);
   const savedReview = page.getByRole('button', { name: 'Saved review' });
   await expect(savedReview).toBeVisible();
   await expect(savedReview).toHaveAttribute('aria-expanded', 'false');
-  await expect(page.locator('[data-slot="right-rail"]')).toHaveAttribute('data-mode', 'collapsed');
+  await expect(page.locator('[data-slot="right-rail"]')).toHaveCount(0);
   await expect(page.locator('.review-history-placeholder')).toHaveCount(0);
   await savedReview.click();
   await expect(savedReview).toHaveAttribute('aria-expanded', 'true');
+  await expect(page.locator('[data-slot="right-rail"]')).toHaveAttribute('data-mode', 'expanded');
   await expect(page.locator('.review-history-placeholder')).toContainText('Saved review');
   await expect(page.locator('.review-history-placeholder')).toContainText('JULES');
   await expect(page.locator('.review-history-placeholder')).toContainText(
     'Live review adds presence and replies; saved feedback stays here.',
   );
-  // Saved review has its own docked column. It must reflow the document rather
-  // than floating over its reading surface; closing remains explicit in the
-  // same header that opened it.
+  // Saved review has its own docked column. It reflows the document only while
+  // explicitly open; closing removes the rail rather than retaining a gutter.
   await expect(page.getByRole('button', { name: 'Hide saved review' })).toBeVisible();
   const readingLayout = await page.evaluate(() => {
     const documentSurface = document.querySelector<HTMLElement>('.hosted-native-document');
@@ -112,6 +111,10 @@ test('desktop editor reuses the native sidebar, editor, and review rail frame', 
   expect(readingLayout.documentWidth).toBeGreaterThanOrEqual(600);
   expect(readingLayout.railWidth).toBeGreaterThanOrEqual(300);
   await page.screenshot({ path: 'test-results/hosted-saved-review-docked.png' });
+  await page.getByRole('button', { name: 'Hide saved review' }).click();
+  await expect(page.locator('[data-slot="right-rail"]')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Saved review' }).click();
+  await expect(page.locator('[data-slot="right-rail"]')).toHaveAttribute('data-mode', 'expanded');
   // 1024px is still the desktop workspace (the phone layout begins below the
   // app's 900px breakpoint). The dock must shrink the reading measure rather
   // than force a horizontal canvas or slide back over the prose.

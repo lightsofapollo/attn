@@ -24,6 +24,9 @@ import {
   shareScopeLabel,
   type ConnectionState,
 } from './share-chip-model';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import type { SharedFile } from './review/shared-tree';
 import type { ReviewStatus } from './types';
 
@@ -57,6 +60,11 @@ function assert(cond: boolean, msg: string): asserts cond {
 function file(name: string, relPath: string): SharedFile {
   return { fileId: `f-${name}`, name, displayPath: `/tmp/${relPath}`, relPath, dir: '' };
 }
+
+const shareChipSource = fs.readFileSync(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), 'ShareChip.svelte'),
+  'utf8',
+);
 
 // ---------------------------------------------------------------------------
 // 1-4: state → presentation
@@ -133,6 +141,11 @@ defineCase('reviewer label is the status word', () => {
 defineCase('pre-room (sheet open, nothing minted) the chip reads Share', () => {
   const label = shareChipLabel(true, SHARE_CHIP_DESCRIPTORS.offline, [], false);
   assert(label === 'Share', `got "${label}"`);
+});
+
+defineCase('compact presentation keeps the complete share state accessible', () => {
+  assert(shareChipSource.includes('title={hasActiveRoom ?'), 'the full state must remain a hover title');
+  assert(shareChipSource.includes("iconOnly ? 'sr-only' : 'truncate'"), 'the compact label must remain screen-reader text');
 });
 
 // ---------------------------------------------------------------------------

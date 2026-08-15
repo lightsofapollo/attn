@@ -51,8 +51,9 @@
      * that rarely changes. The connection glyph still distinguishes the three
      * states without colour, and the full label, the status word and the file
      * count all stay in the accessible name / `title` / sr-only slots, so the
-     * standing disclosure survives the collapse. Text surfaces (hosted owner
-     * header) leave this off.
+     * standing disclosure survives the collapse. Both native and hosted owner
+     * headers opt into it; full labels remain available in the title and
+     * screen-reader-only content.
      */
     compact?: boolean;
   }

@@ -79,17 +79,12 @@
   // FileTree receive the narrow resolver contract, never the native registry.
   const hostedFileIconResolver = createHostedFileIconResolver();
   // Saved review is durable content, not evidence of an active connection.
-  // Keep it discoverable in the document header while leaving its overlay
-  // closed by default: an unsolicited overlay would conceal the document
-  // beneath it on wide screens.
+  // Keep it discoverable in the document header, but do not reserve a gutter
+  // until the person explicitly opens that history.
   let savedHistoryOpen = $state(false);
-  const railVisible = $derived(reviewStore.railMode !== 'hidden' || reviewHistoryAvailable);
+  const railVisible = $derived(reviewStore.railMode !== 'hidden' || savedHistoryOpen);
   const effectiveRailMode = $derived(
-    reviewStore.railMode === 'hidden'
-      ? savedHistoryOpen
-        ? 'expanded'
-        : 'collapsed'
-      : reviewStore.railMode,
+    savedHistoryOpen ? 'expanded' : reviewStore.railMode,
   );
   // Reading wins over visual stability in the hosted owner workspace. A
   // durable review is a deliberate secondary task; when it opens, reserve a
@@ -313,6 +308,7 @@
         {onJumpTo}
         railToggle={true}
         inline={true}
+        compactShare={true}
       />
     </div>
   </header>
@@ -343,10 +339,9 @@
         {@render content()}
       </div>
       {#if railVisible}
-        <!-- The collapsed rail is a compact, in-flow marker gutter. Opening
-             saved or live review expands this same column in flow: cards do
-             not sit over the paper, and the header keeps an explicit close
-             action in the user's eye-line. -->
+        <!-- A closed live or saved review mounts no rail at all. Opening either
+             deliberately adds this in-flow column, and its header retains an
+             explicit close action in the user's eye-line. -->
         <aside
           class="right-rail sticky top-0 flex flex-col self-start"
           style={`flex: 0 0 ${dockedRailWidth}px; height: ${railViewportHeight > 0 ? `${railViewportHeight}px` : '100dvh'};`}
@@ -362,11 +357,11 @@
           <div
             class="review-rail-panel mb-2 flex-1"
             style="--review-overlay-top: 0.5rem; --review-overlay-bottom: 0.5rem;"
-            data-expanded={effectiveRailMode !== 'collapsed'}
+            data-expanded={effectiveRailMode === 'expanded'}
             data-layout="docked"
             id="saved-review-margin"
           >
-            {#if reviewStore.railMode !== 'hidden' || savedHistoryOpen}
+            {#if railVisible}
               {@render rail()}
             {/if}
           </div>

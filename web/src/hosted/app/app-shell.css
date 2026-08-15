@@ -508,11 +508,6 @@
   text-overflow: ellipsis;
 }
 
-.editor-top .save-state {
-  color: var(--hosted-muted);
-  font: 0.7rem var(--mono);
-}
-
 .mobile-workspace-title {
   max-width: min(48vw, 12rem);
   overflow: hidden;
@@ -954,70 +949,6 @@
   font-size: 0.7rem;
 }
 
-.hosted-save-state {
-  max-width: 13rem;
-  overflow: hidden;
-  color: var(--muted-foreground);
-  font: 500 0.7rem/1.2 var(--mono);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* Save-state chip: a pill carrying the local-first "on this device" status
-   with a status dot (green saved / amber in-flight / rust needs-attention).
-   Restores the prototype's editor-polish save chip. */
-.save-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 9px 3px 8px;
-  border: 1px solid color-mix(in oklch, var(--rule) 70%, transparent);
-  border-radius: 9999px;
-  font: 500 0.7rem/1.2 var(--sans);
-  color: var(--hosted-muted);
-  white-space: nowrap;
-}
-.save-chip::before {
-  content: "";
-  flex: none;
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--green);
-  transition: background-color 160ms var(--ease);
-}
-.save-chip[data-save-state="Saving…"]::before,
-.save-chip[data-save-state="Owner offline · Review still available"]::before {
-  background: var(--amber-deep);
-}
-.save-chip[data-save-state="Storage needs attention"]::before {
-  background: var(--rust);
-}
-/* Desktop variant: match the ShareChip's metrics exactly — same 1.75rem
-   pill height, same 11px sans, and the same -0.75rem pull-up the breadcrumb
-   share icon uses, so the save chip and the ReviewBar chips sit on ONE
-   line at one size instead of two mismatched pills (user feedback). */
-.hosted-save-state.save-chip {
-  height: 1.75rem;
-  /* Stable footprint: the text swaps between "Saving…" and "Saved on this
-     device" on every autosave cycle — without a floor the pill resized and
-     the whole right-hand chip cluster shuffled per keystroke. */
-  min-width: 9.25rem;
-  justify-content: center;
-  /* Seats the chip on the shared header line: the breadcrumb action
-     buttons (share / open-in-browser) and the ReviewBar chips both center
-     at ~25px; the chip's own container sits 1.7px higher, hence the
-     fractional nudge. Measured, not derived. */
-  margin-top: 9.5px;
-  padding: 0 10px;
-  font-family: var(--sans);
-  font-size: 11px;
-  max-width: 15rem;
-}
-@media (prefers-reduced-motion: reduce) {
-  .save-chip::before { transition: none; }
-}
-
 /* iOS view-only reassurance banner. Calm steel-blue (an intentional
    design-system addition — distinct from rust=action and green=saved) with a
    FULL border, not the prototype's banned left-stripe. Body stays --ink for
@@ -1204,12 +1135,6 @@
   font-size: 0.7rem;
 }
 
-/* The owner header is an accent plane. The saved-state chip is intentionally
-   quiet, but it still has to retain AA contrast against that plane. */
-[data-slot='owner-header'] .hosted-save-state.save-chip {
-  color: var(--primary-foreground);
-}
-
 .hosted-delete-confirm {
   display: grid;
   gap: 0.35rem;
@@ -1383,18 +1308,6 @@
   .doc-active .masthead-doc {
     opacity: 1;
     transform: none;
-  }
-
-  /* Chip stays a pill, sized to the exact height of the Share button so
-     the masthead reads as one aligned row of controls. */
-  .editor-top .save-chip {
-    flex: none;
-    height: 2rem;
-    padding: 0 10px;
-    gap: 5px;
-    font-size: 0.7rem;
-    letter-spacing: 0.015em;
-    max-width: 45vw;
   }
 
   .editor-top .share-action .button {

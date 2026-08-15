@@ -1,13 +1,12 @@
 // Rail-mode derivation for the review right rail (attn-d7y, reworked by
 // attn-42y).
 //
-// In a review room the rail is ALWAYS present and user-collapsible: it is
-// either `expanded` (320px — cards + labeled resolved chips) or `collapsed`
-// (48px gutter — author-avatar chips for unresolved threads, ✓ chips for
-// resolved ones). The toggle (ReviewBar button / Cmd+J) flips `panelOpen`;
-// the default is expanded only while unresolved comments exist (App.svelte
-// auto-open effect). Outside a review room the rail keeps its historical
-// behavior: hidden unless the user opens it explicitly.
+// In a review room the rail is a binary user-controlled surface: `expanded`
+// (cards) or `hidden` (no gutter, border, or reserved width). The toggle
+// (ReviewBar button / Cmd+J) flips `panelOpen`. A legacy `collapsed` width is
+// retained for the resolved-chip redesign, but the shared toggle no longer
+// derives it: its avatar/marker gutter must not consume document width while
+// the rail is closed.
 //
 // Kept pure so both `App.svelte` (width) and `ReviewMargin.svelte` (chip
 // variant) derive from one decision, and so the rule is testable without
@@ -107,12 +106,12 @@ export const COLLAPSED_RAIL_TOP_CLEARANCE = 8;
 export function computeRailMode(input: {
   /** True when a review room is active (`currentRoomId !== null`). */
   inReviewRoom: boolean;
-  /** User-controlled open/collapsed state (ReviewBar toggle / Cmd+J). */
+  /** User-controlled open/hidden state (ReviewBar toggle / Cmd+J). */
   panelOpen: boolean;
 }): RailMode {
   // No room, no rail — panelOpen is meaningless outside a review context
   // (it now DEFAULTS to open, so this gate is what keeps roomless
   // workspaces rail-free).
   if (!input.inReviewRoom) return 'hidden';
-  return input.panelOpen ? 'expanded' : 'collapsed';
+  return input.panelOpen ? 'expanded' : 'hidden';
 }

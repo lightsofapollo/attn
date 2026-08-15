@@ -356,11 +356,10 @@ export class ReviewStore {
   );
 
   /**
-   * Rail display mode: `hidden` | `collapsed` | `expanded`. In a review
-   * room the rail is always at least a collapsed gutter; `panelOpen`
-   * (ReviewBar toggle / Cmd+J) expands it. `App.svelte` maps this to the
-   * aside width; `ReviewMargin` maps it to the chip variant. See
-   * `./rail-mode.ts` for the rule.
+   * Rail display mode: `hidden` | `collapsed` | `expanded`. The shared
+   * toggle derives a binary expanded/hidden state, so closing removes the
+   * aside rather than retaining a marker gutter. `collapsed` remains for the
+   * pending resolved-chip redesign only. See `./rail-mode.ts` for the rule.
    */
   railMode: RailMode = $derived(computeRailMode({
     inReviewRoom: this.currentRoomId !== null,

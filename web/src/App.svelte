@@ -130,6 +130,7 @@
   import { consumePendingRoomFocus } from './lib/review/pending-room-focus';
   import ReviewMargin from './lib/ReviewMargin.svelte';
   import BrandMark from './lib/BrandMark.svelte';
+  import SaveChip from './lib/SaveChip.svelte';
   import { brandPlacement, reservesWindowControls } from './lib/shell';
   import {
     SAVE_STATE_AUTOSAVED,
@@ -3810,64 +3811,13 @@
              glyph — a label on the region is not a content change, so an
              aria-label-only chip would flip from saved to dirty in total
              silence. Same "never dropped, only hidden" rule ShareChip uses. -->
-        <span
-          class="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground"
-          data-slot="native-save-chip"
-          data-state={editorDirty ? 'dirty' : 'saved'}
-          data-autosave={autosaveHeld ? 'held' : 'armed'}
-          role="status"
+        <SaveChip
+          dataSlot="native-save-chip"
+          label={saveChipLabel}
           title={saveChipTitle}
-        >
-          <!-- `save-check` / `save-pen`, vendored from Lucide (ISC) rather
-               than imported: this repo pins @lucide/svelte 0.561, which
-               predates both icons — they arrive in 1.x, and a major bump of
-               the icon library for one glyph is not worth the regression
-               surface across the ~100 icons the app imports. Paths are
-               verbatim from lucide 1.29.0; see lucide.dev/icons/save-check.
-               Keeping BOTH states in the save family (disk + check / disk +
-               pen) means they differ by glyph, not just tint.
-
-               The SAVED glyph carries `--primary` (attn-bw2h.8) — a sanctioned
-               role under the One Pencil Rule's carve-out (DESIGN.md, added
-               2026-08-07): this chip is the one piece of chrome that reports
-               where the user's work lives, which is the product's whole claim.
-               Dirty keeps `--amber-deep`. Both states are tinted, so tint is
-               not the signal either way; the glyph is. Contrast on the
-               header's own `--header-surface` plane (2026-08-09): saved
-               4.14:1 in Paper / 7.08:1 in Ink, probe-measured — a 14px
-               2px-stroke glyph owes the 1.4.11 non-text 3:1, so both clear
-               with room; the dirty amber sits higher still. Current numbers
-               come from reading-palette.spec.ts, which sweeps the header.
-
-               No border and no fill, deliberately: the header's active-control
-               convention (attn-11g4.6) is tint + `bg-primary/10` + a
-               `border-primary/35` hairline arriving together, and this chip is
-               a `role="status"`, not a button. It must not borrow the pill. -->
-          {#if editorDirty}
-            <svg
-              class="size-3.5 text-amber-deep" viewBox="0 0 24 24" fill="none"
-              stroke="currentColor" stroke-width="2" stroke-linecap="round"
-              stroke-linejoin="round" aria-hidden="true"
-            >
-              <path d="M13.33 13H8a1 1 0 0 0-1 1v7" />
-              <path d="M14.363 17.634a2 2 0 0 0-.506.854l-.837 2.87a.5.5 0 0 0 .62.62l2.87-.837a2 2 0 0 0 .854-.506l4.013-4.009a1 1 0 1 0-3.004-3.004z" />
-              <path d="M7 3v4a1 1 0 0 0 1 1h7" />
-              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h10.2a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4v.3" />
-            </svg>
-          {:else}
-            <svg
-              class="size-3.5 text-primary" viewBox="0 0 24 24" fill="none"
-              stroke="currentColor" stroke-width="2" stroke-linecap="round"
-              stroke-linejoin="round" aria-hidden="true"
-            >
-              <path d="M12.5 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h10.2a2 2 0 0 1 1.4.6l3.8 3.8a2 2 0 0 1 .6 1.4v4.35" />
-              <path d="m16 19 2 2 4-4" />
-              <path d="M17 15.13V14a1 1 0 0 0-1-1H8a1 1 0 0 0-1 1v7" />
-              <path d="M7 3v4a1 1 0 0 0 1 1h7" />
-            </svg>
-          {/if}
-          <span class="sr-only" data-slot="native-save-chip-label">{saveChipLabel}</span>
-        </span>
+          state={editorDirty ? 'saving' : 'saved'}
+          autosave={autosaveHeld ? 'held' : 'armed'}
+        />
       {/if}
       {#if showBreadcrumbShare}
         <button

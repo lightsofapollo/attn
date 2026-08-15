@@ -342,10 +342,9 @@ defineCase('expanded-rail chip visibility respects the >5 pill threshold', () =>
     showAllResolved || N <= threshold;
   assert(chipsVisible(false) === false, 'expanded + 8 resolved → pill hides chips');
   assert(chipsVisible(true) === true, 'expanded + show-all → chips visible');
-  // And the rail itself is collapsed-by-default in a room until the user
-  // (or the unresolved auto-open) expands it.
+  // Closing a room's rail now removes its marker gutter entirely.
   const mode = computeRailMode({ inReviewRoom: true, panelOpen: false });
-  assert(mode === 'collapsed', `room + closed panel is collapsed, got ${mode}`);
+  assert(mode === 'hidden', `room + closed panel is hidden, got ${mode}`);
 });
 
 defineCase('51 threads → virtualized to ~10 in DOM at default 600px viewport', () => {

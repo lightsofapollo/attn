@@ -226,11 +226,8 @@
   const pushCapable = 'getPushConsentState' in session && 'setPushConsentObserver' in session &&
     'enablePushFromUserGesture' in session && 'disablePushFromUserGesture' in session;
   let pushConsent = $state<BrowserPushConsentState>({ status: pushCapable ? 'checking' : 'unsupported', message: null, enabled: false });
-  // Reading is the default mode (comment-layout-alternatives.md): the
-  // margin boots as the 48px marker gutter; Review (the full card band) is
-  // entered by choice — 💬/⌘J, clicking a marker or highlight, composing.
-  // Comments are visible by default (floating margin cards — Docs grammar).
-  // The dock toggle still hides them for a clean reading pass.
+  // Review begins open so incoming feedback is visible. The shared toggle is
+  // binary: closing removes the entire margin, and opening restores it.
   reviewStore.panelOpen = true;
 
   // Phones get the document full-width; threads move behind a thumb control
@@ -251,8 +248,8 @@
   // ---------------------------------------------------------------------------
 
   // Reading/Review mode lives on the shared review store (panelOpen /
-  // railMode) so ReviewMargin's collapsed marker-gutter UI and the owner
-  // surface share one grammar (comment-layout-alternatives.md).
+  // railMode) so owner, reviewer, and native share the same zero-width closed
+  // state.
   let railAutoOpenedRoom = $state<string | null>(null);
   const currentThreadCount = $derived(reviewStore.threadsForCurrentFile.length);
   // Room-wide, not per-file: in a multi-file share the header toggle is the
@@ -1684,17 +1681,10 @@
                 />
               {/if}
             </div>
-            {#if (displayedDocType !== 'html' || htmlAnnotatable) && desktopLayout}
-              <!-- Reserved for the whole life of the SURFACE, not the thread
-                   set: the review page is always commentable, so the first
-                   comment must not shift the document left (Docs rule — the
-                   page never moves). Empty margin is just paper. -->
-              <!-- The aside reserves ONLY the 48px marker gutter, permanently.
-                   Review mode renders the card column as an elevated overlay
-                   panel anchored to this aside's right edge
-                   (.review-rail-panel in styles/base.css) — the document
-                   never re-wraps on toggle
-                   (planning/collab/review-band-stability.md, option A). -->
+            {#if (displayedDocType !== 'html' || htmlAnnotatable) && desktopLayout && railVisible}
+              <!-- The review aside exists only while open. Closing removes the
+                   gutter and its border so the document receives the full row
+                   again; reopening restores the review surface. -->
               <aside
                 class="browser-review-margin sticky top-0 self-start"
                 style="height: calc(100dvh - 2.75rem); flex: 0 0 48px;"

@@ -63,6 +63,10 @@ test('landing hash intent creates without any dialog', async ({ page }) => {
     'data-save-state',
     'Changes autosaved',
   );
+  await expect(page.locator('[data-slot="hosted-save-chip"]')).toHaveAttribute(
+    'title',
+    'Changes autosaved on this device',
+  );
 });
 
 test('desktop editor fills the canvas and has no edit mode toggle', async ({ page }) => {
@@ -189,7 +193,7 @@ test('desktop Markdown formatting is keyboard-correct and supports input rules',
   await expect(editor.locator('h1')).toContainText('Heading from Markdown');
 });
 
-test('the workspace drop target adds dropped Markdown files', async ({ page }) => {
+test('the workspace drop target opens dropped Markdown files', async ({ page }) => {
   // The desk redesign removed page-level drag-import (files come in via the
   // Import workspace picker or the in-workspace dropzone). This gate covers
   // the surviving contract: dropping Markdown on the workspace dropzone
@@ -205,6 +209,26 @@ test('the workspace drop target adds dropped Markdown files', async ({ page }) =
     target.dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer: transfer }));
   });
   await expect(page.getByRole('button', { name: 'added.md', exact: true })).toBeVisible();
+  await expect(page).toHaveURL(/\/added\.md$/u);
+  await expect(documentEditor(page)).toContainText('Added note');
+});
+
+test('the mobile Files add flow opens its imported document', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto('/app#new');
+
+  await page.locator('.thumb-dock').getByRole('button', { name: 'Files' }).click();
+  const files = page.getByRole('dialog', { name: 'Files' });
+  const chooser = page.waitForEvent('filechooser');
+  await files.getByRole('button', { name: '＋ Add file or asset' }).click();
+  await (await chooser).setFiles({
+    name: 'phone-note.md',
+    mimeType: 'text/markdown',
+    buffer: Buffer.from('# Imported on mobile'),
+  });
+
+  await expect(page).toHaveURL(/\/phone-note\.md$/u);
+  await expect(documentEditor(page)).toContainText('Imported on mobile');
 });
 
 test('returning from mobile reader mode restores desktop editing', async ({ page }) => {
@@ -565,10 +589,9 @@ test('multi-file workspace: create, add, context-rename, context-delete, and exp
     'base64',
   );
   await (await chooser).setFiles([{ name: 'pixel.png', mimeType: 'image/png', buffer: png }]);
-  await expect(page.getByRole('button', { name: 'pixel.png' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'pixel.png', exact: true })).toBeVisible();
+  await expect(page).toHaveURL(/\/pixel\.png$/u);
   await expect(page.locator('[data-degraded="lease-denied"]')).toHaveCount(0);
-  await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true');
-  await page.getByRole('button', { name: 'pixel.png' }).click();
   await expect(page.locator('.asset-image')).toBeVisible();
   const naturalWidth = await page
     .locator('.asset-image')

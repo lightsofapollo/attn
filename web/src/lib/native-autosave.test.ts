@@ -396,6 +396,10 @@ const appSource = fs.readFileSync(
   path.join(path.dirname(fileURLToPath(import.meta.url)), '../App.svelte'),
   'utf8',
 );
+const saveChipSource = fs.readFileSync(
+  path.join(path.dirname(fileURLToPath(import.meta.url)), 'SaveChip.svelte'),
+  'utf8',
+);
 
 defineCase('App.svelte drives one autosave path, not two', () => {
   assert(appSource.includes('new NativeAutosave('), 'the native window must own a controller');
@@ -501,8 +505,8 @@ defineCase('every document-replacing call site funnels through replaceDocument',
 
 defineCase('the save chip says the thing this epic made true', () => {
   assert(
-    appSource.includes('Changes autosaved'),
-    'the native chip must carry the unified save vocabulary',
+    appSource.includes("from './lib/SaveChip.svelte'"),
+    'the native header must use the shared save chip',
   );
   assert(
     !appSource.includes("editorDirty ? 'Unsaved changes' : 'Saved on this device'"),
@@ -512,7 +516,7 @@ defineCase('the save chip says the thing this epic made true', () => {
   // announces the CONTENT that changed, and an aria-label is not content, so
   // an aria-label-only chip flips state in total silence.
   assert(
-    appSource.includes('data-slot="native-save-chip-label"'),
+    saveChipSource.includes('class="sr-only"') && saveChipSource.includes('data-slot={`${dataSlot}-label`}'),
     'the sr-only live-region text must survive the copy change',
   );
 });

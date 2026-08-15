@@ -12,18 +12,20 @@ const source = (relative: string): string => fs.readFileSync(path.join(libDir, r
 const app = source('../App.svelte');
 const frame = source('WorkspaceEditorFrame.svelte');
 const hostedFrame = source('../hosted/app/HostedDesktopWorkspaceFrame.svelte');
+const hostedShell = source('../hosted/app/EditorShell.svelte');
+const saveChip = source('SaveChip.svelte');
 
 assert(app.includes('{#snippet nativeHeader()}'), 'native app must own one in-flow header');
 assert(app.includes('data-slot="native-header"'), 'native header needs a stable automation slot');
-// One save vocabulary across surfaces (attn-yzsa.2). This was 'Saved on this
-// device' until desktop autosave landed; the mobile masthead renders the hosted
-// SaveState union, so the two move together or the parity this file exists to
-// guard is gone.
-assert(app.includes('Changes autosaved'), 'native save copy must match the mobile masthead');
+// One shared chip preserves the canonical label in a title and real sr-only
+// content rather than rendering it as an always-visible header pill.
+assert(app.includes("from './lib/SaveChip.svelte'"), 'native must use the shared save chip');
+assert(hostedShell.includes("from '../../lib/SaveChip.svelte'"), 'hosted must use the shared save chip');
+assert(saveChip.includes('title={title}') && saveChip.includes('class="sr-only"'), 'save copy must stay available');
 assert(app.includes('railToggle={true}'), 'native comments toggle must live in the shared header');
 assert(app.includes('inline={true}'), 'native ReviewBar must render in header flow');
 assert(
-  app.indexOf('data-slot="native-save-chip"') < app.indexOf('data-slot="native-header-share"'),
+  app.indexOf('dataSlot="native-save-chip"') < app.indexOf('data-slot="native-header-share"'),
   'native status must precede Share in the right-side action cluster',
 );
 
@@ -36,6 +38,12 @@ assert(frame.includes('{#if railToggleInHeader}'), 'rail-local toggle must colla
 assert(
   hostedFrame.indexOf('{@render actions()}') < hostedFrame.indexOf('data-slot="owner-header-share"'),
   'hosted desktop must keep status and Share together like mobile and native',
+);
+assert(hostedFrame.includes('compactShare={true}'), 'hosted desktop Share must be compact like native');
+assert(
+  hostedFrame.includes("reviewStore.railMode !== 'hidden' || savedHistoryOpen")
+    && !hostedFrame.includes("reviewStore.railMode !== 'hidden' || reviewHistoryAvailable"),
+  'saved history must not pin a closed 48px rail',
 );
 
 // --- Cluster reconciliation (attn-o17v) -------------------------------------
@@ -80,16 +88,16 @@ assert(
   reviewerToggle.includes('border-transparent'),
   'the reviewer rail toggle must rest as a borderless ghost',
 );
+assert(
+  reviewApp.includes('desktopLayout && railVisible'),
+  'the reviewer rail aside must unmount when its toggle closes',
+);
 
-// The ShareChip decision is asymmetric ON PURPOSE (attn-64iy.6 scope note):
-// the COMPACT variant is a member of an icon cluster and rests as a ghost
-// (header-icon-states.test.ts pins that); the TEXT variant on the hosted
-// owner header is a labelled chip in a wide bar, where the border IS its
-// legibility. Pin the exemption so nobody "unifies" it in either direction.
+// Header share controls are icon-cluster members on both owner surfaces.
 const shareChip = source('ShareChip.svelte');
 assert(
-  shareChip.includes("'border-primary/30 bg-primary/5 text-primary hover:bg-primary/10'"),
-  'the text ShareChip keeps its bordered treatment — a deliberate, documented exemption',
+  shareChip.includes('Both native and hosted owner') && shareChip.includes('title and'),
+  'the ShareChip contract must document compact hosted parity and retained disclosure',
 );
 
 console.log('  ok  native/mobile header grammar stays aligned');

@@ -40,6 +40,8 @@ const source = (relative: string): string =>
 const app = source('../App.svelte');
 const badge = source('SnapshotBadge.svelte');
 const shareChip = source('ShareChip.svelte');
+const saveChip = source('SaveChip.svelte');
+const hostedFrame = source('../hosted/app/HostedDesktopWorkspaceFrame.svelte');
 
 defineCase('the snapshot control uses file-clock, not a camera', () => {
   assert(
@@ -112,6 +114,10 @@ defineCase('the compact share chip obeys the same resting-ghost rule', () => {
     shareChip.includes("'border-primary/30 bg-primary/5 text-primary hover:bg-primary/10'"),
     'the non-compact text variant keeps its own bordered treatment',
   );
+  assert(
+    hostedFrame.includes('compactShare={true}'),
+    'the hosted owner header must use the compact share variant too',
+  );
 });
 
 defineCase('active state is reported programmatically, not just painted', () => {
@@ -143,14 +149,12 @@ defineCase('the save-status glyph stays non-interactive', () => {
   // Ambiguity resolved (attn-11g4.6): the reporter's crop was the save chip,
   // but it is a live region reporting document state — it has no surface to
   // open, so it gets no pressed state and no click target.
-  const chip = app.slice(
-    app.indexOf('data-slot="native-save-chip"'),
-    app.indexOf('data-slot="native-save-chip-label"'),
-  );
-  assert(chip.length > 0, 'the native save chip must still exist');
-  assert(chip.includes('role="status"'), 'the save chip stays a live region');
-  assert(!chip.includes('aria-pressed'), 'a status region has no pressed state');
-  assert(!chip.includes('onclick'), 'the save chip must not become a control by accident');
+  assert(app.includes('dataSlot="native-save-chip"'), 'the native header must render the shared chip');
+  assert(saveChip.includes('role="status"'), 'the save chip stays a live region');
+  assert(saveChip.includes('title={title}'), 'the full state must remain available on hover');
+  assert(saveChip.includes('class="sr-only"'), 'the full state must remain available to screen readers');
+  assert(!saveChip.includes('aria-pressed'), 'a status region has no pressed state');
+  assert(!saveChip.includes('onclick'), 'the save chip must not become a control by accident');
 });
 
 let failed = 0;

@@ -1,13 +1,24 @@
 # Review band open/close: killing the width reshuffle
 
-Status: option A approved by James and shipped (2026-07-20, attn-wac5) —
-the aside keeps a permanent 48px gutter and Review mode renders as an
-elevated overlay panel (`.review-rail-panel`, styles/base.css) on both
-the owner frame and the /s/ page. Originally: options for discussion.
+Status: superseded by the 2026-08-15 product decision (attn-is2m.3).
+The review toggle is binary: open renders the full review rail; closed renders
+no rail, marker gutter, border, or reserved width. The document re-wraps into
+the recovered space. This applies to native, hosted owner, and browser reviewer
+surfaces. The permanent-48px-gutter rationale below is historical only and
+must not be reinstated.
 Follow-up to
 `comment-layout-alternatives.md` — the Reading/Review mode shipped, but
 James's verdict on the remaining seam: *"when open it reshuffles the
 layout width and again when closed which makes it look awkward."*
+
+## Current decision
+
+Closing review is a true close, not a collapsed marker strip. Reopening keeps
+the persisted expanded rail width; only the expanded state is resizable. Saved
+review history stays discoverable from the hosted header, but it cannot pin a
+48px rail while closed.
+
+## Historical context (superseded)
 
 ## The problem, measured (staging, 1300px window)
 
@@ -58,11 +69,7 @@ but it permanently returns the ~270px the marker-gutter redesign
 reclaimed for the document. This is the pre-redesign geometry with
 extra steps — listed for completeness.
 
-## Recommendation
+## Historical recommendation (superseded)
 
-**A**, with B as a progressive enhancement if very-wide-monitor
-occlusion ever annoys. It keeps every ruling intact — document
-left-anchored, gutter permanently reserved, markers at anchor height —
-and makes document geometry a pure function of the viewport, never of
-review state. Composer, focus-follow, toasts, and the mobile sheet are
-unaffected (the sheet already overlays).
+**A** was the prior recommendation. It is superseded by the current binary
+open/closed decision above; do not use this section as implementation guidance.

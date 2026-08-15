@@ -49,10 +49,10 @@ defineCase('expanded only inside a review room (panelOpen now defaults open)', (
   );
 });
 
-defineCase('collapsed gutter when in a review room with the panel closed', () => {
+defineCase('a closed panel fully hides the rail even in a review room', () => {
   assert(
-    computeRailMode({ inReviewRoom: true, panelOpen: false }) === 'collapsed',
-    'review room + closed → collapsed (rail always present in a room)',
+    computeRailMode({ inReviewRoom: true, panelOpen: false }) === 'hidden',
+    'review room + closed → hidden (no marker gutter)',
   );
 });
 
@@ -69,10 +69,9 @@ defineCase('width mapping: hidden 0, collapsed 48, expanded 320', () => {
   assert(RAIL_WIDTH_PX.expanded === 320, 'expanded → 320px');
 });
 
-defineCase('collapsed-gutter clearance is small breathing room (header is structural)', () => {
-  // The rail starts below the app header and owns its toggle row in
-  // App.svelte, so the chip clearance is only inner padding / the pin
-  // position for anchor-less threads — not dock avoidance.
+defineCase('legacy collapsed-gutter clearance stays scoped to resolved-chip layout', () => {
+  // `collapsed` is not emitted by the shared toggle, but the resolved-chip
+  // redesign still imports this layout constant.
   assert(
     COLLAPSED_RAIL_TOP_CLEARANCE > 0 && COLLAPSED_RAIL_TOP_CLEARANCE <= 16,
     'clearance is breathing room, not dock clearance',

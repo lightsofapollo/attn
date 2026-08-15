@@ -23,6 +23,7 @@ import {
   RAIL_WIDTH_MIN_PX,
   RAIL_WIDTH_PX,
   clampRailWidth,
+  computeRailMode,
   railResizeMax,
 } from './rail-mode';
 
@@ -77,6 +78,14 @@ defineCase('the bounds are a usable range around the default', () => {
   // The rail must be able to grow, not only shrink; a max at the default would
   // make the whole feature a shrink control.
   assert(RAIL_WIDTH_MAX_PX > RAIL_WIDTH_PX.expanded, 'the rail must be able to widen');
+});
+
+defineCase('closing the rail reaches zero width without rewriting its saved expanded width', () => {
+  const chosenWidth = clampRailWidth(480);
+  const closed = computeRailMode({ inReviewRoom: true, panelOpen: false });
+  assertEq(closed, 'hidden', 'closed review room maps to hidden');
+  assertEq(RAIL_WIDTH_PX[closed], 0, 'hidden rail takes no document width');
+  assertEq(clampRailWidth(chosenWidth), chosenWidth, 'the persisted expanded width survives reopening');
 });
 
 defineCase('clamp holds the bounds and rounds to whole pixels', () => {

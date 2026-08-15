@@ -117,6 +117,11 @@ defineCase('both surfaces consume the module', () => {
     read('hosted/app/autosave.ts').includes('SAVE_STATE_AUTOSAVED'),
     'the hosted autosave controller must emit the shared constants',
   );
+  assert(
+    read('hosted/app/EditorShell.svelte').includes('SAVE_STATE_AUTOSAVED_TITLE')
+      && read('hosted/app/EditorShell.svelte').includes('<SaveChip'),
+    'the hosted header must pass canonical copy to the shared icon chip',
+  );
 });
 
 let failed = 0;

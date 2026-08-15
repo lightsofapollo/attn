@@ -1,6 +1,12 @@
 <script lang="ts">
   import { tick, untrack } from 'svelte';
-  import { SAVE_STATE_AUTOSAVED, SAVE_STATE_SAVING } from '../../lib/save-state-copy';
+  import {
+    SAVE_STATE_AUTOSAVED,
+    SAVE_STATE_AUTOSAVED_TITLE,
+    SAVE_STATE_SAVING,
+    SAVE_STATE_STORAGE_ATTENTION,
+  } from '../../lib/save-state-copy';
+  import SaveChip from '../../lib/SaveChip.svelte';
   import type { EditorView } from 'prosemirror-view';
   import BottomSheet from './BottomSheet.svelte';
   import DegradedBanner from './DegradedBanner.svelte';
@@ -227,6 +233,19 @@
     if (!state.liveEditingAvailable) return 'Live review paused';
     return null;
   });
+  const saveChipLabel = $derived(ownerRoomStatus ?? saveState);
+  const saveChipTitle = $derived(
+    ownerRoomStatus ?? (saveState === SAVE_STATE_AUTOSAVED ? SAVE_STATE_AUTOSAVED_TITLE : saveState),
+  );
+  const saveChipState = $derived(
+    ownerRoomStatus !== null
+      ? 'status'
+      : saveState === SAVE_STATE_STORAGE_ATTENTION
+        ? 'attention'
+        : saveState === SAVE_STATE_SAVING
+          ? 'saving'
+          : 'saved',
+  );
   const sharingActive = $derived(
     ownerState?.roomId !== null && ownerState?.roomId !== undefined,
   );
@@ -623,8 +642,11 @@
   async function importFiles(files: Iterable<File>): Promise<void> {
     railError = null;
     try {
-      await service.addAssetFiles(workspace.id, toImportFiles(await expandPicked(await filesToPicked(files))));
-      if (onWorkspaceChanged) await onWorkspaceChanged();
+      const importedFiles = toImportFiles(await expandPicked(await filesToPicked(files)));
+      await service.addAssetFiles(workspace.id, importedFiles);
+      const openPath = importedFiles.find((file) => file.kind === 'markdown' || file.kind === 'html')?.path
+        ?? importedFiles[0]?.path;
+      if (onWorkspaceChanged) await onWorkspaceChanged(openPath);
       else window.location.reload();
     } catch (error) {
       railError = error instanceof Error ? error.message : String(error);
@@ -2956,9 +2978,14 @@
         onblur={() => { if (renamingTitle) void commitTitleRename(); }}
       />
     {/if}
-    <span class="save-state hosted-save-state save-chip" data-save-state={saveState} data-commits={commitCount}>
-      {ownerRoomStatus ?? saveState}
-    </span>
+    <SaveChip
+      class="save-state"
+      dataSlot="hosted-save-chip"
+      label={saveChipLabel}
+      title={saveChipTitle}
+      state={saveChipState}
+      commitCount={commitCount}
+    />
   </div>
 {/snippet}
 
@@ -3185,7 +3212,14 @@
       <!-- Chips cluster on the RIGHT together (user ruling: no stranded
            chip on the left with a gulf before Sharing). Same precedence as
            the desktop chip: a live share outranks the local save state. -->
-      <span class="save-state save-chip" data-save-state={saveState} data-commits={commitCount}>{ownerRoomStatus ?? saveState}</span>
+      <SaveChip
+        class="save-state"
+        dataSlot="hosted-mobile-save-chip"
+        label={saveChipLabel}
+        title={saveChipTitle}
+        state={saveChipState}
+        commitCount={commitCount}
+      />
       <!-- State-aware: once a review room is live the button carries the
            share status (dot + "Sharing") and reopens the sheet to manage. -->
       <button

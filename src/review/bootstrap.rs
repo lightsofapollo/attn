@@ -2472,6 +2472,30 @@ impl Bootstrapper {
         .await
     }
 
+    /// Join with the daemon's own base identity while announcing
+    /// `kind: "agent"`. For a dedicated headless home (`attn review agent`),
+    /// the base identity IS the agent: every later event signs with the same
+    /// key ([`Self::send_event_sync`] always loads the base identity), so the
+    /// announce and the authorship stay one participant. The named-agent
+    /// registry path ([`Self::join_as_agent`]) keeps its separate keypair for
+    /// homes that host several agents beside a daemon.
+    pub async fn join_self_as_agent(
+        &self,
+        invite: &str,
+        verifying_keys: Option<Arc<RwLock<std::collections::HashMap<String, DeviceVerifyingKey>>>>,
+    ) -> Result<JoinOutcome, BootstrapError> {
+        let identity_dir = self.config.identity_dir()?;
+        let identity = load_or_create_identity_in(&identity_dir)?;
+        self.join_with_identity(
+            invite,
+            &identity,
+            ParticipantKind::Agent,
+            DeviceClient::AgentCli,
+            verifying_keys,
+        )
+        .await
+    }
+
     /// Join an existing room from an invite as an `kind: "agent"`
     /// participant.
     ///

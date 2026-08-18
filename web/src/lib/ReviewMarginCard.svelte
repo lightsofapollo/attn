@@ -909,7 +909,11 @@
     align-items: center;
     gap: 4px;
     background: var(--muted);
-    color: var(--muted-foreground);
+    /* muted-foreground sits AT the 4.5:1 floor on the page ground; on the
+       darker --muted chip fill this 10.85px text dropped just under it
+       (axe, 2026-08-18). One step toward the foreground restores AA in
+       both themes without un-quieting the chip. */
+    color: color-mix(in oklch, var(--muted-foreground) 80%, var(--foreground));
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
@@ -919,7 +923,11 @@
      never the sole signal (PRODUCT.md). */
   .rmc-meta[data-kind='suggestion'] {
     background: color-mix(in oklch, var(--review-card-suggestion-accent) 20%, transparent);
-    color: color-mix(in oklch, var(--review-card-suggestion-accent) 78%, var(--foreground, currentColor));
+    /* 78% accent read as pure hue but landed ~L0.48 on a tinted chip —
+       under 4.5:1 for 10.85px text (axe, 2026-08-18). Leaning further into
+       the foreground keeps the ledger-green cast while clearing AA in both
+       themes (dark's light foreground lightens it symmetrically). */
+    color: color-mix(in oklch, var(--review-card-suggestion-accent) 52%, var(--foreground, currentColor));
     border-color: color-mix(in oklch, var(--review-card-suggestion-accent) 34%, transparent);
   }
 

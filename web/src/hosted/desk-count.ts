@@ -18,6 +18,21 @@ export function readDeskCount(): number {
   }
 }
 
+/**
+ * Re-read the count when the page is restored from the back/forward cache —
+ * the one path where a stale count can render: the visitor went to /app,
+ * changed the desk, and came back to this already-initialized page. Scoped to
+ * `persisted` restores on purpose: refreshing on focus could swap which CTA is
+ * primary under the visitor's cursor mid-session. Returns an unsubscribe.
+ */
+export function onDeskCountRestore(update: (count: number) => void): () => void {
+  const refresh = (event: PageTransitionEvent): void => {
+    if (event.persisted) update(readDeskCount());
+  };
+  window.addEventListener('pageshow', refresh);
+  return () => window.removeEventListener('pageshow', refresh);
+}
+
 export function publishDeskCount(count: number): void {
   try {
     localStorage.setItem(STORAGE_KEY, String(Math.max(0, count)));

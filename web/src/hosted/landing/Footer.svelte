@@ -1,9 +1,12 @@
 <script lang="ts">
-  import { readDeskCount } from '../desk-count';
+  import { onMount } from 'svelte';
+  import { onDeskCountRestore, readDeskCount } from '../desk-count';
 
   // Same branch the nav and hero use, so a returning visitor is offered their
-  // desk rather than a create they do not need.
-  const deskCount = readDeskCount();
+  // desk rather than a create they do not need. Refreshed on bfcache restore,
+  // the one path where the mounted value can go stale.
+  let deskCount = $state(readDeskCount());
+  onMount(() => onDeskCountRestore((count) => (deskCount = count)));
 </script>
 
 <!--

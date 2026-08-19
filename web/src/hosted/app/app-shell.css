@@ -19,13 +19,17 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
-/* THE ACCENT PLANE (attn-08fa.2/.13). The bar is made OF the accent rather than
-   marked with it, so One Pencil's count is untouched — see "the plane
-   exception" in DESIGN.md. app.css re-points the canonical tokens for this
-   subtree, and because every hosted name here (--ink, --rule, --rust) aliases a
-   canonical token, the whole hosted vocabulary follows with no per-rule edits.
-   The bottom hairline is --panel-border deliberately: it is NOT re-pointed, so
-   it separates the plane from the page instead of drawing a line on the plane. */
+/* THE ACCENT PLANE (attn-08fa.2/.13, attn-a9f7.2.1 — reached twice, from the
+   design system and from the desk↔editor seam). The bar is made OF the accent
+   rather than marked with it, so One Pencil's count is untouched — see "the
+   plane exception" in DESIGN.md — and the desk now shares the one plane this
+   document always claimed all three headers were on. app.css re-points the
+   canonical tokens for this subtree, and because every hosted name here
+   (--ink, --rule, --rust) aliases a canonical token, the whole hosted
+   vocabulary follows with no per-rule edits. Nothing is hard-coded white:
+   --primary-foreground is near-white on Paper and near-black in INK. The
+   bottom hairline is --panel-border deliberately: it is NOT re-pointed, so it
+   separates the plane from the page instead of drawing a line on the plane. */
 .app-header {
   display: flex;
   align-items: center;
@@ -39,6 +43,15 @@
   background: var(--header-surface);
   border-bottom: 1px solid var(--panel-border);
   font-family: var(--sans);
+
+  --ink: var(--primary-foreground);
+  --hosted-muted: color-mix(in oklch, var(--primary-foreground) 80%, transparent);
+  --rule: color-mix(in oklch, var(--primary-foreground) 34%, transparent);
+  --rust: var(--primary-foreground);
+  --rust-deep: var(--primary-foreground);
+  --sheet: color-mix(in oklch, var(--primary-foreground) 14%, transparent);
+  --sheet-raised: color-mix(in oklch, var(--primary-foreground) 22%, transparent);
+  color: var(--primary-foreground);
 }
 
 /* Danger ink has no contrast on terracotta, exactly as --amber-deep did not —
@@ -210,6 +223,32 @@
   font: 0.85rem var(--sans);
 }
 
+/* The desk's failure state (attn-a9f7.1.3). Title, then what is safe, then the
+   two actions, then the internals for whoever wants them — the shape Storage
+   and the import errors already use. */
+.error-lede {
+  max-width: 58ch;
+  margin: 2rem 0 1.5rem;
+  color: var(--hosted-muted);
+  font: 1rem/1.6 var(--sans);
+}
+
+.error-detail {
+  margin-top: 2rem;
+  color: var(--hosted-muted);
+  font: 0.85rem/1.5 var(--sans);
+}
+
+.error-detail summary {
+  cursor: pointer;
+}
+
+.error-detail p {
+  margin: 0.6rem 0 0;
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+
 .quick-actions {
   display: grid;
   /* minmax(0,…) so the tracks can shrink below their content's min-content
@@ -283,6 +322,17 @@
   color: var(--rust);
 }
 
+/* Except on the first-run desk, which already spends the pencil on the empty
+   sheet's caret (attn-a9f7.1.7). Both marks offer the same action, so the
+   screen carried two terracotta things and the rule's own test — "if two
+   things on a screen are terracotta, one of them is wrong" — was failing on
+   the very first screen a new user sees. The sheet is the larger, more
+   document-like offer and keeps the mark; the tile steps back to ink until
+   there is a workspace and the sheet is gone. */
+.desk[data-desk-state='empty'] .quick[data-action='new-workspace'] .quick-label {
+  color: var(--ink);
+}
+
 .quick span {
   color: var(--hosted-muted);
   font: 0.85rem var(--sans);
@@ -314,6 +364,13 @@
   margin-block-start: 2.5rem;
 }
 
+/* Filter alone, above every group it narrows. The group headings below own
+   the list semantics (attn-a9f7.3.3). */
+.folio-head-filter-only {
+  justify-content: flex-end;
+  margin-block-end: -1.4rem;
+}
+
 .folio-filter {
   position: relative;
   display: inline-flex;
@@ -332,18 +389,30 @@
   font: 0.85rem var(--sans);
 }
 
-.folio-filter kbd {
+/* One keycap for the whole hosted app (attn-a9f7.1.8). The desk filter, the
+   palette footer and the header's ⌘K affordance had each grown their own, and
+   a fourth was one component away. Written in the CANONICAL tokens rather than
+   the hosted aliases: --border and --muted-foreground are re-pointed inside
+   the accent-plane header subtree, while the aliases freeze their :root values
+   and would render this invisible up there. */
+.kbd-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.05rem 0.34rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--muted-foreground);
+  font: 0.7rem var(--mono);
+  white-space: nowrap;
+}
+
+.folio-filter .kbd-chip {
   position: absolute;
   right: 0.55rem;
-  padding: 0.05rem 0.3rem;
-  border: 1px solid var(--rule);
-  border-radius: 6px;
-  color: var(--hosted-muted);
-  font: 0.7rem var(--mono);
   pointer-events: none;
 }
 
-.folio-filter input:focus-visible + kbd {
+.folio-filter input:focus-visible + .kbd-chip {
   opacity: 0;
 }
 
@@ -360,9 +429,16 @@
      product. */
   position: relative;
   display: grid;
-  /* name · files · edited · size · review · tail (attn-n01r.34) */
+  /* name · review · files · edited · size · tail (attn-a9f7.3.3). Review moved
+     from fifth to second: it is the reason to open the row, and it was sitting
+     downstream of three file facts that are not. */
+  /* Every track is proportional, including the tail. An `auto` tail was sized
+     by its own text, so "Shared · relay sees only ciphertext" and "Local only"
+     left different amounts of free space for the fr tracks and the file facts
+     landed on different x positions from row to row — most visible now that
+     the groups sit one heading apart. */
   grid-template-columns:
-    minmax(0, 1.15fr) minmax(0, 0.4fr) minmax(0, 0.5fr) minmax(0, 0.35fr) minmax(0, 0.75fr) auto;
+    minmax(0, 1.15fr) minmax(0, 0.85fr) minmax(0, 0.4fr) minmax(0, 0.5fr) minmax(0, 0.35fr) minmax(0, 1.25fr);
   align-items: center;
   gap: 1rem;
   padding: 1.25rem 0.6rem;
@@ -997,6 +1073,41 @@
   font-family: var(--sans);
 }
 
+/* Sits on the accent plane, so it borrows the header's own re-pointed tokens
+   rather than the hosted paper aliases (attn-a9f7.1.8). */
+.palette-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 28px;
+  padding: 0.15rem 0.4rem;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font: 500 0.78rem var(--sans);
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease;
+}
+
+.palette-hint:hover {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+/* The keycap alone still says "command palette" once the label is gone. */
+@media (max-width: 1100px) {
+  .palette-hint-label {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .palette-hint {
+    transition: none;
+  }
+}
+
 .hosted-title-input {
   width: min(12rem, 25vw);
   height: 1.75rem;
@@ -1217,7 +1328,7 @@
 
 .review-history-placeholder h2 {
   margin: 0;
-  font: 600 1.05rem/1.3 var(--serif);
+  font: 600 1rem/1.3 var(--serif);
 }
 
 .review-history-label {
@@ -1225,7 +1336,7 @@
   /* This rail sits on --panel-surface, not the document paper. The generic
      muted token only clears contrast on paper; use the panel-safe ink mix. */
   color: var(--foreground);
-  font: 650 0.65rem/1.2 var(--sans);
+  font: 650 0.7rem/1.2 var(--sans);
   letter-spacing: 0.06em;
   text-transform: uppercase;
 }
@@ -1296,7 +1407,7 @@
   }
 
   .editor-top.is-scrolled {
-    box-shadow: 0 10px 30px oklch(0.2 0.02 55 / 8%);
+    box-shadow: var(--shadow-soft);
   }
 
   .editor-top::after {
@@ -2669,8 +2780,30 @@
 
 .confirm-clear .actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 0.6rem;
   margin-top: 0.8rem;
+}
+
+.confirm-body {
+  margin: 0.3rem 0 0;
+  color: var(--hosted-muted);
+}
+
+/* Must outrank `.workspace-row strong` (0,1,1), which sets 1.15rem serif for
+   the desk's workspace names. The inline style this replaced won by being
+   inline; a bare class quietly lost, and the room id rendered as oversized
+   serif and collided with the cell beside it. */
+.workspace-row .storage-room-id {
+  font: 0.85rem var(--mono);
+  overflow-wrap: anywhere;
+}
+
+/* Storage's rows are a four-column table of its own — name, size, backup
+   state, action — not the desk's six-column workspace scan. Borrowing the
+   desk template squeezed "Never backed up" into a 0.4fr track. */
+.storage-panel .workspace-row {
+  grid-template-columns: minmax(0, 1.4fr) minmax(0, 0.45fr) minmax(0, 0.7fr) auto;
 }
 
 .drop-zone {
@@ -2731,6 +2864,12 @@
 
 /* A "·"-separated sentence about what you can drop, not a code sample — sans
    at the meta step, which also lifts it off the 11px floor (attn-08fa.6). */
+/* A centred paragraph still owes the reader a measure (attn-a9f7.1.6). */
+.drop-zone .drop-copy {
+  max-width: 62ch;
+  margin-inline: auto;
+}
+
 .drop-zone .formats {
   margin-top: 1.4rem;
   color: var(--hosted-muted);
@@ -2811,6 +2950,12 @@
     grid-area: review;
   }
 
+  /* Named areas place every cell here, so the desktop column spacer has no
+     job and must not claim an implicit row of its own. */
+  .workspace-row .review-slot-empty {
+    display: none;
+  }
+
   .workspace-row .row-tail {
     grid-area: status;
     justify-content: flex-start;
@@ -2871,7 +3016,7 @@
     background: transparent;
     color: var(--ink);
     cursor: pointer;
-    font: 600 0.82rem var(--sans);
+    font: 600 0.85rem var(--sans);
     text-align: left;
     padding: 0.65rem 0.8rem;
   }
@@ -3142,7 +3287,7 @@
   z-index: 60;
   display: grid;
   place-items: center;
-  background: rgba(0, 0, 0, 0.86);
+  background: var(--lightbox-veil);
   /* Native pinch zoom stays available on the image. */
   touch-action: pinch-zoom;
 }
@@ -3387,7 +3532,25 @@
   display: inline-flex;
   align-items: center;
   gap: 0.55rem;
-  font-size: 0.78rem;
+  /* One step up from the file facts beside it (attn-a9f7.3.3): this is the
+     row's leading fact now, and weight is what says so once it has moved out
+     of the tail. */
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+/* Holds the review column open on rows with no review work, so the file facts
+   stay in one vertical line down the list. Deliberately NOT a
+   [data-slot="review-counts"] element — the share suite reads the presence of
+   that slot as "this workspace has work waiting". */
+.review-slot-empty {
+  display: block;
+  min-width: 0;
+}
+
+/* The waiting group leads, so its label carries the weight the section has. */
+.folio-label-waiting {
+  color: var(--ink);
 }
 
 .review-suggestions,

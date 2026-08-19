@@ -1,5 +1,5 @@
 <script lang="ts">
-  import AppHeader from './AppHeader.svelte';
+  import ConfirmPanel from './ConfirmPanel.svelte';
   import DegradedBanner from './DegradedBanner.svelte';
   import { expandPicked, prepareImport, type PickedFile } from './import-files';
   import type { ImportFileInput, StorageHealth, WorkspaceSummary } from './types';
@@ -118,168 +118,156 @@
   });
 </script>
 
-<div class="app-shell" data-app-view="storage">
-  <AppHeader mode={health.mode}>
-    {#snippet actions()}
-      <a class="button" href="/app">Back to your desk</a>
-    {/snippet}
-  </AppHeader>
-  <main class="desk">
-    <DegradedBanner mode={health.mode} />
-    <div class="desk-title">
-      <div>
-        <div class="eyebrow">This browser profile</div>
-        <h1>Storage &amp; recovery</h1>
-      </div>
-      <!-- "Nothing here is stored in an attn account" implied an account exists
-           and this page happens to sit outside it (attn-08fa.8). -->
-      <p>There is no attn account — everything below lives in this browser</p>
+<main class="desk">
+  <DegradedBanner mode={health.mode} />
+  <div class="desk-title">
+    <div>
+      <div class="eyebrow">This browser profile</div>
+      <h1>Storage &amp; recovery</h1>
     </div>
+    <!-- "Nothing here is stored in an attn account" implied an account exists
+         and this page happens to sit outside it (attn-08fa.8). -->
+    <p>There is no attn account — everything below lives in this browser</p>
+  </div>
 
-    <div class="storage-grid">
-      <section class="storage-panel" aria-label="Local workspaces">
-        <h2>Local workspaces</h2>
-        {#each workspaces as workspace (workspace.id)}
-          <div class="workspace-row">
-            <strong>{workspace.name}</strong>
-            <span class="detail">{workspace.sizeLabel}</span>
-            <span class="detail">{workspace.backupLabel}</span>
-            <button class="button" type="button" onclick={() => void guard(() => onExportWorkspace(workspace.id))}>
-              Export
-            </button>
-          </div>
-        {:else}
-          <p class="storage-empty">
-            No local workspaces in this browser profile yet.
-          </p>
-        {/each}
-        <div class="storage-actions">
-          <button class="button primary" type="button" onclick={() => void guard(onExportAll)}>
-            Export all workspaces
+  <div class="storage-grid">
+    <section class="storage-panel" aria-label="Local workspaces">
+      <h2>Local workspaces</h2>
+      {#each workspaces as workspace (workspace.id)}
+        <div class="workspace-row">
+          <strong>{workspace.name}</strong>
+          <span class="detail">{workspace.sizeLabel}</span>
+          <span class="detail">{workspace.backupLabel}</span>
+          <button class="button" type="button" onclick={() => void guard(() => onExportWorkspace(workspace.id))}>
+            Export
           </button>
-          <button class="button" type="button" onclick={() => importInput?.click()}>
-            Import backup
-          </button>
-          <input
-            bind:this={importInput}
-            type="file"
-            multiple
-            class="visually-removed"
-            aria-hidden="true"
-            tabindex="-1"
-            onchange={() => void onBackupPicked()}
-          />
         </div>
-        {#if actionError}
-          <div class="form-error" role="alert">
-            <strong>That didn’t finish</strong>
-            <p>Nothing was changed. Try again, and export a backup first if the file is large.</p>
-            <small>{actionError}</small>
-          </div>
-        {/if}
-
-        <h2 class="storage-subhead">Remembered review rooms</h2>
-        <!-- "crypto-erases" was the implementation's word for it (attn-08fa.8). -->
-        <p class="storage-note">
-          Forgetting a room destroys its local key first — the sealed copy on this device
-          becomes permanently unreadable. The room itself keeps running for other participants.
+      {:else}
+        <p class="storage-empty">
+          No local workspaces in this browser profile yet.
         </p>
-        {#each rooms as roomId (roomId)}
-          <div class="workspace-row">
-            <strong class="storage-room-id">{roomId}</strong>
-            <span class="detail">E2EE review room</span>
-            <span class="detail"></span>
-            <button
-              class="button danger"
-              type="button"
-              onclick={() => (confirmingForget = roomId)}
-            >
-              Forget
-            </button>
-          </div>
-          {#if confirmingForget === roomId}
-            <div class="confirm-clear" role="alertdialog" aria-label={`Forget room ${roomId}?`}>
-              <strong>Forget this room on this device?</strong>
+      {/each}
+      <div class="storage-actions">
+        <button class="button primary" type="button" onclick={() => void guard(onExportAll)}>
+          Export all workspaces
+        </button>
+        <button class="button" type="button" onclick={() => importInput?.click()}>
+          Import backup
+        </button>
+        <input
+          bind:this={importInput}
+          type="file"
+          multiple
+          class="visually-removed"
+          aria-hidden="true"
+          tabindex="-1"
+          onchange={() => void onBackupPicked()}
+        />
+      </div>
+      {#if actionError}
+        <div class="form-error" role="alert">
+          <strong>That didn’t finish</strong>
+          <p>Nothing was changed. Try again, and export a backup first if the file is large.</p>
+          <small>{actionError}</small>
+        </div>
+      {/if}
+
+      <h2 class="storage-subhead">Remembered review rooms</h2>
+      <!-- "crypto-erases" was the implementation's word for it (attn-08fa.8). -->
+      <p class="storage-note">
+        Forgetting a room destroys its local key first — the sealed copy on this device
+        becomes permanently unreadable. The room itself keeps running for other participants.
+      </p>
+      {#each rooms as roomId (roomId)}
+        <div class="workspace-row">
+          <strong class="storage-room-id">{roomId}</strong>
+          <span class="detail">E2EE review room</span>
+          <span class="detail"></span>
+          <button
+            class="button danger"
+            type="button"
+            onclick={() => (confirmingForget = roomId)}
+          >
+            Forget
+          </button>
+        </div>
+        {#if confirmingForget === roomId}
+          <ConfirmPanel
+            label={`Forget room ${roomId}?`}
+            title="Forget this room on this device?"
+            confirmLabel="Forget room"
+            oncancel={() => (confirmingForget = null)}
+            onconfirm={async () => {
+              await guard(() => onForgetRoom(roomId));
+              confirmingForget = null;
+            }}
+          >
+            {#snippet body()}
               <p class="confirm-note">
                 The local key is deleted first, so the remembered copy can never be read again
                 here. Your review link (if you still have it) can rejoin while the room lives.
               </p>
-              <div class="actions">
-                <button class="button" type="button" onclick={() => (confirmingForget = null)}>
-                  Cancel
-                </button>
-                <button
-                  class="button danger"
-                  type="button"
-                  onclick={async () => {
-                    await guard(() => onForgetRoom(roomId));
-                    confirmingForget = null;
-                  }}
-                >
-                  Forget room
-                </button>
-              </div>
-            </div>
-          {/if}
-        {:else}
-          <p class="storage-empty">
-            No remembered review rooms in this browser profile.
-          </p>
-        {/each}
-      </section>
+            {/snippet}
+          </ConfirmPanel>
+        {/if}
+      {:else}
+        <p class="storage-empty">
+          No remembered review rooms in this browser profile.
+        </p>
+      {/each}
+    </section>
 
-      <aside class="storage-panel" aria-label="Persistence and quota">
-        <div class="status-box" class:warn={persistenceStatus.warn}>
-          <strong>
-            <span class="status-glyph" aria-hidden="true">{persistenceStatus.glyph}</span
-            >{persistenceStatus.headline}
-          </strong>
-          <p>{persistenceStatus.detail}</p>
-          <!-- The fill percentage is data, so it stays an inline custom property;
-               every rule about how the bar LOOKS lives in app-shell.css. -->
-          <div class="meter" class:warn={meterWarn} role="presentation">
-            <span style={`--meter-fill: ${Math.round(health.usedFraction * 100)}%`}></span>
-          </div>
-          <small>{health.usedLabel} used of about {health.quotaLabel} available</small>
-          <p class="status-fine-print">
-            Large files use the browser's origin file system when available and fall back to
-            encrypted database storage when it isn't. Either way, content is sealed.
-          </p>
+    <aside class="storage-panel" aria-label="Persistence and quota">
+      <div class="status-box" class:warn={persistenceStatus.warn}>
+        <strong>
+          <span class="status-glyph" aria-hidden="true">{persistenceStatus.glyph}</span
+          >{persistenceStatus.headline}
+        </strong>
+        <p>{persistenceStatus.detail}</p>
+        <!-- The fill percentage is data, so it stays an inline custom property;
+             every rule about how the bar LOOKS lives in app-shell.css. -->
+        <div class="meter" class:warn={meterWarn} role="presentation">
+          <span style={`--meter-fill: ${Math.round(health.usedFraction * 100)}%`}></span>
         </div>
+        <small>{health.usedLabel} used of about {health.quotaLabel} available</small>
+        <p class="status-fine-print">
+          Large files use the browser's origin file system when available and fall back to
+          encrypted database storage when it isn't. Either way, content is sealed.
+        </p>
+      </div>
 
-        {#if !confirmingClear}
-          <button
-            class="button danger storage-clear"
-            type="button"
-            onclick={() => (confirmingClear = true)}
-          >
-            Clear all local attn data
-          </button>
-        {:else}
-          <div class="confirm-clear" role="alertdialog" aria-label="Confirm clearing all local attn data">
-            <strong>Delete every local workspace in this browser?</strong>
+      {#if !confirmingClear}
+        <button
+          class="button danger storage-clear"
+          type="button"
+          onclick={() => (confirmingClear = true)}
+        >
+          Clear all local attn data
+        </button>
+      {:else}
+        <ConfirmPanel
+          label="Confirm clearing all local attn data"
+          title="Delete every local workspace in this browser?"
+          confirmLabel="Delete everything"
+          oncancel={() => (confirmingClear = false)}
+          onconfirm={async () => {
+            await guard(onClearAll);
+            confirmingClear = false;
+          }}
+        >
+          {#snippet body()}
             <p class="confirm-note">
               This cannot be undone. Shared rooms are not recalled, but their local source copies
               are removed.
             </p>
-            <div class="actions">
-              <button class="button" type="button" onclick={() => (confirmingClear = false)}>
-                Cancel
-              </button>
-              <button
-                class="button danger"
-                type="button"
-                onclick={async () => {
-                  await guard(onClearAll);
-                  confirmingClear = false;
-                }}
-              >
-                Delete everything
-              </button>
-            </div>
-          </div>
-        {/if}
-      </aside>
-    </div>
-  </main>
-</div>
+          {/snippet}
+          {#snippet extra()}
+            <button class="button" type="button" onclick={() => void guard(onExportAll)}>
+              Export all first
+            </button>
+          {/snippet}
+        </ConfirmPanel>
+      {/if}
+    </aside>
+  </div>
+</main>

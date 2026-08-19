@@ -498,7 +498,7 @@
   const deskCommands = $derived<HostedCommand[]>([
     { id: 'new', label: 'New workspace', hint: 'Untitled.md', keywords: 'create sheet document', run: () => void onCreate() },
     { id: 'import', label: 'Import files…', keywords: 'open upload folder zip', run: () => void navigate({ view: 'open' }) },
-    { id: 'join', label: 'Join a review', keywords: 'invite link share', run: () => { window.location.assign('/app#join'); } },
+    { id: 'join', label: 'Join a review', keywords: 'review link invite share', run: () => { window.location.assign('/app#join'); } },
     { id: 'storage', label: 'Storage & recovery', keywords: 'export backup quota clear', run: () => void navigate({ view: 'storage' }) },
     ...workspaces.map((workspace) => ({
       id: `ws-${workspace.id}`,

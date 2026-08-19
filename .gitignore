@@ -15,3 +15,16 @@ web/src/lib/vscode-icon-packs/
 
 # wrangler dev state
 web/.wrangler/
+
+# Impeccable machine-local state. `design.json` is deliberately NOT here: it is
+# the design-system sidecar `/impeccable doctor` diffs against DESIGN.md, so it
+# is a checked artifact like a lockfile, not noise.
+.impeccable/hook.cache.json
+.impeccable/live/
+
+# Critique snapshots are a local run log — one file per `/impeccable critique`,
+# append-only and unbounded. Untracked 2026-08-19 (13 were already committed).
+# Consequence to know: a snapshot cited by tracked work — a beads issue, a PR
+# description — resolves only on the machine that produced it. Quote the finding
+# in the citing document rather than pointing at a path here.
+.impeccable/critique/

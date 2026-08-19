@@ -95,11 +95,11 @@ body::after {
 }
 
 /* Bare-tag chrome resets — `@layer chrome` (cascade model, see app.css).
-   These style the hosted shell's OWN anchors and controls; the layer exists
-   so they can never erase document grammar again. The `a` reset used to be
-   unlayered, which beat `.attn-doc a` in every layer and forced the prose-link
-   rule in base.css to hide outside the layers to survive; now `doc` beats
-   `chrome` by declared order and both rules say what they mean. */
+   These style the hosted shell's OWN anchors and controls; the layer is what
+   stops them erasing document grammar. Unlayered, the `a` reset beats
+   `.attn-doc a` in every layer and forces the prose-link rule in base.css to
+   hide outside the layers to survive. Layered, `doc` beats `chrome` by
+   declared order and both rules say what they mean. */
 @layer chrome {
   button,
   a,

@@ -252,12 +252,10 @@ fn short_exe_namespace(path: &std::path::Path) -> String {
     format!("{hash:016x}")
 }
 
-/// Return the socket path.
 fn socket_path() -> Result<PathBuf> {
     Ok(runtime_dir()?.join("attn.sock"))
 }
 
-/// Ensure the runtime directory exists.
 fn ensure_runtime_dir() -> Result<()> {
     let dir = runtime_dir()?;
     if !dir.exists() {
@@ -351,12 +349,10 @@ pub fn replace_stale_daemon() -> Result<bool> {
             eprintln!("attn: binary changed, replacing daemon (pid {})", info.pid);
             let pid = nix::unistd::Pid::from_raw(info.pid as i32);
             let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGTERM);
-            // Wait for socket to disappear
             let deadline = Instant::now() + Duration::from_secs(3);
             while sock.exists() && Instant::now() < deadline {
                 std::thread::sleep(Duration::from_millis(50));
             }
-            // Force cleanup if socket is still there
             if sock.exists() {
                 let _ = nix::sys::signal::kill(pid, nix::sys::signal::Signal::SIGKILL);
                 std::thread::sleep(Duration::from_millis(100));
@@ -622,7 +618,6 @@ fn send_command(msg: &SocketMessage) -> Result<Option<SocketResponse>> {
                 .shutdown(std::net::Shutdown::Write)
                 .context("failed to shutdown write")?;
 
-            // Read response
             let mut reader = BufReader::new(&stream);
             let mut line = String::new();
             reader
@@ -719,7 +714,6 @@ pub fn maybe_fork(no_fork: bool) -> Result<()> {
         // Safety: we're single-threaded at this point (before event loop starts)
         match unsafe { fork() }.context("fork failed")? {
             ForkResult::Child => {
-                // Become session leader
                 setsid().context("setsid failed")?;
 
                 // Redirect stderr to the (rotated) log file for debugging.
@@ -727,7 +721,6 @@ pub fn maybe_fork(no_fork: bool) -> Result<()> {
                     let fd = log_file.into_raw_fd();
                     let _ = dup2(fd, std::io::stderr().as_raw_fd());
                     let _ = close(fd);
-                    // Close stdin
                     let _ = close(std::io::stdin().as_raw_fd());
                 }
 
@@ -955,7 +948,6 @@ pub fn start_listener(
     ensure_runtime_dir()?;
     let sock = socket_path()?;
 
-    // Remove stale socket
     if sock.exists() {
         std::fs::remove_file(&sock).context("could not remove stale socket")?;
     }

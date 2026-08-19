@@ -151,9 +151,8 @@ objc2-web-kit = { version = "0.3", features = ["WKWebView", "WKSnapshotConfigura
 objc2-user-notifications = { version = "=0.3.1", default-features = false, features = ["block2", "UNNotification", "UNNotificationContent", "UNNotificationRequest", "UNNotificationResponse", "UNNotificationTrigger", "UNUserNotificationCenter"] }
 block2 = "0.6"
 
-# Release profile tuned for the 25 MiB binary-size budget (scripts/
+# Release profile tuned for the 40 MiB binary-size budget (scripts/
 # check-binary-size.sh; webrtc-rs + tokio + rustls + comrak are the weight).
-# A bare `cargo build --release` previously shipped UNSTRIPPED with no LTO.
 # panic = "unwind" is kept (the default): a panic in a background tokio task
 # must not abort the whole desktop app.
 [profile.release]

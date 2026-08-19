@@ -12,15 +12,11 @@
   const { mode, actions }: Props = $props();
 
   /* Literal desk-header states from planning/web-authoring/ios-ux.md §8.
-     Three tones, not two (attn-n01r.31). `best-effort` used to return
-     warn: false, so "Backup recommended" rendered in the same green as
-     "On this device" — green-on-green is the universal "you're fine" signal,
-     attached to a message meaning the user's work is one storage eviction from
-     gone. It is a caution, not a success, and it is also not the destructive
-     red the genuine failures use.
-
-     Green is additionally quarantined to the collaboration layer by DESIGN.md,
-     so a storage state was never entitled to it in the first place. */
+     Three tones, not two (attn-n01r.31). `best-effort` must not read as
+     success: green says "you're fine" over a message meaning the user's work
+     is one storage eviction from gone. It is a caution, and not the
+     destructive red the genuine failures use. DESIGN.md also quarantines green
+     to the collaboration layer, so a storage state cannot claim it. */
   const badge = $derived.by((): { label: string; tone: 'ok' | 'caution' | 'warn' } => {
     switch (mode) {
       case 'persistent':
@@ -36,9 +32,9 @@
     }
   });
 
-  /* Anything but "all good" links to the remedy. The desk previously stated the
-     problem and left the fix behind an unrelated "Storage" button that the copy
-     never connected to. */
+  /* Anything but "all good" links to the remedy. Stating the problem and
+     leaving the fix behind an unrelated "Storage" button never connects the
+     two for the user. */
   const needsAttention = $derived(badge.tone !== 'ok');
 </script>
 

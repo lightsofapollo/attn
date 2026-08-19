@@ -168,7 +168,6 @@ assert_eq "Scenario JSON version=1" "$scenario_version" "1"
 scenario_events_kind=$(jq -r '.events | type' "$SCENARIO_JSON" 2>/dev/null || echo "")
 assert_eq "Scenario JSON .events is array" "$scenario_events_kind" "array"
 
-# Ensure a clean runtime dir.
 rm -rf "$ATTN_HOME"
 mkdir -p "$ATTN_HOME"
 rm -rf "$SCREENSHOT_DIR"

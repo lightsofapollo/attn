@@ -1349,16 +1349,13 @@
 /* Inline suggesting mode (track changes, attn-07i.2). Reviewer suggestions
    render as colored, attributed inline marks: green insertions, red
    strikethrough deletions. The owner accepts/rejects; the file stays clean. */
-/* Colours come from the review tokens, not Tailwind's palette (design-system
-   consolidation, 2026-08-08). These marks previously used Tailwind hexes —
-   green-700/#15803d, red-700/#b91c1c and their dark variants — which are COOL
-   greens and reds from a different system. attn's own vocabulary is the
-   150-hue suggestion green and the 27-hue destructive clay, and the product
-   principle is one vocabulary for review marks everywhere: a `del` here must
-   be the same red as `.attn-review-suggestion--deletion`, because they are the
-   same statement made by two renderers. The tokens are theme-aware, so the
-   :root.dark colour overrides that existed only to re-state the hexes are
-   gone rather than migrated. */
+/* Colours come from the review tokens, never Tailwind's palette: its greens
+   and reds are COOL, from a different system. attn's vocabulary is the 150-hue
+   suggestion green and the 27-hue destructive clay, and review marks use one
+   vocabulary everywhere — a `del` here must be the same red as
+   `.attn-review-suggestion--deletion`, because they are the same statement
+   made by two renderers. The tokens are theme-aware, so no :root.dark
+   override belongs here. */
 .ProseMirror ins[data-id] {
   text-decoration: none;
   color: var(--review-card-suggestion-accent);

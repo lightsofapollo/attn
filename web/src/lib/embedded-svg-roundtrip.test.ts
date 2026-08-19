@@ -221,14 +221,14 @@ defineCase('SVG next to a task list is recognised', () => {
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
-// Glued shapes (widened 2026-08-09 — "we should be able to render SVGs")
+// Glued shapes
 //
 // These two are what agents actually write: the SVG hard against the next or
-// previous prose line. They used to be deliberately unrecognised to keep the
-// fired-rule roundtrip byte-exact; the cost was a diagram rendering as a
-// paragraph of escaped source, which is what got reported. The contract now:
-// glued shapes RENDER, and normalise to the blank-separated shape on first
-// serialize — after which they are byte-exact. parse∘serialize is idempotent.
+// previous prose line. Leaving them unrecognised keeps the fired-rule
+// roundtrip byte-exact, at the cost of rendering a diagram as a paragraph of
+// escaped source. The contract: glued shapes RENDER, and normalise to the
+// blank-separated shape on first serialize — after which they are byte-exact.
+// parse∘serialize is idempotent.
 // ---------------------------------------------------------------------------
 
 defineCase('SVG glued to the FOLLOWING line renders, and normalises stably', () => {

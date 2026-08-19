@@ -1,6 +1,12 @@
 {
   "version": 1,
   "skills": {
+    "clean-comments": {
+      "source": "gpu-cli/skills",
+      "sourceType": "github",
+      "skillPath": "skills/clean-comments/SKILL.md",
+      "computedHash": "9becde391d0dcb6a60d17ca09787ea2eb31f51adacbd10f5a19746601822247b"
+    },
     "frontend-design": {
       "source": "anthropics/skills",
       "sourceType": "github",

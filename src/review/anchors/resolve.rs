@@ -1106,26 +1106,11 @@ mod tests {
 
     #[test]
     fn structure_quote_match_when_quote_step_does_not_fire() {
-        // To isolate step 5 we want: quote occurs INSIDE a block with the
-        // right heading path AND the quote also occurs once in the document
-        // overall (so step 3 also fires). With dedup-by-range taking the MAX,
-        // the structure-quote candidate at 0.80 is shadowed by the quote
-        // candidate at 0.90 in the same range. So to actually OBSERVE step
-        // 5 as the winner we'd need the quote step to be unique elsewhere —
-        // which never happens because they're computed from the same bytes.
-        // Easier: prove step 5 fires by inspecting the result's reason set
-        // through an indirect path — set up a scenario where the quote
-        // appears in MULTIPLE locations (so step 3 produces 0.90 candidates
-        // at different ranges), but only ONE of those locations has the
-        // matching headingPath. The matching location gets a 0.90 (quote) +
-        // 0.80 (structure_quote) collapsed to 0.90; the OTHER location stays
-        // at 0.90. That's still ambiguous, not a clean structure-quote.
-        //
-        // For unit purposes: assert that the resolver does produce a
-        // structure_quote_match-flavored candidate path internally by
-        // setting up a doc where the quote ONLY appears inside the right
-        // heading path. This makes step 5 redundant with step 3 but proves
-        // step 5 doesn't crash and produces a sensible result.
+        // Step 5 cannot be observed as the winner: it shares its bytes with
+        // step 3, so dedup-by-range always collapses its 0.80 into step 3's
+        // 0.90 at the same range. The doc below puts the quote only inside
+        // the right heading path, which makes step 5 redundant with step 3
+        // but still proves it produces a sensible result.
         let base = b"# H1\n\n## Sub\n\nDistinct phrase here.\n";
         let current = b"# H1\n\n## Sub\n\nDistinct phrase here.\n";
         let idx = build_anchor_index(current, &snap_id("s5")).expect("idx");

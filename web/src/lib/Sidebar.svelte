@@ -460,10 +460,10 @@
       </div>
     {/if}
 
-    <!-- Filter: a standing box (attn-64iy.7 — it used to be borderless until
-         focus, which left an input reading as a label), a search glyph, an
-         honest `/` hint, and a clear affordance once typing. Focus promotes the
-         box to the accent ring.
+    <!-- Filter: a standing box (attn-64iy.7 — borderless until focus leaves an
+         input reading as a label), a search glyph, an honest `/` hint, and a
+         clear affordance once typing. Focus promotes the box to the accent
+         ring.
 
          `size="1"` is load-bearing, not tidiness: an <input> carries an
          INTRINSIC width from its `size` attribute (default 20 characters,

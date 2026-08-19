@@ -11,7 +11,7 @@
 	let collabStill = $derived(media(isDark ? '/screenshots/collab-dark.png' : '/screenshots/collab-light.png'));
 	let shareFlow = $derived(media(isDark ? '/screenshots/share-flow-dark.gif' : '/screenshots/share-flow-light.gif'));
 
-	// Live collaboration — the headline capability added in the collab epic.
+	// Live collaboration — the headline capability.
 	// The hero shows a real capture of a live review session (comment cards +
 	// cursors); this section breaks down what makes it work and shows the real
 	// Share dialog. Copy is deliberately accurate: ALWAYS end-to-end encrypted

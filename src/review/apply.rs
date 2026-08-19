@@ -2338,31 +2338,10 @@ mod tests {
 
     // ====== END-TO-END APPLY INTEGRATION (attn-nnj.8.6) ====================
     //
-    // These tests exercise the full owner-side accept/reject pipeline as a
-    // single composed flow:
-    //
-    //   (1) seed a snapshot + the owner's evolved working copy
-    //   (2) author a SuggestionCreated event against the snapshot
-    //   (3) resolve_suggestion against the *current* (drifted) markdown — the
-    //       anchor must REMAP, not exact-match
-    //   (4) apply_ready_verdict writes the file via WorkingCopyService and
-    //       journals a LocalRevision with source=AcceptedSuggestion
-    //   (5) construct a SuggestionAccepted (or SuggestionRejected) review
-    //       event and assemble it into an outbox MailboxEnvelope
-    //   (6) store.append_outbox + store.iter_outbox round-trips the envelope
-    //   (7) assert: file content matches expected; revision journal has the
-    //       UserEdit + AcceptedSuggestion entries; outbox has the accept
-    //       envelope; resulting_hash carried by the event matches the disk
-    //       hash byte-for-byte.
-    //
-    // 8.5 (the ReviewManager wiring that owns the AcceptSuggestion command)
-    // is still a stub at the time this test lands. The pipeline pieces all
-    // exist as standalone helpers (apply orchestrator, store, envelope
-    // assembler, working-copy service) — these tests glue them together the
-    // same way 8.5 will, so 8.5 will inherit the contract without needing to
-    // rediscover it. When 8.5 lands, the wiring inside `accept_suggestion_e2e`
-    // can be replaced by a single `ReviewManager::submit(AcceptSuggestion)`
-    // call and the assertions stay byte-identical.
+    // These tests compose the standalone helpers — apply orchestrator, store,
+    // envelope assembler, working-copy service — into the owner-side
+    // accept/reject flow, so they pin the contract that
+    // `ReviewManager::submit(AcceptSuggestion)` must keep.
 
     use crate::review::crypto::kdf::derive_room_keys;
     use crate::review::crypto::signing::DeviceSigningKey;

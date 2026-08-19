@@ -17,14 +17,13 @@
 // ---------------------------------------------------------------------------
 // THE PANEL CARRIES NO TRANSITION. Read this before adding one back.
 //
-// The reveal used to be `grid-template-rows: 0fr -> 1fr` under
-// `transition-[grid-template-rows]`. In WKWebView that stranded in BOTH
-// directions (attn-bw2h.9): `data-state` flipped on trigger, item and panel,
-// the `data-[state=open]:grid-rows-[1fr]` rule was generated with the higher
-// specificity and later source order, and the computed `grid-template-rows`
-// still did not follow — it sat at `0px` with 102px of content clipped, then
-// after one toggle sat pinned at `101.546875px` across three more clean
-// state flips.
+// A `grid-template-rows: 0fr -> 1fr` reveal under
+// `transition-[grid-template-rows]` strands in BOTH directions in WKWebView
+// (attn-bw2h.9): `data-state` flips on trigger, item and panel,
+// the `data-[state=open]:grid-rows-[1fr]` rule wins on specificity and source
+// order, and the computed `grid-template-rows` still does not follow — it sits
+// at `0px` with 102px of content clipped, then after one toggle pins at
+// `101.546875px` across three more clean state flips.
 //
 // The tell is that the pinned value is a PIXEL length. Neither author
 // declaration says that; `0fr` and `1fr` do not resolve to a stale
@@ -99,10 +98,8 @@ export const accordionTriggerMetaClass = 'text-muted-foreground ml-auto text-xs 
  * transition on this element at all. See the note at the top of this file for
  * why a transitioned height is not an option here.
  *
- * `overflow-hidden` masks the inner's entry motion (it used to live on the
- * inner, where it clipped the 0fr grid row; the box is the same one either
- * way, so nothing else changes). The panel is also the element the core marks
- * `inert` while closed.
+ * `overflow-hidden` masks the inner's entry motion. The panel is also the
+ * element the core marks `inert` while closed.
  */
 export const accordionContentClass = 'hidden overflow-hidden data-[state=open]:block';
 

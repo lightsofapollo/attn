@@ -50,17 +50,14 @@ pub fn take_snapshot(wk_webview: &wry::WryWebView, output_path: &str, tx: Sender
 /// Convert an NSImage to PNG and write to disk.
 #[cfg(target_os = "macos")]
 fn save_nsimage_as_png(image: &objc2_app_kit::NSImage, path: &str) -> Result<(), String> {
-    // Get TIFF representation from NSImage
     let tiff_data: objc2::rc::Retained<NSData> = image
         .TIFFRepresentation()
         .ok_or("failed to get TIFF representation")?;
 
-    // Create NSBitmapImageRep from TIFF data
     let bitmap_rep: objc2::rc::Retained<NSBitmapImageRep> =
         NSBitmapImageRep::imageRepWithData(&tiff_data)
             .ok_or("failed to create bitmap image rep")?;
 
-    // Convert to PNG
     let empty_dict: objc2::rc::Retained<
         NSDictionary<objc2_app_kit::NSBitmapImageRepPropertyKey, objc2::runtime::AnyObject>,
     > = NSDictionary::new();
@@ -69,7 +66,6 @@ fn save_nsimage_as_png(image: &objc2_app_kit::NSImage, path: &str) -> Result<(),
     }
     .ok_or("failed to convert to PNG")?;
 
-    // Write to file
     let bytes = png_data.to_vec();
     std::fs::write(path, &bytes).map_err(|e| format!("failed to write {path}: {e}"))?;
 

@@ -227,14 +227,12 @@
   font: 0.85rem var(--sans);
 }
 
-/* Owns its own leading space (attn-n01r.1). It used to have no margin at all
-   and borrowed its entire top gap from .quick-actions' 4rem bottom margin via
-   adjacent-sibling collapse. That worked only while .quick-actions was the
-   previous sibling — the moment the join panel opened between them, the
-   collapse resolved 64px ABOVE the panel and left 0px below it, so this label
-   sat exactly on the panel's bottom border. Spacing that belongs to an element
-   has to live on that element, or the next thing inserted here breaks it
-   again. */
+/* Owns its own leading space (attn-n01r.1). Borrowing the gap from
+   .quick-actions' bottom margin via adjacent-sibling collapse holds only while
+   .quick-actions is the previous sibling: open the join panel between them and
+   the collapse resolves 64px ABOVE the panel and 0px below, dropping this label
+   onto the panel's border. Spacing that belongs to an element lives on that
+   element. */
 .folio-label {
   font: 600 0.7rem var(--sans);
   color: var(--hosted-muted);
@@ -296,9 +294,9 @@
 
 .workspace-row {
   /* position: relative so .row-open can stretch a hit area over the whole row
-     (attn-n01r.32). The open target used to be the name text alone — about
-     200x28px of an 80,000px² row, a Fitts's-law failure on the single most
-     repeated action in the product. */
+     (attn-n01r.32). Targeting the name text alone gives ~200x28px of an
+     80,000px² row — a Fitts's-law failure on the most repeated action in the
+     product. */
   position: relative;
   display: grid;
   /* name · files · edited · size · review · tail (attn-n01r.34) */
@@ -313,9 +311,9 @@
   color: var(--ink);
 }
 
-/* The hover rule used to be `a.workspace-row:hover` — the element is a <div>,
-   so it never matched and the row had no hover state at all. Selected state
-   comes from the keyboard model (attn-n01r.29). */
+/* Do not narrow this to `a.workspace-row:hover`: the element is a <div>, so
+   that selector never matches and the row loses its hover state entirely.
+   Selected state comes from the keyboard model (attn-n01r.29). */
 .workspace-row:hover,
 .workspace-row:focus-within,
 .workspace-row[data-selected='true'] {

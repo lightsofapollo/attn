@@ -244,11 +244,11 @@
     </div>
 
     {#if storageUnavailable}
-      <!-- The reason the primary actions cannot be used (attn-n01r.46). They
-           previously used the `disabled` attribute, which removes them from the
-           tab order entirely — a keyboard user never encountered them at all
-           and was never told why. aria-disabled keeps them reachable and
-           announced; this element supplies the explanation they point at. -->
+      <!-- The reason the primary actions cannot be used (attn-n01r.46). The
+           `disabled` attribute removes them from the tab order, so a keyboard
+           user never encounters them and is never told why. aria-disabled keeps
+           them reachable and announced; this element supplies the explanation
+           they point at. -->
       <p id="storage-blocked-reason" class="form-error" role="alert">
         This browser profile cannot store workspaces, so creating and importing are unavailable.
         Check private-browsing or site-data settings, then reload.
@@ -347,11 +347,10 @@
     {/if}
 
     {#if workspaces.length > 0}
-      <!-- A real heading, and a real list (attn-n01r.30). The populated desk
-           previously exposed LESS structure than the empty one: the empty state
-           had an <h2> and the populated state had none, and the rows were a
-           flat run of divs with no list semantics — no "list, N items", no item
-           position, no way to jump to it. -->
+      <!-- A real heading, and a real list (attn-n01r.30). Without both, the
+           populated desk exposes LESS structure than the empty state, which has
+           its own <h2>: a flat run of divs announces no "list, N items", no
+           item position, and gives no way to jump to it. -->
       <div class="folio-head">
         <h2 class="folio-label" id="recent-workspaces">Recently on this device</h2>
         <div class="folio-filter">

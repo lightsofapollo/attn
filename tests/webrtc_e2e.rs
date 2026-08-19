@@ -648,9 +648,9 @@ async fn webrtc_happy_path_delivers_comment_envelope_to_owner_store() {
     // The owner's `on_message` handler runs `InboundPipeline::import_event_envelope`
     // (persists to `events.jsonl`) and then surfaces the decoded event upstream
     // as `TransportEvent::EventImported` — the SAME variant the relay WS path
-    // emits and the daemon's UI bridge consumes. Emitting `Envelope` here used
-    // to be a silent UI no-op (forward_transport_event drops it), so review
-    // events delivered over the P2P DataChannel never reached the frontend.
+    // emits and the daemon's UI bridge consumes. Emitting `Envelope` here is a
+    // silent UI no-op (forward_transport_event drops it), which strands every
+    // review event delivered over the P2P DataChannel.
     let received = timeout(Duration::from_secs(5), harness.owner_events_rx.recv())
         .await
         .expect("owner events_rx must surface event within 5s")

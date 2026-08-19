@@ -224,9 +224,9 @@
       && ownerState?.roomId !== undefined
       && ownerState.authority?.session?.authoringReady === true,
   );
-  // Lease/authoring states only — plain share status ("Shared · relay")
-  // moved into the ShareChip (desktop) and the masthead Share button
-  // (mobile), so the save chip no longer duplicates it.
+  // Lease/authoring states only. Plain share status ("Shared · relay") belongs
+  // to the ShareChip (desktop) and the masthead Share button (mobile), so the
+  // save chip must not duplicate it.
   const ownerRoomStatus = $derived.by(() => {
     if (joinLive) return 'Live · editing with another tab';
     const state = ownerState;
@@ -3223,11 +3223,10 @@
         />
       {:else if editing}
         <!-- The title is a label; the pencil is the affordance (attn-n01r.4).
-             It used to be a bare button that dropped straight into a text input
-             on a single tap — directly above the document, in the thumb's
-             travel path, for an act performed maybe once per workspace. The
-             name is now inert and rename takes a deliberate, separately-sized
-             target beside it. -->
+             A bare button here drops into a text input on a single tap —
+             directly above the document, in the thumb's travel path, for an act
+             performed maybe once per workspace. The name stays inert and rename
+             takes a deliberate, separately-sized target beside it. -->
         <span class="mobile-workspace-title" data-slot="mobile-workspace-name">
           {workspace.name}
         </span>

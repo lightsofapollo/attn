@@ -1724,10 +1724,10 @@ export class RoomDO extends DurableObject<Env> {
       const isOwnerDevice = deviceRecord.kind === "owner";
 
       // An owner snapshot supersedes every collab signal before it, so it drives
-      // signal compaction (event-log-compaction.md). The authority to compact is
-      // owner-only, so it must never rest on the previous heuristic (any device
-      // that merely lacked a reviewer grant tier), which classified every v2
-      // reviewer as an owner.
+      // signal compaction (event-log-compaction.md). Compaction authority is
+      // owner-only and must bind to a positive owner check — inferring it from
+      // the ABSENCE of a reviewer grant tier classifies every v2 reviewer as an
+      // owner.
       //
       // v2 has no per-envelope device proof, so the best available check is the
       // registration-bound device kind: a device registers kind="owner" only if
@@ -3904,7 +3904,6 @@ export class RoomDO extends DurableObject<Env> {
       return errorResponse(429, "ATTN_SOCKET_LIMIT", "device socket limit reached");
     }
 
-    // Build the upgrade response.
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];

@@ -1780,11 +1780,6 @@ mod tests {
     // device id (or accepts the broadcast / target=None form) BEFORE
     // AEAD-open, and surfaces a relay-redirect attempt as
     // `InboundError::TargetDeviceMismatch`.
-    //
-    // Tests cover the three branches of the target check:
-    //   12. target=Some(self)  → accept (targeted-to-us).
-    //   13. target=Some(other) → reject with TargetDeviceMismatch (relay redirect).
-    //   14. target=None        → accept (true broadcast).
     // -----------------------------------------------------------------
 
     #[tokio::test]

@@ -359,12 +359,11 @@ a:focus-visible {
    Take the second step of the embedded tier so the chip still reads as
    recessed against the cell it sits in.
 
-   This used to be `var(--background)`, which worked only while --code-block
-   was LIGHTER than the page: dropping to the page value was a step toward the
-   foreground. attn-evme.3 moved the block to the other side of the page, and
-   the same declaration silently inverted — the chip would have become the
-   lightest thing in the table, floating above a recessed panel. --code-block-
-   nested keeps the direction explicit so it cannot invert again. */
+   Never `var(--background)`: that holds only while --code-block is LIGHTER
+   than the page. Since attn-evme.3 put the block on the other side of the page,
+   the same declaration inverts silently and the chip becomes the lightest thing
+   in the table, floating above a recessed panel. --code-block-nested keeps the
+   direction explicit. */
 .attn-doc :is(th, td) code {
     background: var(--code-block-nested);
 }
@@ -523,12 +522,10 @@ a:focus-visible {
    goes fully opaque while the colour deepens — so the link never has to
    announce itself for the first time on hover.
 
-   IN `@layer doc`, no longer hiding outside the layers (2026-08-08). This rule
-   used to be deliberately unlayered because the hosted shell's chrome.css
-   carried an UNLAYERED `a { color: inherit; text-decoration: none }` reset
-   that would otherwise erase document links wholesale on /app. That reset now
-   lives in `@layer chrome`, which the doc tier beats by declared order — the
-   fight this rule was winning by escape hatch, it now wins by architecture.
+   IN `@layer doc`, not hiding outside the layers. It wins over the hosted
+   shell's `a { color: inherit; text-decoration: none }` reset by declared
+   order, because that reset lives in `@layer chrome`. Unlayer either side and
+   the reset erases document links wholesale on /app.
 
    Scoped to .attn-doc, not `a`, because the chrome reset is correct for
    chrome: nav rows, breadcrumbs and buttons-as-links should not grow rules

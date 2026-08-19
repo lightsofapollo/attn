@@ -31,20 +31,17 @@ export interface WorkspaceEntry {
 }
 
 /** Literal status language from planning/web-authoring/00-web-presence.md.
- *  Share status ("Shared · …") is no longer a save state — it lives in the
+ *  Share status ("Shared · …") is not a save state — it lives in the
  *  ShareChip / masthead share control.
  *
- *  'Changes autosaved' replaced 'Saved on this device' in attn-yzsa.2. The old
- *  string was carrying two jobs at once — the save state AND the local-first,
- *  nothing-leaves-your-machine claim — which is why it could not simply be
- *  renamed: the claim had to be re-homed first. It keeps its dedicated homes
- *  (the desk header's persistence badge, the landing Hero's "Saved on this
- *  device" source line) and this union now says only what it is for. The same
- *  sentence is on the native save chip as of the same issue, which is only
- *  honest because attn-yzsa.1 brought autosave to desktop — the copy change
- *  followed the behaviour, not the other way round.
+ *  This union says only what a save state is for. The local-first,
+ *  nothing-leaves-your-machine claim has its own homes (the desk header's
+ *  persistence badge, the landing Hero's "Saved on this device" source line)
+ *  and must not be folded back in here (attn-yzsa.2). 'Changes autosaved' is
+ *  honest on the native chip only because attn-yzsa.1 brought autosave to
+ *  desktop — the copy follows the behaviour, never the other way round.
  *
- *  DERIVED from lib/save-state-copy.ts, not restated (issue 9, 2026-08-08):
+ *  DERIVED from lib/save-state-copy.ts, not restated (issue 9):
  *  the native chip reads the same constants, so the two surfaces cannot say
  *  different sentences again without a type error. `typeof` keeps this a
  *  type-only relationship — the imports erase unless a value is used. The

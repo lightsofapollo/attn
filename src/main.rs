@@ -540,18 +540,12 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
         let base = ReviewManager::new(Arc::clone(store), working_copy, update_tx)
             .with_notification_sink(Arc::clone(&notification_sink));
 
-        // Attach the bootstrap pipeline so Share/Join IPCs go through real
-        // create-room + register-device against the relay rather than the
-        // stub.
-        //
-        // Resolution: a runtime ATTN_RELAY_URL always wins (dev, tests,
-        // self-hosting). Otherwise fall back to ATTN_DEFAULT_RELAY_URL baked in
-        // at build time — release builds set it to the production relay so a
-        // downloaded app collaborates out of the box without any env var.
-        // A bare debug build is a staging client; a bare release build is a
-        // production client. This keeps the native app functional even when
-        // it was built outside the wrapper scripts, while the runtime env var
-        // remains the explicit self-hosting/test escape hatch.
+        // Relay resolution: a runtime ATTN_RELAY_URL always wins, and is the
+        // escape hatch for dev, tests, and self-hosting. Otherwise fall back
+        // to ATTN_DEFAULT_RELAY_URL baked in at build time, so a downloaded
+        // app collaborates without an env var. A bare debug build is a
+        // staging client; a bare release build is a production client, which
+        // keeps a build made outside the wrapper scripts functional.
         let runtime_relay_url = std::env::var("ATTN_RELAY_URL").ok();
         let relay_url = resolve_native_relay_url(
             runtime_relay_url.as_deref(),
@@ -906,7 +900,6 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
     let mut modifiers = ModifiersState::default();
     tracing::info!("event loop running");
 
-    // Run event loop
     event_loop.run(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
 
@@ -1465,16 +1458,11 @@ fn build_review_dispatch_js(
 ) -> Result<String, serde_json::Error> {
     use crate::review::manager::ReviewUpdate;
     let callback = update.callback_name();
-    // Some variants need to be "unwrapped" before they reach the JS bridge
-    // so the payload's shape lines up with the typed callback signature in
-    // `web/src/lib/mock-ipc.ts`. The default wire form (`{kind:..., ...rest}`)
-    // is fine for status / share / anchor / outbox / error — those callbacks
-    // accept the union-typed payload directly. The exception is
-    // `EventImported`, which the frontend's `reviewEvent(payload: ReviewEvent)`
-    // expects to receive *as* a `ReviewEvent` (i.e. `{meta, body, auth}`),
-    // not wrapped in a discriminator. Extracting `event` here keeps the
-    // Rust shape rich (room_id available to manager-side observers) while
-    // still feeding the bridge what its typed signature wants.
+    // The default wire form (`{kind:..., ...rest}`) matches the typed callback
+    // signatures in `web/src/lib/mock-ipc.ts` for every variant except
+    // `EventImported`: `reviewEvent(payload: ReviewEvent)` wants a bare
+    // `{meta, body, auth}`, not a discriminated wrapper. Extracting `event`
+    // here keeps room_id on the Rust side for manager-side observers.
     let json = match update {
         ReviewUpdate::EventImported { event, .. } => serde_json::to_string(event)?,
         _ => serde_json::to_string(update)?,
@@ -2142,14 +2130,12 @@ fn build_page_html(init_payload_json: &str, theme: &str, typeset: &str) -> Strin
         .replace("<!-- INIT_SCRIPT -->", &init_script)
         .replace("data-theme=\"system\"", &format!("data-theme=\"{theme}\""))
         .replace("data-theme=\"light\"", &format!("data-theme=\"{theme}\""))
-        // `replacen(.., 1)`, not `replace`: since typeset.css gained an
-        // explicit `[data-typeset='editorial']` rule, this needle is no longer
-        // unique to the <html> tag in principle. It is in practice only
-        // because the CSS minifier emits selectors unquoted
-        // (`[data-typeset=editorial]`) — one minifier-config change away from
-        // this rewriting the default preset's own selector and stripping its
-        // tokens. The <html> tag is the first occurrence in the document, so
-        // bounding the replacement removes the dependency on that accident.
+        // `replacen(.., 1)`, not `replace`: typeset.css also carries a
+        // `[data-typeset='editorial']` rule, and only the minifier's unquoted
+        // output keeps this needle unique to the <html> tag. One minifier-config
+        // change would let `replace` rewrite that selector and strip its tokens.
+        // The <html> tag is the document's first occurrence, so bounding the
+        // replacement to one removes the dependency on that accident.
         .replacen(
             "data-typeset=\"editorial\"",
             &format!("data-typeset=\"{typeset}\""),

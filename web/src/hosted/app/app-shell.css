@@ -19,6 +19,13 @@
   grid-template-columns: minmax(0, 1fr);
 }
 
+/* THE ACCENT PLANE (attn-08fa.2/.13). The bar is made OF the accent rather than
+   marked with it, so One Pencil's count is untouched — see "the plane
+   exception" in DESIGN.md. app.css re-points the canonical tokens for this
+   subtree, and because every hosted name here (--ink, --rule, --rust) aliases a
+   canonical token, the whole hosted vocabulary follows with no per-rule edits.
+   The bottom hairline is --panel-border deliberately: it is NOT re-pointed, so
+   it separates the plane from the page instead of drawing a line on the plane. */
 .app-header {
   display: flex;
   align-items: center;
@@ -29,8 +36,57 @@
   flex-wrap: wrap;
   gap: 0.8rem;
   padding: 0.5rem 1.4rem;
-  border-bottom: 1px solid var(--rule);
+  background: var(--header-surface);
+  border-bottom: 1px solid var(--panel-border);
   font-family: var(--sans);
+}
+
+/* Danger ink has no contrast on terracotta, exactly as --amber-deep did not —
+   app.css already flattens that one to the on-accent foreground for the save
+   chip, and this is the same move for the same reason. The state does not go
+   with it: the dot's shape still separates healthy (filled) from caution
+   (hollow), and the pill below separates "needs attention" from "all good". */
+[data-slot='app-shell-header'] {
+  --danger-ink: var(--primary-foreground);
+}
+
+/* On a paper header, colour alone could carry "something needs you". On the
+   plane it cannot, so the actionable badge becomes an enclosed pill — the
+   header's own active convention (fill plus hairline, attn-11g4.6) rather than
+   a new invention. Only the anchor form gets it; the healthy badge is a span. */
+[data-slot='app-shell-header'] a.local-badge {
+  padding: 0.2rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 9999px;
+  background: var(--accent);
+  /* Full on-accent foreground, not the muted step. The pill's own wash already
+     darkens the ground it sits on, so muted text inside it lands close to the
+     fill in Ink; the enclosure is what steps the badge back, and the dot shape
+     is what separates caution from warn. */
+  color: var(--primary-foreground);
+}
+
+/* .button fills with `--sheet` (a paper tone) at 45%, which over terracotta
+   reads as milk rather than as a control. On the plane it takes the same
+   on-accent wash every other active pill uses. */
+[data-slot='app-shell-header'] .button {
+  background: var(--accent);
+}
+
+/* A filled primary on this plane is the trap the plane exception warns about:
+   --rust and --rust-contrast BOTH re-point to the on-accent foreground, so the
+   button would be near-white text on a near-white fill. Inverted, it stays the
+   most emphatic thing in the bar — no primary ships in this header today, and
+   this is here so the first one to arrive is not invisible. */
+[data-slot='app-shell-header'] .button.primary {
+  background: var(--primary-foreground);
+  border-color: var(--primary-foreground);
+  color: var(--header-surface);
+}
+
+[data-slot='app-shell-header'] .button.primary:hover {
+  background: color-mix(in oklch, var(--primary-foreground) 88%, transparent);
+  border-color: color-mix(in oklch, var(--primary-foreground) 88%, transparent);
 }
 
 .app-header .right {
@@ -55,12 +111,17 @@
   height: 29px;
 }
 
+/* Locality is INK, not green (attn-08fa.5). This badge reports where the file
+   lives — a chrome state, not a suggestion — and the Quarantine Rule keeps
+   green for the collaboration layer. Green here also read as a "you're safe"
+   tint, which is the security-theatre register "legible not loud" rejects. The
+   dot glyph and the wording carry the state; colour never carries it alone. */
 .local-badge {
   display: flex;
   align-items: center;
   gap: 0.45rem;
   font: 0.7rem var(--sans);
-  color: var(--green);
+  color: var(--ink);
 }
 
 /* Caution is its own tier: neither the collaboration green nor the destructive
@@ -405,11 +466,11 @@
 
 /* Re-assert the badge's own colour inside a row (attn-n01r.42). `.workspace-row
    span` (0,1,1) outranked `.local-badge` (0,1,0), so the same class rendered
-   green in the header and muted grey in the row — "Shared · relay sees only
+   one way in the header and muted grey in the row — "Shared · relay sees only
    ciphertext" became visually identical to "Local only", and the dot followed
    because it is painted with currentColor. */
 .workspace-row .local-badge {
-  color: var(--green);
+  color: var(--ink);
 }
 
 .empty-desk {
@@ -1059,28 +1120,23 @@
   box-shadow: none;
 }
 
-/* Resting footer: one honest drop target — dashed field, quiet ink. The
-   standing action rows moved to ⌘K and the tree context menu. */
+/* Shown only during a file drag (attn-08fa.12) — it was a permanent dashed box
+   in the rail, standing chrome for a rare action. Now it is a hint that arrives
+   with the drag and leaves with it, so it can be more emphatic than a resting
+   fixture could afford to be. */
 .hosted-sidebar-dropzone {
   display: grid;
   width: 100%;
+  margin: 0;
   justify-items: center;
   gap: 0.15rem;
   padding: 0.75rem 0.55rem;
-  border: 1px dashed color-mix(in oklch, var(--sidebar-foreground) 30%, transparent);
+  border: 1px dashed color-mix(in oklch, var(--sidebar-primary) 55%, transparent);
   border-radius: 8px;
-  background: transparent;
-  color: var(--muted-foreground);
-  font-size: 0.7rem;
-  text-align: center;
-  cursor: pointer;
-}
-
-.hosted-sidebar-dropzone:hover,
-.hosted-sidebar-dropzone:focus-visible {
-  border-color: color-mix(in oklch, var(--sidebar-primary) 55%, transparent);
   background: var(--sidebar-accent);
   color: var(--sidebar-accent-foreground);
+  font-size: 0.7rem;
+  text-align: center;
 }
 
 .hosted-dropzone-glyph {
@@ -1848,20 +1904,28 @@
   font: 0.78rem var(--mono);
 }
 
+/* The CURRENT pill is a LABEL, not the selection itself (attn-08fa.4). Its row
+   already carries the sanctioned accent wash for "current selection"; tinting
+   the pill too put two terracotta marks on one line for one fact. Neutral chip
+   fill, ink text — the badge step of the ramp, like the Moved badge. */
 .share-entry-name small {
   margin-left: 0.45rem;
   padding: 0.1rem 0.3rem;
   border-radius: 9999px;
-  background: color-mix(in srgb, var(--rust) 10%, transparent);
-  color: var(--rust-deep);
+  background: var(--rail-chip-surface);
+  color: var(--ink);
   font: 700 0.7rem/1 var(--sans);
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
 
+/* Counts and sizes are chrome, not code (attn-08fa.6). The Read/Do Rule gives
+   mono to code and identifiers; "Markdown · 125 B" is neither, and at 0.7rem
+   mono it also sat under the 10px-equivalent floor on a tinted ground. The
+   filename beside it keeps mono, which is what makes the pairing legible. */
 .share-entry-meta {
   color: var(--hosted-muted);
-  font: 0.7rem var(--mono);
+  font: 0.78rem var(--sans);
 }
 
 .share-manifest {
@@ -1871,7 +1935,7 @@
   gap: 0.35rem 1rem;
   margin-top: 0.75rem;
   color: var(--hosted-muted);
-  font: 0.7rem/1.4 var(--mono);
+  font: 0.78rem/1.4 var(--sans);
 }
 
 .share-manifest strong {
@@ -1885,7 +1949,7 @@
   margin-bottom: 0.9rem;
   padding-bottom: 0.8rem;
   border-bottom: 1px solid var(--rule);
-  font: 0.7rem/1.4 var(--mono);
+  font: 0.78rem/1.4 var(--sans);
 }
 
 .share-ready-scope strong {
@@ -1915,9 +1979,11 @@
   font: 700 0.85rem var(--sans);
 }
 
+/* The collapsed summary states what the advanced panel is set to — a sentence
+   about configuration, not a value the user types (attn-08fa.6). */
 .share-advanced > summary span {
   color: var(--hosted-muted);
-  font: 0.7rem var(--mono);
+  font: 0.78rem var(--sans);
 }
 
 .share-advanced-body {
@@ -2038,9 +2104,9 @@
   font: 700 0.85rem var(--mono);
 }
 
-.share-ready-mark {
-  background: var(--green);
-}
+/* The ready mark keeps the shared ink disc (attn-08fa.5). It used to override
+   to green, which spent a collaboration hue on a flow state; the glyph inside
+   it already says "done". */
 
 .share-progress-steps {
   margin: 1.2rem 0 0;
@@ -2071,9 +2137,13 @@
   color: var(--ink);
 }
 
+/* Three states, three shapes (attn-08fa.5): pending is a hollow rule ring,
+   current is a rust ring — the accent's sanctioned "current selection" job —
+   and complete is filled ink. Complete was green, which made the step list the
+   loudest quarantine breach in the flow. */
 .share-progress-steps li.complete::before {
-  border-color: var(--green);
-  background: var(--green);
+  border-color: var(--ink);
+  background: var(--ink);
 }
 
 .share-progress-steps li.active::before {
@@ -2122,9 +2192,12 @@
   font: 0.7rem/1.35 var(--sans);
 }
 
+/* The tier is the sentence's operative word and the one permission control in
+   the sheet, so it keeps the accent — "current selection" is the pencil's own
+   job. Sans, though: it is a chosen value, not code (attn-08fa.6). */
 .share-tier-picker label em {
   color: var(--rust);
-  font: 700 0.7rem/1 var(--mono);
+  font: 700 0.7rem/1 var(--sans);
   font-style: normal;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -2317,9 +2390,11 @@
   margin-top: 1rem;
 }
 
+/* Transient confirmation reads in ink (attn-08fa.5). Green here was a generic
+   success tint on base chrome; the message itself says what happened. */
 .share-feedback {
   margin: 0.6rem 0 0;
-  color: var(--green);
+  color: var(--ink);
   font: 0.78rem/1.4 var(--sans);
 }
 
@@ -2409,6 +2484,9 @@
   text-align: center;
 }
 
+/* Sharing has ended — an ink disc, matching .share-ready-mark. It was green,
+   which claimed a collaboration hue for the moment collaboration STOPS
+   (attn-08fa.5). */
 .share-stopped > span {
   width: 34px;
   height: 34px;
@@ -2416,7 +2494,7 @@
   place-items: center;
   margin: 0 auto 0.8rem;
   border-radius: 50%;
-  background: var(--green);
+  background: var(--ink);
   color: var(--sheet);
 }
 
@@ -2474,10 +2552,16 @@
   margin: 1rem 0 0.6rem;
 }
 
+/* A storage bar is ink on paper (attn-08fa.5). Held at 70% so the rust warn
+   fill still reads as an escalation rather than merely a hue swap; the numeric
+   readout beside it is what actually states the level. The width arrives as
+   --meter-fill because it is the one genuinely dynamic value here; everything
+   else about the bar belongs in this file (attn-08fa.7). */
 .meter span {
   display: block;
+  width: var(--meter-fill, 0%);
   height: 100%;
-  background: var(--green);
+  background: color-mix(in oklch, var(--ink) 70%, transparent);
 }
 
 .meter.warn span {
@@ -2491,8 +2575,12 @@
   font-family: var(--sans);
 }
 
+/* The storage state the Quarantine Rule was written for (attn-08fa.5).
+   AppHeader's badge already refused green for exactly this state; the panel one
+   screen away claimed it anyway. Weight and wording carry the healthy state,
+   the warn tier keeps its caution ink. */
 .status-box strong {
-  color: var(--green);
+  color: var(--ink);
 }
 
 .status-box.warn strong {
@@ -2507,6 +2595,68 @@
 
 .status-box small {
   color: var(--hosted-muted);
+}
+
+/* ————— storage page: the design-system pass (attn-08fa.7) —————
+   This page had been built from inline style attributes carrying sizes that
+   were on no ramp step (0.92 / 0.88 / 0.72rem), so it read as an admin panel
+   wearing the brand's colours. These classes put it back on the nine-step
+   chrome ramp and give the file one place to change. */
+
+.status-glyph {
+  margin-right: 0.4rem;
+}
+
+/* Was 0.72rem MONO — a sentence set in the code face, two Read/Do violations
+   deep (wrong role, and under the 10px floor once scaled). */
+.status-fine-print {
+  margin-top: 0.6rem;
+  color: var(--hosted-muted);
+  font: 0.78rem/1.5 var(--sans);
+}
+
+.storage-empty {
+  color: var(--hosted-muted);
+  font: 0.95rem/1.5 var(--sans);
+}
+
+.storage-note {
+  max-width: 52ch;
+  color: var(--hosted-muted);
+  font: 0.85rem/1.5 var(--sans);
+}
+
+/* Scoped to beat `.storage-panel h2` (0,1,1), which sets a flat 0.6rem on every
+   heading in the panel — a bare class here lost and collapsed the break between
+   the two sections. */
+.storage-panel h2.storage-subhead {
+  margin-top: 3rem;
+}
+
+/* A room id IS an identifier, so this one keeps the mono face — the Read/Do
+   Rule's actual boundary, and why the prose above had to lose it. */
+.storage-room-id {
+  font: 0.85rem var(--mono);
+}
+
+.storage-clear {
+  margin-top: 1rem;
+}
+
+.confirm-note {
+  margin: 0.3rem 0 0;
+  color: var(--hosted-muted);
+}
+
+.drop-zone-actions {
+  justify-content: center;
+}
+
+/* A hidden file input the button proxies for. Not a style choice — the control
+   must exist in the tree to be clickable — so it gets a named class rather than
+   an inline display:none. */
+.visually-removed {
+  display: none;
 }
 
 .confirm-clear {
@@ -2567,17 +2717,24 @@
   margin: 0 0 0.7rem;
 }
 
+/* Cap the measure (attn-08fa.6). This paragraph ran the full panel width —
+   ~142 characters a line at 1440px, roughly double a comfortable measure. The
+   fix is the column, not the type size: shrinking the text to fit a long line
+   makes both problems worse. */
 .drop-zone p {
-  margin: 0;
+  max-width: 62ch;
+  margin: 0 auto;
   color: var(--hosted-muted);
   font-size: 1rem;
   line-height: 1.6;
 }
 
+/* A "·"-separated sentence about what you can drop, not a code sample — sans
+   at the meta step, which also lifts it off the 11px floor (attn-08fa.6). */
 .drop-zone .formats {
   margin-top: 1.4rem;
   color: var(--hosted-muted);
-  font: 0.7rem var(--mono);
+  font: 0.78rem var(--sans);
 }
 
 /* ————— small screens ————— */
@@ -3166,6 +3323,27 @@
   margin-top: 0.75rem;
   font: 0.95rem/1.5 var(--sans);
   color: var(--danger-ink);
+}
+
+/* Title, next step, then the raw message as evidence (attn-08fa.7). The
+   technical string is kept — it is what makes a bug report useful — but it no
+   longer IS the message. */
+.form-error strong {
+  display: block;
+}
+
+.form-error p {
+  margin: 0.2rem 0 0;
+  color: var(--hosted-muted);
+  font-size: 0.85rem;
+}
+
+.form-error small {
+  display: block;
+  margin-top: 0.35rem;
+  color: var(--hosted-muted);
+  font: 0.78rem/1.45 var(--mono);
+  overflow-wrap: anywhere;
 }
 
 .join-error {

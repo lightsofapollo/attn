@@ -43,7 +43,8 @@
          category anyone occupies (attn-n01r.10). PRODUCT.md: "The reviewer for
          agent-authored docs: the one place where you and your agents review the
          same document together, human comments and AI suggestions in a single
-         end-to-end-encrypted thread, over files that never leave your machine."
+         end-to-end-encrypted thread, over files that never leave your machine
+         in the clear."
          A page that never says "agent" or "AI" sells a private Markdown editor
          — a category with a dozen occupants — and leaves the one thing that
          makes attn a new product unmentioned. Wording is drawn from PRODUCT.md,
@@ -54,9 +55,16 @@
          above the fold said what attn IS — the <title> tag was clearer than
          the page). It carries the noun; the headline keeps the argument. -->
     <p class="hero-lede">
+      <!-- "in the clear" is load-bearing, not hedging (attn-08fa.3). Sharing
+           publishes an ENCRYPTED copy, which the model section below states
+           plainly — so the unqualified claim was the one sentence on the page a
+           skeptical security reader could falsify, and falsifying it would put
+           every other claim in doubt. Three words make it exactly true, and the
+           promise is not weakened: nobody but the people in the review can read
+           it, which is what the reader actually cares about. -->
       attn is a Markdown reviewer for the documents on your disk. Your comments and your agents’
       suggestions land in the same margin, under the same rules — distinguished by who wrote them,
-      not by hierarchy. No account. The file never leaves your machine.
+      not by hierarchy. No account. The file never leaves your machine in the clear.
     </p>
     <p class="hero-security">
       <strong>End-to-end encrypted when you share.</strong> The relay routes ciphertext and never holds a key.

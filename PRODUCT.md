@@ -20,7 +20,9 @@ attn is a native, end-to-end-encrypted collaborative markdown reviewer. It opens
 
 ## Positioning
 
-The reviewer for agent-authored docs: the one place where you and your agents review the same document together, human comments and AI suggestions in a single end-to-end-encrypted thread, over files that never leave your machine. Every screen should reinforce that a review here is private by construction and that human and agent are peers in the same margin.
+The reviewer for agent-authored docs: the one place where you and your agents review the same document together, human comments and AI suggestions in a single end-to-end-encrypted thread, over files that never leave your machine in the clear. Every screen should reinforce that a review here is private by construction and that human and agent are peers in the same margin.
+
+(*"in the clear"* added 2026-08-19, attn-08fa.3. Sharing publishes an encrypted copy, as the paragraph above already says precisely — so the unqualified form of this line was a claim the product's own share flow contradicts, and it was being quoted verbatim onto the landing hero. Surfaces may compress this positioning, but none of them may drop the qualifier.)
 
 ## Brand Personality
 

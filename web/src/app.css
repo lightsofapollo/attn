@@ -119,59 +119,12 @@
   display: none !important;
 }
 
-/* ---------------------------------------------------------------------------
-   THE HEADER IS AN ACCENT PLANE (2026-08-10, owner-directed).
-
-   The bar is `--header-surface`, which is `--primary` itself. That makes every
-   control on it wrong by default: the whole header vocabulary is written in
-   `--foreground`, `--muted-foreground`, `--accent` and — worst — `--primary`,
-   which is now the ground those controls sit ON. The active-state convention
-   (`bg-primary/10` + `border-primary/35` + `text-primary`, attn-11g4.6) would
-   be an invisible accent-on-accent pill.
-
-   Rather than rewrite ~8 components' class strings, the header RE-POINTS the
-   tokens for its own subtree. Every Tailwind utility inside — `text-muted-
-   foreground`, `bg-accent`, `border-primary/35`, `text-primary` — resolves
-   through `--color-*: var(--*)` in the @theme block above, so they all adapt
-   with no component edits. The translation is exact: on this plane the pencil
-   IS the on-accent foreground, so "active" still reads as a filled, outlined
-   pill and "muted" still reads as a step back.
-
-   POLARITY FLIPS BETWEEN THEMES and that is why nothing here is hard-coded to
-   white: Paper's accent is dark (0.48) so its foreground is near-white, while
-   Ink's is light (0.72) so its foreground is near-black. `--primary-foreground`
-   is correct in both, `white` would be correct in one.
-
-   --amber-deep goes with them: the dirty save glyph's amber has no contrast on
-   terracotta. DESIGN.md already states the save chip's real signal is the
-   GLYPH (disk+pen vs disk+check), not the tint, so flattening both states to
-   the on-accent foreground costs nothing that was carrying meaning.
-
-   THE POPOVERS OPT OUT below. ShareChip, SnapshotBadge, OutboxIndicator and
-   PeerStrip render their floating cards INSIDE the header subtree (deliberately
-   — they are absolutely positioned rather than portalled, so they cannot be
-   torn away by the overflow-prone dock row). Those cards are their own
-   surface, not the accent plane, so they restore the ordinary palette from the
-   `--chrome-*` values captured at :root. Portalled menus (bits-ui dropdowns)
-   escape the subtree and need nothing. */
-:is(
-  [data-slot="native-header"],
-  [data-slot="owner-header"],
-  [data-slot="browser-review-header"]
-) {
-  --foreground: var(--primary-foreground);
-  --muted-foreground: color-mix(in oklch, var(--primary-foreground) 80%, transparent);
-  --faint-foreground: color-mix(in oklch, var(--primary-foreground) 62%, transparent);
-  --primary: var(--primary-foreground);
-  --accent: color-mix(in oklch, var(--primary-foreground) 16%, transparent);
-  --accent-foreground: var(--primary-foreground);
-  --border: color-mix(in oklch, var(--primary-foreground) 34%, transparent);
-  --input: color-mix(in oklch, var(--primary-foreground) 34%, transparent);
-  --ring: var(--primary-foreground);
-  --amber-deep: var(--primary-foreground);
-  --muted: color-mix(in oklch, var(--primary-foreground) 14%, transparent);
-  color: var(--primary-foreground);
-}
+/* THE HEADER IS AN ACCENT PLANE — the token re-pointing that makes it work now
+   lives in tokens.css, because the hosted app entry imports tokens.css and
+   chrome.css but NOT this file (attn-08fa.13). It had been declared here, so
+   the hosted shell's header painted the accent ground and then rendered
+   page-coloured controls on it. The opt-out below stays here: the popover slots
+   it names are native/review components that never mount in the hosted shell. */
 
 /* The floating cards are NOT the accent plane. Restoring from the captured
    root values keeps this honest — no literal is repeated, and a palette change
@@ -667,6 +620,12 @@
     color: color-mix(in oklch, var(--foreground) 96%, transparent);
   }
 
+  /* The active bar is the ACCENT (attn-08fa.9). DESIGN.md's navigation spec has
+     always said "a 2px accent bar at the left inset", and One Pencil lists
+     current selection among the accent's three jobs — this is the signature
+     one. It shipped as 62% ink, which made the bar a second, weaker statement
+     of the fill it sits inside instead of the one mark that says "you are
+     here". */
   .sidebar-tree-menu [data-sidebar="menu-button"][data-active="true"]::before,
   .sidebar-tree-menu [data-sidebar="menu-sub-button"][data-active="true"]::before {
     content: "";
@@ -674,7 +633,7 @@
     inset: 5px auto 5px 1px;
     width: 2px;
     border-radius: 2px;
-    background: color-mix(in oklch, var(--foreground) 62%, transparent);
+    background: var(--primary);
   }
 
   .sidebar-tree-row {
@@ -1058,6 +1017,25 @@
 }
 
 /* Sidebar control hard overrides (outside @layer to beat utility classes). */
+
+/* THE ACTIVE TREE ROW (attn-08fa.9). DESIGN.md specifies "active fills 19% ink
+   with a 2px accent bar at the left inset", and `@layer components` above
+   declares exactly that — but shadcn's menu-button ships
+   `data-[active=true]:bg-sidebar-accent` as a Tailwind UTILITY, and the Layer
+   Order puts utilities last on purpose. So the shipped fill was
+   `--sidebar-accent` (10% ink): the doc said 19, the page drew 10, and neither
+   was wrong about itself. Measured, not guessed — the row read
+   `oklch(0.14 0.008 55 / 0.1)` in the hosted editor.
+
+   This belongs in the hard-override block for the same reason the input sizing
+   does: it is a design-system decision that a component-library utility would
+   otherwise win. The ::before bar is layered and needs no override, since
+   nothing in the utility layer paints it. */
+.sidebar-tree-menu [data-sidebar="menu-button"][data-active="true"],
+.sidebar-tree-menu [data-sidebar="menu-sub-button"][data-active="true"] {
+  background: color-mix(in oklch, var(--foreground) 19%, transparent);
+}
+
 .project-sidebar [data-slot="sidebar-input"] {
   height: 36px;
   min-height: 36px;

@@ -19,6 +19,7 @@ colors:
   link: "oklch(0.48 0.14 28)"
   destructive: "oklch(0.55 0.20 27)"
   suggestion-green: "oklch(0.58 0.15 150)"
+  suggestion-ink: "oklch(0.40 0.12 150)"
   comment-amber: "oklch(0.62 0.13 82)"
   peer-owner: "oklch(0.58 0.14 32)"
   peer-reviewer: "oklch(0.56 0.11 235)"
@@ -188,6 +189,7 @@ A warm parchment field carrying near-black ink and a single terracotta accent; c
 
 ### Secondary
 - **Ledger Green** (`oklch(0.58 0.15 150)`): suggestion / insertion. Inline `ins` marks, the suggestion accent on review cards, "added" ghost text. Reads as *accepted into the record*.
+- **Suggestion Ink** (`oklch(0.40 0.12 150)`, INK `oklch(0.74 0.13 150)`): the same hue at text weight, for suggestion counts and any ledger-green *text*. It exists because the accent above backs 3px strips and washes and measures 3.0–3.3:1 as an 11px label — below the floor. Added to `tokens.css` 2026-08-19 (attn-08fa.5); it had lived in `hosted/chrome.css` as the one hosted colour with a literal of its own, so nothing checked it and the Quarantine Rule had no canonical token to point at. Both greens are collaboration-layer: see the Quarantine Rule below, which they are the most-breached instance of.
 - **Margin Amber** (`oklch(0.62 0.13 82)`): comment. The comment-highlight tint behind anchored text and the comment accent on review cards. Reads as *a note in the margin*, distinct from a proposed edit.
 
 ### Tertiary — Peer identity
@@ -220,10 +222,11 @@ Role is no longer a color channel for humans — shape carries it (round = human
 
 *The plane exception* (added 2026-08-10). The rule above governs MARKS made **on** a surface. The app header is a surface made **of** the accent, which is a different act: it is not one more terracotta thing competing with the others, it is a ground. On that ground the pencil inverts — `--foreground`, `--primary`, `--accent` and `--amber-deep` are all re-pointed at the on-accent foreground for the header's subtree (`app.css`, the `chrome-on-accent` block), so "active" still reads as a filled outlined pill and "muted" still reads as a step back, with the accent-on-accent invisibility that would otherwise follow designed out. The count still holds inside the reading column, which is what the rule is for: the header is chrome, and no second terracotta appears on the page beneath it. Floating cards that render *inside* the header subtree (ShareChip, SnapshotBadge, OutboxIndicator, PeerStrip) restore the ordinary palette — they are their own surface, not the plane.
 
-*The two labelling exceptions* (added 2026-08-07, attn-bw2h.7 / attn-bw2h.8). The pencil also annotates. Two surfaces carry the accent while being none of action, selection, or focus, and they are the **complete** list — this is a closed enumeration, not a new category anyone may extend by analogy:
+*The three labelling exceptions* (added 2026-08-07, attn-bw2h.7 / attn-bw2h.8; extended 2026-08-19, attn-08fa.1). The pencil also annotates. Three surfaces carry the accent while being none of action, selection, or focus, and they are the **complete** list — this is a closed enumeration, not a new category anyone may extend by analogy:
 
 - **Frontmatter keys** (`.frontmatter-pairs dt`). In a two-column key/value grid the key *names* the content rather than being it. The tint does the job small caps do in print: it separates the columns by role so the pairs scan without a rule between them. Values stay `--foreground`. Measured on the card's own `--code-block` ground: **4.97:1** in Paper, **7.85:1** in Ink. (Re-measured 2026-08-08 after attn-evme.3 recessed that ground; it previously read 6.47:1 / 7.67:1. Paper now clears the 4.5:1 floor by less than half a step, so this pairing is the one to re-measure first if the embedded tier ever moves again — `reading-palette.spec.ts` prints it on every run.)
 - **The saved save-state glyph** (`[data-slot="native-save-chip"]`, saved state only). This chip is the one piece of chrome that reports *where the user's work lives* — the product's entire claim in one glyph. On the ACCENT PLANE (2026-08-10) this exception is dormant rather than deleted: the header re-points `--primary` and `--amber-deep` at the on-accent foreground, so both save states render in the same on-plane ink and the glyph carries the whole signal — which DESIGN.md already said was the real signal, so nothing that was carrying meaning was lost. Measured on the plane: **6.65:1** Paper / **8.41:1** Ink, far past the 3:1 a 14px 2px-stroke glyph owes. The exception stays written down because the chip returns to a neutral plane the moment the header does.
+- **Unordered list markers** (`.attn-doc ul > li::marker`, at 80% primary; ordered numerals stay `--muted-foreground`). A bullet is not content — it is the typographic mark that says *this line is an item*, the same job the frontmatter key does one exception above. Set in ink it disappears into the text it is meant to punctuate; in the accent at 80% and 0.85em it reads as the red pencil ticking off a list, which is the product's own metaphor. Ratified 2026-08-19 (attn-08fa.1) after the audit found `base.css` and this document had disagreed since the markers shipped: the code called the rust point deliberate, the enumeration called it a violation, and a rule nobody can apply from the doc alone is not a rule. **The budget consequence is real and is the price of the exception:** a bulleted document now spends the accent dozens of times in the reading column, so the column's *other* accent slots are gone — no accented emphasis, no accented callout titles, no second tinted mark of any kind on a page that has a list. Links keep `--link`, which is why they were never in this enumeration.
 
 What the exceptions do **not** license, so the rule keeps its teeth:
 

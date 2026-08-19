@@ -1,6 +1,6 @@
 <script lang="ts">
   import BrandMark from '../../lib/BrandMark.svelte';
-  import { getTheme, toggleTheme } from '../theme.svelte';
+  import { cycleTheme, getTheme } from '../theme.svelte';
   import ReviewDemo from './ReviewDemo.svelte';
   import './alternate-landing.css';
 </script>
@@ -28,7 +28,7 @@
       <a href="#how">How it works</a>
       <a href="#private">Privacy</a>
       <a href="https://github.com/lightsofapollo/attn">GitHub</a>
-      <button class="alt-theme" type="button" onclick={toggleTheme} aria-label="Toggle theme">
+      <button class="alt-theme" type="button" onclick={cycleTheme} aria-label="Change appearance">
         {#if getTheme() === 'dark'}
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.5" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></svg>
         {:else}

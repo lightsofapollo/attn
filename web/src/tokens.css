@@ -225,6 +225,13 @@
   --review-card-comment-accent: oklch(0.62 0.13 82);
   --review-card-suggestion-accent: oklch(0.58 0.15 150);
 
+  /* Text-safe ledger green. The accent above backs 3px strips and washes, and
+     fails AA as text at chip sizes (11px badges measure 3.0-3.3:1). Suggestion
+     counts and inline "added" labels need a darker step of the same hue. Lived
+     in hosted/chrome.css as a free-standing value — the only hosted token that
+     bypassed this file, so nothing checked it. */
+  --suggestion-ink: oklch(0.40 0.12 150);
+
   /* Peer avatar accents — owner uses primary, reviewer cool, agent distinct
      violet. Lightness tuned so white monogram text clears WCAG AA 4.5:1
      (these tokens back small-text chips: PeerStrip, margin avatar chips,
@@ -341,6 +348,10 @@
   --review-card-comment-accent: oklch(0.78 0.13 86);
   --review-card-suggestion-accent: oklch(0.74 0.16 150);
 
+  /* Text-safe ledger green (see the light-block note); Ink runs it lighter
+     than the accent rather than darker, since the ground inverts. */
+  --suggestion-ink: oklch(0.74 0.13 150);
+
   /* Peer avatar accents. Lightness tuned for white text at WCAG AA 4.5:1
      (see the light-block note). */
   --peer-avatar-bg-owner: oklch(0.58 0.12 32);
@@ -349,4 +360,58 @@
 
   /* Stale anchor. */
   --stale-anchor-fg: oklch(0.60 0.010 250 / 60%);
+}
+
+/* ---------------------------------------------------------------------------
+   THE HEADER IS AN ACCENT PLANE (2026-08-10, owner-directed).
+
+   The bar is `--header-surface`, which is `--primary` itself. That makes every
+   control on it wrong by default: the whole header vocabulary is written in
+   `--foreground`, `--muted-foreground`, `--accent` and — worst — `--primary`,
+   which is now the ground those controls sit ON. The active-state convention
+   (`bg-primary/10` + `border-primary/35` + `text-primary`, attn-11g4.6) would
+   be an invisible accent-on-accent pill.
+
+   Rather than rewrite ~8 components' class strings, the header RE-POINTS the
+   tokens for its own subtree. Every Tailwind utility inside — `text-muted-
+   foreground`, `bg-accent`, `border-primary/35`, `text-primary` — resolves
+   through `--color-*: var(--*)` in app.css's @theme block, so they all adapt
+   with no component edits. The hosted shell gets the same effect for free: its
+   `--ink`, `--rule` and `--rust` aliases are token streams that re-resolve
+   against whatever `--foreground` and `--primary` mean at the point of USE, so
+   naming the plane is enough to move the whole hosted vocabulary onto it.
+
+   POLARITY FLIPS BETWEEN THEMES and that is why nothing here is hard-coded to
+   white: Paper's accent is dark (0.48) so its foreground is near-white, while
+   Ink's is light (0.72) so its foreground is near-black. `--primary-foreground`
+   is correct in both, `white` would be correct in one.
+
+   --amber-deep goes with them: the dirty save glyph's amber has no contrast on
+   terracotta. DESIGN.md already states the save chip's real signal is the
+   GLYPH (disk+pen vs disk+check), not the tint, so flattening both states to
+   the on-accent foreground costs nothing that was carrying meaning.
+
+   THIS LIVES IN tokens.css, not app.css (attn-08fa.13). The hosted app entry
+   imports tokens.css and chrome.css only; while this block sat in app.css the
+   hosted header could paint the accent ground but not the controls on it, so
+   `/app` rendered near-black text on terracotta. The popover opt-out stays in
+   app.css because the slots it names never mount in the hosted shell. */
+:is(
+  [data-slot="native-header"],
+  [data-slot="owner-header"],
+  [data-slot="browser-review-header"],
+  [data-slot="app-shell-header"]
+) {
+  --foreground: var(--primary-foreground);
+  --muted-foreground: color-mix(in oklch, var(--primary-foreground) 80%, transparent);
+  --faint-foreground: color-mix(in oklch, var(--primary-foreground) 62%, transparent);
+  --primary: var(--primary-foreground);
+  --accent: color-mix(in oklch, var(--primary-foreground) 16%, transparent);
+  --accent-foreground: var(--primary-foreground);
+  --border: color-mix(in oklch, var(--primary-foreground) 34%, transparent);
+  --input: color-mix(in oklch, var(--primary-foreground) 34%, transparent);
+  --ring: var(--primary-foreground);
+  --amber-deep: var(--primary-foreground);
+  --muted: color-mix(in oklch, var(--primary-foreground) 14%, transparent);
+  color: var(--primary-foreground);
 }

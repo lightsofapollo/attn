@@ -15,11 +15,13 @@
   import { userProfile } from '../../lib/profile.svelte';
   import { resolveParticipantColor } from '../../lib/participant-color';
   import CommandPalette, { type HostedCommand } from './CommandPalette.svelte';
+  import { cycleTheme, getThemePreference, nextPreference, THEME_LABEL } from '../theme.svelte';
+  import ShortcutsSheet from './ShortcutsSheet.svelte';
   import { AutosaveController } from './autosave';
   import type { reviewStore as ReviewStoreInstance } from '../../lib/review/store.svelte';
   import { buildManifest, buildWorkspaceZip, triggerDownload, zipFileName } from './export-zip';
   import { expandPicked, toImportFiles } from './import-files';
-  import { fileDrop, filesToPicked } from './file-drop';
+  import { fileDrop, filesToPicked, watchFileDrag } from './file-drop';
   import { autofocus } from '../../lib/hosted/autofocus';
   import type {
     EditingSession,
@@ -93,6 +95,13 @@
   );
   let shareOpen = $state(false);
   let paletteOpen = $state(false);
+  let shortcutsOpen = $state(false);
+  /* The sidebar drop hint appears only while a file is over the window
+     (attn-08fa.12). Keyboard and pointer users reach the same picker through
+     ⌘K → "Add files to this workspace", so removing the standing button removes
+     chrome, not a capability. */
+  let draggingFiles = $state(false);
+  $effect(() => watchFileDrag((dragging) => { draggingFiles = dragging; }));
   let filesSheetOpen = $state(false);
   let reviewSheetOpen = $state(false);
   let shareButton = $state<HTMLButtonElement | undefined>();
@@ -2437,7 +2446,7 @@
   // ————— command palette (⌘K) —————
   const paletteCommands = $derived.by<HostedCommand[]>(() => {
     const cmds: HostedCommand[] = [
-      { id: 'share', label: 'Share for review', keywords: 'invite link publish reviewer',
+      { id: 'share', label: 'Share for review', keywords: 'review link invite publish reviewer',
         run: () => openShare(shareButton) },
       { id: 'new', label: 'New Markdown file', keywords: 'create add document',
         // Open the sidebar name field (autofocused) — calling
@@ -2447,6 +2456,24 @@
         run: () => { titleValue = workspace.name; renamingTitle = true; } },
       { id: 'export', label: 'Export workspace', hint: '.zip', keywords: 'download backup save',
         run: () => void exportZip() },
+      /* Appearance, navigation and the shortcut sheet (attn-08fa.11). The
+         palette held only document actions, so a hosted user inside the editor
+         had no way to change theme (the toggle lives in the landing nav, which
+         you have left), no way back to the desk without the browser's Back
+         button, and nowhere to learn the shortcuts — the placeholder that names
+         ⌘K disappears on the first keystroke. All three live behind ⌘K so the
+         editor keeps its one visible action. */
+      { id: 'appearance', label: `Appearance: ${THEME_LABEL[getThemePreference()]}`,
+        hint: `Switch to ${THEME_LABEL[nextPreference()]}`, keywords: 'theme dark light ink paper system',
+        run: () => cycleTheme() },
+      { id: 'shortcuts', label: 'Keyboard shortcuts', hint: '?', keywords: 'help keys reference cheatsheet',
+        run: () => { shortcutsOpen = true; } },
+      { id: 'add-files', label: 'Add files to this workspace', keywords: 'import upload assets images drop browse',
+        run: () => assetInput?.click() },
+      { id: 'desk', label: 'Go to your desk', keywords: 'home workspaces back leave',
+        run: () => window.location.assign('/app') },
+      { id: 'storage', label: 'Storage & recovery', keywords: 'backup quota export data',
+        run: () => window.location.assign('/app/storage') },
     ];
     // Desktop is editor-first (no Edit/Done mode); this command only matters
     // where editing hasn't started — mobile, or a denied/lost owner lease.
@@ -2478,6 +2505,17 @@
       if (shareOpen || filesSheetOpen || reviewSheetOpen || lightboxOpen) return;
       event.preventDefault();
       paletteOpen = !paletteOpen;
+      return;
+    }
+    /* "?" opens the shortcut list — the convention every keyboard-first tool
+       this product is measured against uses (attn-08fa.11). Never while a text
+       field owns the keyboard: "?" is an ordinary character in a document. */
+    if (event.key === '?' && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      if (shareOpen || filesSheetOpen || reviewSheetOpen || lightboxOpen || paletteOpen) return;
+      const target = event.target;
+      if (target instanceof HTMLElement && target.closest('input, textarea, [contenteditable="true"]')) return;
+      event.preventDefault();
+      shortcutsOpen = true;
       return;
     }
     // File deletion is deliberately an inline tree confirmation rather than a
@@ -2780,6 +2818,7 @@
 <svelte:window onkeydown={onGlobalKeydown} onclick={onGlobalClick} />
 
 <CommandPalette bind:open={paletteOpen} commands={paletteCommands} />
+<ShortcutsSheet bind:open={shortcutsOpen} />
 
 <NamePrompt
   bind:open={namePromptOpen}
@@ -3096,16 +3135,14 @@
           }
         }}
       />
-    {:else}
-      <button
-        class="hosted-sidebar-dropzone"
-        type="button"
-        data-action="add-assets"
-        onclick={() => assetInput?.click()}
-      >
+    {:else if draggingFiles}
+      <!-- A hint, not a control: it exists only while a drag is in flight, so
+           it can never be the thing a keyboard user must reach (attn-08fa.12).
+           The reachable path is the palette command. -->
+      <p class="hosted-sidebar-dropzone" data-action="add-assets" role="status">
         <span class="hosted-dropzone-glyph" aria-hidden="true">⤓</span>
-        <span class="hosted-dropzone-copy">Drop files anywhere<span class="hosted-dropzone-hint">or click to browse</span></span>
-      </button>
+        <span class="hosted-dropzone-copy">Drop to add to this workspace</span>
+      </p>
     {/if}
     <input
       bind:this={assetInput}

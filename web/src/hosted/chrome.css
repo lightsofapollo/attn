@@ -38,8 +38,12 @@
      and defined nowhere, so that hover had no background at all. */
   --wash: var(--accent);
   /* Text-safe ledger green + danger ink: the accent-tier hues fail AA at
-     small sizes (11px badges measured 3.0-3.3:1). */
-  --green: oklch(0.40 0.12 150);
+     small sizes (11px badges measured 3.0-3.3:1). --green aliases the canonical
+     token like every other hue here; it held its own literal until attn-08fa.5,
+     which made it the one hosted colour tokens.css could not check. It is a
+     COLLABORATION hue under the Quarantine Rule — suggestion counts and review
+     marks only, never a chrome state. */
+  --green: var(--suggestion-ink);
   --danger-ink: oklch(0.45 0.18 27);
   --nav-veil: color-mix(in oklch, var(--background) 88%, transparent);
 
@@ -59,7 +63,6 @@
 }
 
 .dark {
-  --green: oklch(0.74 0.13 150);
   --danger-ink: oklch(0.70 0.16 25);
   --overlay-veil: oklch(0 0 0 / 55%);
   --shadow-strong: 0 30px 90px oklch(0 0 0 / 50%);

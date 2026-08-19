@@ -34,6 +34,11 @@
   let actionError = $state<string | null>(null);
   let importInput = $state<HTMLInputElement | undefined>();
 
+  /* Failures state what happened and what to do next, with the raw message
+     demoted to a detail line (attn-08fa.7). It used to render `error.message`
+     alone as the entire user-facing text — a DOMException name where
+     reviewer-lifecycle.ts, one import away, sets the house standard of title +
+     one next step. */
   async function guard(action: () => Promise<void>): Promise<void> {
     actionError = null;
     try {
@@ -62,39 +67,49 @@
     if (importInput) importInput.value = '';
   }
 
+  /* The glyph is a separate, aria-hidden field (attn-08fa.7). It used to be the
+     first character of `headline`, so every screen reader read "black circle
+     Protected from automatic cleanup" — a decorative mark announced as content.
+     It still earns its place visually: it is the second channel that keeps this
+     state from resting on colour alone. */
   const persistenceStatus = $derived.by(() => {
     switch (health.mode) {
       case 'persistent':
         return {
-          headline: '● Protected from automatic cleanup',
+          glyph: '●',
+          headline: 'Protected from automatic cleanup',
           detail:
             'This origin has persistent storage. Clearing Safari website data still removes it.',
           warn: false,
         };
       case 'best-effort':
         return {
-          headline: '◐ Best-effort storage',
+          glyph: '◐',
+          headline: 'Best-effort storage',
           detail:
             'The browser may evict this origin under pressure. On iOS, adding attn to the Home Screen improves persistence. Keep Markdown backups current.',
           warn: true,
         };
       case 'session-only':
         return {
-          headline: '◌ Private session',
+          glyph: '◌',
+          headline: 'Private session',
           detail:
             'This private session may erase your desk when it closes. Export anything you need to keep.',
           warn: true,
         };
       case 'quota-pressure':
         return {
-          headline: '▲ Storage is nearly full',
+          glyph: '▲',
+          headline: 'Storage is nearly full',
           detail:
             'Writes are paused so nothing is silently overwritten. Export or delete a workspace to continue.',
           warn: true,
         };
       case 'unavailable':
         return {
-          headline: '⊘ Local storage unavailable',
+          glyph: '⊘',
+          headline: 'Local storage unavailable',
           detail:
             'This browser currently blocks local document storage (for example Lockdown Mode). Nothing can be stored or cleared here.',
           warn: true,
@@ -116,7 +131,9 @@
         <div class="eyebrow">This browser profile</div>
         <h1>Storage &amp; recovery</h1>
       </div>
-      <p>Nothing here is stored in an attn account</p>
+      <!-- "Nothing here is stored in an attn account" implied an account exists
+           and this page happens to sit outside it (attn-08fa.8). -->
+      <p>There is no attn account — everything below lives in this browser</p>
     </div>
 
     <div class="storage-grid">
@@ -132,7 +149,7 @@
             </button>
           </div>
         {:else}
-          <p style="color: var(--hosted-muted); font: 0.92rem/1.5 var(--sans);">
+          <p class="storage-empty">
             No local workspaces in this browser profile yet.
           </p>
         {/each}
@@ -147,26 +164,29 @@
             bind:this={importInput}
             type="file"
             multiple
-            style="display: none"
+            class="visually-removed"
             aria-hidden="true"
             tabindex="-1"
             onchange={() => void onBackupPicked()}
           />
         </div>
         {#if actionError}
-          <p class="form-error" role="alert">
-            {actionError}
-          </p>
+          <div class="form-error" role="alert">
+            <strong>That didn’t finish</strong>
+            <p>Nothing was changed. Try again, and export a backup first if the file is large.</p>
+            <small>{actionError}</small>
+          </div>
         {/if}
 
-        <h2 style="margin-top: 3rem;">Remembered review rooms</h2>
-        <p style="color: var(--hosted-muted); font: 0.88rem/1.5 var(--sans); max-width: 52ch;">
-          Forgetting a room crypto-erases its local key first — the sealed copy on this device
+        <h2 class="storage-subhead">Remembered review rooms</h2>
+        <!-- "crypto-erases" was the implementation's word for it (attn-08fa.8). -->
+        <p class="storage-note">
+          Forgetting a room destroys its local key first — the sealed copy on this device
           becomes permanently unreadable. The room itself keeps running for other participants.
         </p>
         {#each rooms as roomId (roomId)}
           <div class="workspace-row">
-            <strong style="font: 0.85rem var(--mono);">{roomId}</strong>
+            <strong class="storage-room-id">{roomId}</strong>
             <span class="detail">E2EE review room</span>
             <span class="detail"></span>
             <button
@@ -180,9 +200,9 @@
           {#if confirmingForget === roomId}
             <div class="confirm-clear" role="alertdialog" aria-label={`Forget room ${roomId}?`}>
               <strong>Forget this room on this device?</strong>
-              <p style="margin: 0.3rem 0 0; color: var(--hosted-muted);">
+              <p class="confirm-note">
                 The local key is deleted first, so the remembered copy can never be read again
-                here. Your invite link (if you still have it) can rejoin while the room lives.
+                here. Your review link (if you still have it) can rejoin while the room lives.
               </p>
               <div class="actions">
                 <button class="button" type="button" onclick={() => (confirmingForget = null)}>
@@ -202,7 +222,7 @@
             </div>
           {/if}
         {:else}
-          <p style="color: var(--hosted-muted); font: 0.92rem/1.5 var(--sans);">
+          <p class="storage-empty">
             No remembered review rooms in this browser profile.
           </p>
         {/each}
@@ -210,13 +230,18 @@
 
       <aside class="storage-panel" aria-label="Persistence and quota">
         <div class="status-box" class:warn={persistenceStatus.warn}>
-          <strong>{persistenceStatus.headline}</strong>
+          <strong>
+            <span class="status-glyph" aria-hidden="true">{persistenceStatus.glyph}</span
+            >{persistenceStatus.headline}
+          </strong>
           <p>{persistenceStatus.detail}</p>
+          <!-- The fill percentage is data, so it stays an inline custom property;
+               every rule about how the bar LOOKS lives in app-shell.css. -->
           <div class="meter" class:warn={meterWarn} role="presentation">
-            <span style={`width: ${Math.round(health.usedFraction * 100)}%`}></span>
+            <span style={`--meter-fill: ${Math.round(health.usedFraction * 100)}%`}></span>
           </div>
           <small>{health.usedLabel} used of about {health.quotaLabel} available</small>
-          <p style="margin-top: 0.6rem; font: 0.72rem var(--mono); color: var(--hosted-muted);">
+          <p class="status-fine-print">
             Large files use the browser's origin file system when available and fall back to
             encrypted database storage when it isn't. Either way, content is sealed.
           </p>
@@ -224,9 +249,8 @@
 
         {#if !confirmingClear}
           <button
-            class="button danger"
+            class="button danger storage-clear"
             type="button"
-            style="margin-top: 1rem;"
             onclick={() => (confirmingClear = true)}
           >
             Clear all local attn data
@@ -234,7 +258,7 @@
         {:else}
           <div class="confirm-clear" role="alertdialog" aria-label="Confirm clearing all local attn data">
             <strong>Delete every local workspace in this browser?</strong>
-            <p style="margin: 0.3rem 0 0; color: var(--hosted-muted);">
+            <p class="confirm-note">
               This cannot be undone. Shared rooms are not recalled, but their local source copies
               are removed.
             </p>

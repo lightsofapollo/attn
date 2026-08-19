@@ -30,7 +30,11 @@
     <a class="entry" href="/app#join" aria-labelledby="entry-join-label">
       <span class="entry-head"><small>Have a link?</small></span>
       <strong class="entry-title" id="entry-join-label">Join a review</strong>
-      <p>Open the same encrypted review as native attn, across every file in it.</p>
+      <!-- Was "Open the same encrypted review as native attn, across every file
+           in it." — the sentence does not parse, and it is the paragraph a
+           first-time reviewer is most likely to read before clicking a link
+           somebody sent them (attn-08fa.8). -->
+      <p>Open the encrypted review right in your browser — every file in it, nothing to install.</p>
     </a>
   </div>
 </section>

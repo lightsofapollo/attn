@@ -3,6 +3,7 @@
   import DeskHome from './DeskHome.svelte';
   import OpenPage from './OpenPage.svelte';
   import StoragePage from './StoragePage.svelte';
+  import NotFound from '../not-found/NotFound.svelte';
   import type {
     ImportFileInput,
     StorageHealth,
@@ -362,20 +363,21 @@
     </main>
   </div>
 {:else if route?.view === 'workspace'}
-  <div class="app-shell" data-app-view="missing">
-    <main class="desk">
-      <div class="desk-title">
-        <div>
-          <div class="eyebrow">Not on this device</div>
-          <h1>That workspace isn’t here</h1>
-        </div>
-      </div>
-      <p style="margin-top: 2rem; font: 1rem/1.6 var(--sans); color: var(--hosted-muted);">
-        Local workspaces live in the browser profile that created them. Import a backup, or go
-        back to <a href="/app" style="text-decoration: underline;">your desk</a>.
-      </p>
-    </main>
-  </div>
+  <!-- The shared recovery surface (attn-08fa.10). This branch used to render a
+       headerless page built from inline styles, whose only way out was a muted
+       underlined "your desk" link — a low-visibility recovery path, and a link
+       treatment matching neither the prose rule (accent + underline) nor the
+       chrome-anchor rule (no underline). It now says its own words through the
+       same component the 404 uses, so both get the header, the type scale, the
+       capped measure and the two real buttons. -->
+  <NotFound
+    status="Not on this device"
+    heading="That workspace isn’t here."
+    copy="Local workspaces live in the browser profile that created them. Import a backup to bring this one onto this device, or go back to your desk."
+    primary={{ href: '/app', label: 'Go to your desk' }}
+    secondary={{ href: '/open', label: 'Import a workspace' }}
+    documentTitle="Workspace not found · attn"
+  />
 {:else if route?.view === 'storage'}
   <StoragePage
     {health}

@@ -111,6 +111,7 @@ const TOKEN_MAP: Record<string, string> = {
   link: 'link',
   destructive: 'destructive',
   'suggestion-green': 'review-card-suggestion-accent',
+  'suggestion-ink': 'suggestion-ink',
   'comment-amber': 'review-card-comment-accent',
   'peer-owner': 'peer-avatar-bg-owner',
   'peer-reviewer': 'peer-avatar-bg-reviewer',

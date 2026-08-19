@@ -407,7 +407,13 @@ p {
   overflow-wrap: break-word;
 }
 
+/* Cap the measure (attn-08fa.6). The column is ~604px, which at this size is
+   ~90 characters a line — the cards' copy had simply always been short enough
+   to hide it, so rewriting one entry to a full sentence was what exposed it.
+   62ch matches the hero lede, so the two blocks of running copy on this page
+   wrap on the same rule. */
 .entry p {
+  max-width: 62ch;
   margin: 0;
   color: var(--hosted-muted);
   font: 0.84rem/1.45 var(--sans);

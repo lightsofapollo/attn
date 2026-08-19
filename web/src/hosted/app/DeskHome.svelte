@@ -304,7 +304,7 @@
         onsubmit={submitJoin}
         aria-label="Join a review"
       >
-        <label for="join-invite-input">Paste an invite link</label>
+        <label for="join-invite-input">Paste a review link</label>
         <div class="join-row">
           <!-- svelte-ignore a11y_autofocus — the panel exists to receive the paste. -->
           <input

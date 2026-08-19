@@ -26,7 +26,12 @@
       case 'session-only':
         return { label: 'This session only', tone: 'warn' };
       case 'unavailable':
-        return { label: 'View-only', tone: 'warn' };
+        /* Not "View-only" (attn-08fa.8). That is the name of a SHARE TIER in
+           the share sheet, and both labels are reachable in one session — a
+           reviewer could read "View-only" here and conclude someone had limited
+           their permissions, when the truth is that this browser will not let
+           attn store anything locally. Two meanings, one word, no relation. */
+        return { label: 'Storage blocked', tone: 'warn' };
       case 'quota-pressure':
         return { label: SAVE_STATE_STORAGE_ATTENTION, tone: 'warn' };
     }
@@ -38,7 +43,13 @@
   const needsAttention = $derived(badge.tone !== 'ok');
 </script>
 
-<header class="app-header">
+<!-- data-slot opts this header into the ACCENT PLANE token re-pointing in
+     app.css, the same block the native, owner and review headers use. The desk,
+     open and storage routes wore a paper header while the editor and review
+     surfaces wore the plane, so crossing into a document flipped the top of the
+     window — in Ink, a steel band appearing and vanishing dozens of times a
+     session. One grammar, one plane (attn-08fa.2). -->
+<header class="app-header" data-slot="app-shell-header">
   <a class="brand" href="/"><BrandMark class="mark" />attn</a>
   <div class="right">
     {#if needsAttention}

@@ -98,7 +98,7 @@
               <li>Comment and suggestion text</li>
               <li>File and folder names</li>
               <li>Who you are, beyond an id you generate</li>
-              <li>The room key — it lives after the <code>#</code> in your invite link, and browsers
+              <li>The room key — it lives after the <code>#</code> in your review link, and browsers
                 never send that part to a server</li>
             </ul>
           </div>

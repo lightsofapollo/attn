@@ -35,6 +35,64 @@ function dragHasFiles(event: DragEvent): boolean {
 }
 
 /**
+ * Watch the whole window for a file drag, reporting only transitions.
+ *
+ * Backs the sidebar's drop hint (attn-08fa.12). That hint used to be permanent
+ * chrome — a dashed box standing in the rail every second of every session for
+ * an action taken rarely, which for a daily user is a fixture that reads as
+ * unfinished. Showing it exactly while a file is over the window keeps the
+ * affordance where it is useful and returns the space the rest of the time.
+ *
+ * The same depth counter as `fileDrop`: `dragleave` fires on every child
+ * boundary crossed, so a naive listener flickers the hint. `dragover` refreshes
+ * the depth because a drag that ends outside the window (dropped on another
+ * app, or cancelled) never sends a final `dragleave` at all.
+ */
+export function watchFileDrag(onChange: (dragging: boolean) => void): () => void {
+  let depth = 0;
+  let dragging = false;
+
+  const set = (next: boolean): void => {
+    if (next === dragging) return;
+    dragging = next;
+    onChange(next);
+  };
+
+  const onEnter = (event: DragEvent): void => {
+    if (!dragHasFiles(event)) return;
+    depth += 1;
+    set(true);
+  };
+  const onLeave = (event: DragEvent): void => {
+    if (!dragHasFiles(event)) return;
+    depth = Math.max(0, depth - 1);
+    if (depth === 0) set(false);
+  };
+  const onOver = (event: DragEvent): void => {
+    if (!dragHasFiles(event)) return;
+    if (depth === 0) depth = 1;
+    set(true);
+  };
+  const onEnd = (): void => {
+    depth = 0;
+    set(false);
+  };
+
+  window.addEventListener('dragenter', onEnter);
+  window.addEventListener('dragleave', onLeave);
+  window.addEventListener('dragover', onOver);
+  window.addEventListener('drop', onEnd);
+  window.addEventListener('dragend', onEnd);
+  return () => {
+    window.removeEventListener('dragenter', onEnter);
+    window.removeEventListener('dragleave', onLeave);
+    window.removeEventListener('dragover', onOver);
+    window.removeEventListener('drop', onEnd);
+    window.removeEventListener('dragend', onEnd);
+  };
+}
+
+/**
  * Svelte action: accept dropped files on `node`. Reflects an active drag as
  * `data-drag-over` on the node (style hook) and only reacts to file drags, so
  * dragging selected text or a link never triggers an import. A depth counter

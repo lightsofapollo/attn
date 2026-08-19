@@ -81,7 +81,10 @@ export function reviewerLifecyclePresentation(
       };
     case 'device_register':
       return {
-        title: 'Attn could not finish opening this review',
+        // Sentence-initial "Attn" was the only place the brand took a capital
+        // (attn-08fa.8); the product is lowercase everywhere else, so the fix is
+        // to recast rather than to capitalise a name that has no capital.
+        title: 'This review could not be opened',
         diagnosis: 'Check your connection, then paste the complete review link to try again.',
         canPasteInvite: true,
         canRetry: true,
@@ -90,7 +93,7 @@ export function reviewerLifecyclePresentation(
     case 'network':
     default:
       return {
-        title: 'Attn could not reach this review',
+        title: 'This review can’t be reached right now',
         diagnosis: 'Check your connection, then paste the complete review link to try again.',
         canPasteInvite: true,
         canRetry: true,

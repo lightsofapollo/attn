@@ -1540,7 +1540,7 @@
           </div>
         {/if}
         <nav class="mt-8 flex flex-wrap gap-x-5 gap-y-3 font-sans text-sm" aria-label="Review recovery">
-          <a class="inline-flex min-h-[44px] items-center text-primary underline underline-offset-4" href="/app">Your Desk</a>
+          <a class="inline-flex min-h-[44px] items-center text-primary underline underline-offset-4" href="/app">Your desk</a>
           <a class="inline-flex min-h-[44px] items-center text-primary underline underline-offset-4" href="/">attn home</a>
         </nav>
       </section>

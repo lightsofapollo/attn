@@ -1,6 +1,6 @@
 <script lang="ts">
   import BrandMark from '../../lib/BrandMark.svelte';
-  import { getTheme, toggleTheme } from '../theme.svelte';
+  import { cycleTheme, getTheme, getThemePreference, THEME_LABEL, nextPreference } from '../theme.svelte';
 
   /* Mobile navigation (attn-n01r.17). Below 680px `.nav-link { display: none }`
      removed "How it works", "Your desk", "Native app" and GitHub with no
@@ -43,15 +43,21 @@
     <a class="nav-link" href="/app">Your desk</a>
     <a class="nav-link" href="#native">Native app</a>
     <a class="nav-link" href="https://github.com/lightsofapollo/attn">GitHub</a>
-    <!-- aria-pressed + an action label (attn-n01r.25). The label was static
-         across both states and both icons are aria-hidden, so nothing conveyed
-         the current theme (WCAG 4.1.2 — value/state not exposed). -->
+    <!-- An action label naming the current appearance (attn-n01r.25). The label
+         was static across both states and both icons are aria-hidden, so
+         nothing conveyed the current theme (WCAG 4.1.2 — value/state not
+         exposed).
+
+         aria-pressed is GONE (attn-08fa.11): appearance is now three states,
+         and a control that cycles Light → Dark → System is not a binary toggle.
+         Claiming pressed/unpressed would mis-report "System" as one of the two
+         it is not. The label states where you are and where the next press
+         goes. -->
     <button
       class="icon-button"
       type="button"
-      onclick={toggleTheme}
-      aria-pressed={getTheme() === 'dark'}
-      aria-label={getTheme() === 'dark' ? 'Switch to light theme' : 'Switch to dark theme'}
+      onclick={cycleTheme}
+      aria-label={`Appearance: ${THEME_LABEL[getThemePreference()]}. Switch to ${THEME_LABEL[nextPreference()]}.`}
     >
       {#if getTheme() === 'dark'}
         <svg

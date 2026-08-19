@@ -45,6 +45,11 @@
 
   /* Hosted-only presentation tokens (no canonical equivalent). */
   --overlay-veil: oklch(0.14 0.008 55 / 38%);
+  /* The lightbox scrim is deeper than the dialog veil — it has to put a photo
+     on a dark ground rather than dim a page — and it stays near-black in both
+     themes for that reason. A token, not a literal, so the one place that
+     needs this depth cannot fork the palette (attn-a9f7.2.2). */
+  --lightbox-veil: oklch(0.14 0.008 55 / 92%);
   --window-frame: color-mix(in oklch, var(--background) 90%, var(--foreground) 10%);
   --window-chrome-top: color-mix(in oklch, var(--surface-raised) 70%, var(--background) 30%);
   --window-chrome-bottom: color-mix(in oklch, var(--background) 96%, var(--foreground) 4%);

@@ -93,6 +93,13 @@
   );
   let shareOpen = $state(false);
   let paletteOpen = $state(false);
+
+  /* The keycap has to name the key this machine actually uses; ⌘ on Windows is
+     worse than no hint at all. */
+  const paletteShortcutLabel =
+    typeof navigator !== 'undefined' && /Mac|iPhone|iPad|iPod/u.test(navigator.platform || navigator.userAgent)
+      ? '⌘K'
+      : 'Ctrl K';
   let filesSheetOpen = $state(false);
   let reviewSheetOpen = $state(false);
   let shareButton = $state<HTMLButtonElement | undefined>();
@@ -3026,6 +3033,19 @@
         onblur={() => { if (renamingTitle) void commitTitleRename(); }}
       />
     {/if}
+    <!-- ⌘K was reachable and advertised nowhere (attn-a9f7.1.8): a keyboard-
+         first product whose one command surface could only be found by habit.
+         A button rather than a passive hint, so the affordance also works for
+         whoever reaches for the mouse. -->
+    <button
+      class="palette-hint"
+      type="button"
+      aria-label="Open the command palette"
+      onclick={() => (paletteOpen = true)}
+    >
+      <span class="palette-hint-label">Commands</span>
+      <kbd class="kbd-chip" aria-hidden="true">{paletteShortcutLabel}</kbd>
+    </button>
     <SaveChip
       class="save-state"
       dataSlot="hosted-save-chip"

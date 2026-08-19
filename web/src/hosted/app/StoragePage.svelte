@@ -1,5 +1,5 @@
 <script lang="ts">
-  import AppHeader from './AppHeader.svelte';
+  import ConfirmPanel from './ConfirmPanel.svelte';
   import DegradedBanner from './DegradedBanner.svelte';
   import { expandPicked, prepareImport, type PickedFile } from './import-files';
   import type { ImportFileInput, StorageHealth, WorkspaceSummary } from './types';
@@ -103,159 +103,146 @@
   });
 </script>
 
-<div class="app-shell" data-app-view="storage">
-  <AppHeader mode={health.mode}>
-    {#snippet actions()}
-      <a class="button" href="/app">Back to your desk</a>
-    {/snippet}
-  </AppHeader>
-  <main class="desk">
-    <DegradedBanner mode={health.mode} />
-    <div class="desk-title">
-      <div>
-        <div class="eyebrow">This browser profile</div>
-        <h1>Storage &amp; recovery</h1>
-      </div>
-      <p>Nothing here is stored in an attn account</p>
+<main class="desk">
+  <DegradedBanner mode={health.mode} />
+  <div class="desk-title">
+    <div>
+      <div class="eyebrow">This browser profile</div>
+      <h1>Storage &amp; recovery</h1>
     </div>
+    <p>Nothing here is stored in an attn account</p>
+  </div>
 
-    <div class="storage-grid">
-      <section class="storage-panel" aria-label="Local workspaces">
-        <h2>Local workspaces</h2>
-        {#each workspaces as workspace (workspace.id)}
-          <div class="workspace-row">
-            <strong>{workspace.name}</strong>
-            <span class="detail">{workspace.sizeLabel}</span>
-            <span class="detail">{workspace.backupLabel}</span>
-            <button class="button" type="button" onclick={() => void guard(() => onExportWorkspace(workspace.id))}>
-              Export
-            </button>
-          </div>
-        {:else}
-          <p style="color: var(--hosted-muted); font: 0.92rem/1.5 var(--sans);">
-            No local workspaces in this browser profile yet.
-          </p>
-        {/each}
-        <div class="storage-actions">
-          <button class="button primary" type="button" onclick={() => void guard(onExportAll)}>
-            Export all workspaces
+  <div class="storage-grid">
+    <section class="storage-panel" aria-label="Local workspaces">
+      <h2>Local workspaces</h2>
+      {#each workspaces as workspace (workspace.id)}
+        <div class="workspace-row">
+          <strong>{workspace.name}</strong>
+          <span class="detail">{workspace.sizeLabel}</span>
+          <span class="detail">{workspace.backupLabel}</span>
+          <button class="button" type="button" onclick={() => void guard(() => onExportWorkspace(workspace.id))}>
+            Export
           </button>
-          <button class="button" type="button" onclick={() => importInput?.click()}>
-            Import backup
-          </button>
-          <input
-            bind:this={importInput}
-            type="file"
-            multiple
-            style="display: none"
-            aria-hidden="true"
-            tabindex="-1"
-            onchange={() => void onBackupPicked()}
-          />
         </div>
-        {#if actionError}
-          <p class="form-error" role="alert">
-            {actionError}
-          </p>
-        {/if}
-
-        <h2 style="margin-top: 3rem;">Remembered review rooms</h2>
-        <p style="color: var(--hosted-muted); font: 0.88rem/1.5 var(--sans); max-width: 52ch;">
-          Forgetting a room crypto-erases its local key first — the sealed copy on this device
-          becomes permanently unreadable. The room itself keeps running for other participants.
+      {:else}
+        <p class="storage-empty">
+          No local workspaces in this browser profile yet.
         </p>
-        {#each rooms as roomId (roomId)}
-          <div class="workspace-row">
-            <strong style="font: 0.85rem var(--mono);">{roomId}</strong>
-            <span class="detail">E2EE review room</span>
-            <span class="detail"></span>
-            <button
-              class="button danger"
-              type="button"
-              onclick={() => (confirmingForget = roomId)}
-            >
-              Forget
-            </button>
-          </div>
-          {#if confirmingForget === roomId}
-            <div class="confirm-clear" role="alertdialog" aria-label={`Forget room ${roomId}?`}>
-              <strong>Forget this room on this device?</strong>
-              <p style="margin: 0.3rem 0 0; color: var(--hosted-muted);">
-                The local key is deleted first, so the remembered copy can never be read again
-                here. Your invite link (if you still have it) can rejoin while the room lives.
-              </p>
-              <div class="actions">
-                <button class="button" type="button" onclick={() => (confirmingForget = null)}>
-                  Cancel
-                </button>
-                <button
-                  class="button danger"
-                  type="button"
-                  onclick={async () => {
-                    await guard(() => onForgetRoom(roomId));
-                    confirmingForget = null;
-                  }}
-                >
-                  Forget room
-                </button>
-              </div>
-            </div>
-          {/if}
-        {:else}
-          <p style="color: var(--hosted-muted); font: 0.92rem/1.5 var(--sans);">
-            No remembered review rooms in this browser profile.
-          </p>
-        {/each}
-      </section>
+      {/each}
+      <div class="storage-actions">
+        <button class="button primary" type="button" onclick={() => void guard(onExportAll)}>
+          Export all workspaces
+        </button>
+        <button class="button" type="button" onclick={() => importInput?.click()}>
+          Import backup
+        </button>
+        <input
+          bind:this={importInput}
+          type="file"
+          multiple
+          style="display: none"
+          aria-hidden="true"
+          tabindex="-1"
+          onchange={() => void onBackupPicked()}
+        />
+      </div>
+      {#if actionError}
+        <p class="form-error" role="alert">
+          {actionError}
+        </p>
+      {/if}
 
-      <aside class="storage-panel" aria-label="Persistence and quota">
-        <div class="status-box" class:warn={persistenceStatus.warn}>
-          <strong>{persistenceStatus.headline}</strong>
-          <p>{persistenceStatus.detail}</p>
-          <div class="meter" class:warn={meterWarn} role="presentation">
-            <span style={`width: ${Math.round(health.usedFraction * 100)}%`}></span>
-          </div>
-          <small>{health.usedLabel} used of about {health.quotaLabel} available</small>
-          <p style="margin-top: 0.6rem; font: 0.72rem var(--mono); color: var(--hosted-muted);">
-            Large files use the browser's origin file system when available and fall back to
-            encrypted database storage when it isn't. Either way, content is sealed.
-          </p>
-        </div>
-
-        {#if !confirmingClear}
+      <h2 class="storage-section-head">Remembered review rooms</h2>
+      <p class="storage-note">
+        Forgetting a room crypto-erases its local key first — the sealed copy on this device
+        becomes permanently unreadable. The room itself keeps running for other participants.
+      </p>
+      {#each rooms as roomId (roomId)}
+        <div class="workspace-row">
+          <strong class="storage-room-id">{roomId}</strong>
+          <span class="detail">E2EE review room</span>
+          <span class="detail"></span>
           <button
             class="button danger"
             type="button"
-            style="margin-top: 1rem;"
-            onclick={() => (confirmingClear = true)}
+            onclick={() => (confirmingForget = roomId)}
           >
-            Clear all local attn data
+            Forget
           </button>
-        {:else}
-          <div class="confirm-clear" role="alertdialog" aria-label="Confirm clearing all local attn data">
-            <strong>Delete every local workspace in this browser?</strong>
-            <p style="margin: 0.3rem 0 0; color: var(--hosted-muted);">
+        </div>
+        {#if confirmingForget === roomId}
+          <ConfirmPanel
+            label={`Forget room ${roomId}?`}
+            title="Forget this room on this device?"
+            confirmLabel="Forget room"
+            oncancel={() => (confirmingForget = null)}
+            onconfirm={async () => {
+              await guard(() => onForgetRoom(roomId));
+              confirmingForget = null;
+            }}
+          >
+            {#snippet body()}
+              <p class="confirm-body">
+                The local key is deleted first, so the remembered copy can never be read again
+                here. Your invite link (if you still have it) can rejoin while the room lives.
+              </p>
+            {/snippet}
+          </ConfirmPanel>
+        {/if}
+      {:else}
+        <p class="storage-empty">
+          No remembered review rooms in this browser profile.
+        </p>
+      {/each}
+    </section>
+
+    <aside class="storage-panel" aria-label="Persistence and quota">
+      <div class="status-box" class:warn={persistenceStatus.warn}>
+        <strong>{persistenceStatus.headline}</strong>
+        <p>{persistenceStatus.detail}</p>
+        <div class="meter" class:warn={meterWarn} role="presentation">
+          <span style={`width: ${Math.round(health.usedFraction * 100)}%`}></span>
+        </div>
+        <small>{health.usedLabel} used of about {health.quotaLabel} available</small>
+        <p class="storage-fineprint">
+          Large files use the browser's origin file system when available and fall back to
+          encrypted database storage when it isn't. Either way, content is sealed.
+        </p>
+      </div>
+
+      {#if !confirmingClear}
+        <button
+          class="button danger storage-clear-all"
+          type="button"
+          onclick={() => (confirmingClear = true)}
+        >
+          Clear all local attn data
+        </button>
+      {:else}
+        <ConfirmPanel
+          label="Delete every local workspace in this browser?"
+          title="Delete every local workspace in this browser?"
+          confirmLabel="Delete everything"
+          oncancel={() => (confirmingClear = false)}
+          onconfirm={async () => {
+            await guard(onClearAll);
+            confirmingClear = false;
+          }}
+        >
+          {#snippet body()}
+            <p class="confirm-body">
               This cannot be undone. Shared rooms are not recalled, but their local source copies
               are removed.
             </p>
-            <div class="actions">
-              <button class="button" type="button" onclick={() => (confirmingClear = false)}>
-                Cancel
-              </button>
-              <button
-                class="button danger"
-                type="button"
-                onclick={async () => {
-                  await guard(onClearAll);
-                  confirmingClear = false;
-                }}
-              >
-                Delete everything
-              </button>
-            </div>
-          </div>
-        {/if}
-      </aside>
-    </div>
-  </main>
-</div>
+          {/snippet}
+          {#snippet extra()}
+            <button class="button" type="button" onclick={() => void guard(onExportAll)}>
+              Export all first
+            </button>
+          {/snippet}
+        </ConfirmPanel>
+      {/if}
+    </aside>
+  </div>
+</main>

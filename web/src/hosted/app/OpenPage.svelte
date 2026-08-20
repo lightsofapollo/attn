@@ -1,7 +1,7 @@
 <script lang="ts">
   import DegradedBanner from './DegradedBanner.svelte';
   import { expandPicked, prepareImport } from './import-files';
-  import { fileDrop, filesToPicked } from './file-drop';
+  import { fileDrop, filesToPicked, type DroppedFile } from './file-drop';
   import type { ImportFileInput, StorageHealth } from './types';
 
   interface Props {
@@ -14,7 +14,7 @@
   let fileInput = $state<HTMLInputElement | undefined>();
   let importError = $state<string | null>(null);
 
-  async function importFiles(files: Iterable<File>): Promise<void> {
+  async function importFiles(files: Iterable<File | DroppedFile>): Promise<void> {
     importError = null;
     try {
       const prepared = prepareImport(await expandPicked(await filesToPicked(files)));
@@ -53,8 +53,22 @@
     </p>
     <!-- ".attn-workspace (soon)" shipped a roadmap note in product chrome
          (attn-08fa.8): it advertises a format the page cannot accept, so the
-         only thing a reader can do with it is try and fail. -->
-    <div class="formats">.md · images &amp; assets · folder · .zip</div>
+         only thing a reader can do with it is try and fail.
+
+         The prose above names the categories; this line names the literal
+         extensions, so every item here is an identifier and every identifier is
+         set in the code face (DESIGN.md: "the mono carries code"). The
+         "·"-separated sentence it replaces mixed the two registers — `.md` and
+         "images & assets" in one run of sans. -->
+    <ul class="formats">
+      <li><code>.md</code></li>
+      <li><code>.markdown</code></li>
+      <li><code>.png</code></li>
+      <li><code>.jpg</code></li>
+      <li><code>.svg</code></li>
+      <li><code>folder/</code></li>
+      <li><code>.zip</code></li>
+    </ul>
     <div class="storage-actions drop-zone-actions">
       <button class="button primary" type="button" onclick={() => fileInput?.click()}>
         Choose files

@@ -149,6 +149,12 @@ export interface BrowserOwnerWorkspaceRuntimeOptions {
   backgroundShareResume?: boolean;
   schedule?: (callback: () => void, delayMs: number) => unknown;
   cancelScheduled?: (handle: unknown) => void;
+  /**
+   * Pause between head-moved publication retries. See
+   * PUBLICATION_RETRY_BACKOFF_MS. Tests that drive the retry loop deliberately
+   * set 0; nothing else should.
+   */
+  publicationRetryDelayMs?: number;
   pagehideTarget?: {
     addEventListener(type: 'pagehide', listener: () => void): void;
     removeEventListener(type: 'pagehide', listener: () => void): void;
@@ -1145,6 +1151,10 @@ export class BrowserOwnerWorkspaceRuntime {
                 this.share = { ...discovered.share, publication: 'published' };
               }
               resumePending = false;
+              // Let the head settle before reading it again — see
+              // PUBLICATION_RETRY_BACKOFF_MS. Retrying inside the autosave
+              // debounce just loses to the same commit three times.
+              await this.pauseBeforePublicationRetry();
             }
           }
         },
@@ -1164,6 +1174,18 @@ export class BrowserOwnerWorkspaceRuntime {
       });
       return false;
     }
+  }
+
+  /**
+   * Deliberately a raw timer rather than the injectable `schedule` hook: most
+   * harnesses stub that with `() => 1`, which DROPS the callback, so awaiting
+   * it would hang the retry loop forever. Suites that need the loop to run
+   * instantly pass `publicationRetryDelayMs: 0`.
+   */
+  private pauseBeforePublicationRetry(): Promise<void> {
+    const delayMs = this.options.publicationRetryDelayMs ?? PUBLICATION_RETRY_BACKOFF_MS;
+    if (delayMs <= 0 || this.closing) return Promise.resolve();
+    return new Promise((resolve) => setTimeout(resolve, delayMs));
   }
 
   private async pendingPublicationSourceMoved(
@@ -1773,6 +1795,28 @@ function errorMessage(error: unknown): string {
  * commits still pause the authority instead of looping.
  */
 const STARTUP_PUBLICATION_ATTEMPTS = 3;
+
+/**
+ * Pause between those attempts (2026-08-19, user-reported: "why do I keep
+ * seeing this?" of the head-moved failure banner).
+ *
+ * The retry budget above was right and the retries were useless, because they
+ * were IMMEDIATE. The commonest cause of a moving head is not a second tab —
+ * it is the author typing in this one: `AutosaveController` commits on a
+ * 1,200 ms debounce (see hosted/app/autosave.ts, DEFAULT_DEBOUNCE_MS), so a
+ * person mid-sentence lands a fresh revision roughly every 1.2 s. Three
+ * back-to-back attempts all fall inside one such window and all lose to the
+ * same commit, so the loop was guaranteed to exhaust and pause the authority
+ * exactly when someone was writing — the one moment they would notice.
+ *
+ * Waiting longer than the debounce means each attempt reads a head that has
+ * settled, so a normal typing pause converges on the first or second try.
+ * Continuous typing with no pause at all still exhausts the budget and still
+ * pauses honestly, which is the correct end state: the consistency gates in
+ * browser-workspace-share.ts are untouched, and this only changes WHEN they
+ * are asked.
+ */
+const PUBLICATION_RETRY_BACKOFF_MS = 1_500;
 
 /**
  * Consecutive room re-provision attempts without an intervening healthy

@@ -1,7 +1,8 @@
 <script lang="ts">
   import ConfirmPanel from './ConfirmPanel.svelte';
   import DegradedBanner from './DegradedBanner.svelte';
-  import { expandPicked, prepareImport, type PickedFile } from './import-files';
+  import { expandPicked, prepareImport } from './import-files';
+  import { filesToPicked, type DroppedFile } from './file-drop';
   import { autofocus } from '../../lib/hosted/autofocus';
   import { parseInviteUrl } from '../../lib/hosted/invite-url';
   import type { ImportFileInput, SharingState, StorageHealth, WorkspaceSummary } from './types';
@@ -14,7 +15,7 @@
     /** Owned by the shell so the query survives a trip into a workspace and
      *  back (attn-a9f7.3.1). */
     filterQuery?: string;
-    onCreate: () => void;
+    onCreate: (intent?: 'blank' | 'import') => void;
     onImport: (name: string, files: ImportFileInput[]) => Promise<void>;
     onRename: (workspaceId: string, name: string) => Promise<void>;
     onDelete: (workspaceId: string) => Promise<void>;
@@ -164,6 +165,11 @@
   const storageUnavailable = $derived(health.mode === 'unavailable');
 
   let fileInput = $state<HTMLInputElement | undefined>();
+  /* The import tile offers a folder as well as files. `webkitdirectory` is the
+     only way a browser hands over a directory tree, and `expandPicked` already
+     reads the `webkitRelativePath` it produces. */
+  let folderInput = $state<HTMLInputElement | undefined>();
+
   let renamingId = $state<string | null>(null);
   let renameValue = $state('');
   let confirmingDeleteId = $state<string | null>(null);
@@ -242,27 +248,36 @@
     }
   }
 
-  async function onFilesPicked(): Promise<void> {
-    const files = fileInput?.files;
-    if (!files || files.length === 0) return;
+  /* One import path for the tile, the well's two buttons and the well's drop
+     (attn-mkmz.5) — they are the same act and must not be able to disagree. */
+  async function importPickedFiles(files: Array<File | DroppedFile>): Promise<void> {
+    if (files.length === 0) return;
     importError = null;
     try {
-      const picked: PickedFile[] = [];
-      for (const file of Array.from(files)) {
-        picked.push({
-          name: file.name,
-          relativePath: (file as File & { webkitRelativePath?: string }).webkitRelativePath,
-          type: file.type,
-          bytes: new Uint8Array(await file.arrayBuffer()),
-        });
-      }
-      const prepared = prepareImport(await expandPicked(picked));
+      // The shared reader, not a second copy of it: this file had its own
+      // File → PickedFile loop, which meant a dropped folder's paths were
+      // handled here and only here, and differently from every other surface.
+      const prepared = prepareImport(await expandPicked(await filesToPicked(files)));
       await onImport(prepared.name, prepared.files);
     } catch (error) {
       importError = error instanceof Error ? error.message : String(error);
     } finally {
+      // Reset so re-choosing the same selection fires `change` again.
       if (fileInput) fileInput.value = '';
+      if (folderInput) folderInput.value = '';
     }
+  }
+
+  async function onFilesPicked(): Promise<void> {
+    const files = fileInput?.files;
+    if (!files || files.length === 0) return;
+    await importPickedFiles(Array.from(files));
+  }
+
+  async function onFolderPicked(): Promise<void> {
+    const files = folderInput?.files;
+    if (!files || files.length === 0) return;
+    await importPickedFiles(Array.from(files));
   }
 
   function startRename(workspace: WorkspaceSummary): void {
@@ -314,7 +329,10 @@
       aria-describedby={storageUnavailable ? 'storage-blocked-reason' : undefined}
       onclick={() => {
         if (storageUnavailable) return;
-        onCreate();
+        // The tile's own note says "starts with untitled.md" — an explicit
+        // request for an empty page, so the canvas does not then offer to
+        // import one.
+        onCreate('blank');
       }}
     >
       <strong class="quick-label">New workspace</strong>
@@ -390,6 +408,15 @@
     aria-hidden="true"
     tabindex="-1"
     onchange={onFilesPicked}
+  />
+  <input
+    bind:this={folderInput}
+    type="file"
+    webkitdirectory
+    style="display: none"
+    aria-hidden="true"
+    tabindex="-1"
+    onchange={onFolderPicked}
   />
   {#if importError}
     <p class="form-error" role="alert">
@@ -613,27 +640,48 @@
       </ul>
     {/if}
   {:else if !storageUnavailable}
-    <h2 class="folio-label">Your first sheet</h2>
-    <!-- A button, not an <article> (attn-n01r.35). This is the largest,
-         warmest, most document-like object on the first-run screen and it had
-         no click handler at all — every first-time user clicks it. It is also
-         the same offer as the tile above, so it now performs that offer
-         rather than restating it.
-         The old aria-label ("A half-written Markdown sheet, waiting") named
-         the region with art direction that explained nothing about what to do
-         and contradicted its own content; the button's text is its name. -->
-    <button
-      class="empty-desk"
-      type="button"
-      disabled={storageUnavailable}
-      onclick={onCreate}
-    >
-      <span class="meta">UNTITLED.MD · NOT CREATED YET</span>
-      <span class="empty-desk-title">What deserves your attention?</span>
-      <span class="empty-desk-body">
-        Start with one blank Markdown file. It stays on this device — no account, no upload,
-        <span class="cursor-line">no naming step.&nbsp;<span class="caret" aria-hidden="true"></span></span>
-      </span>
-    </button>
+    <!-- The label states the desk's STATE, like every other folio label on this
+         page ("Waiting on you", "Everything else"); the well below states the
+         act. Native puts the state in the well's own title because it has no
+         label above it — same two facts, one each, neither said twice. -->
+    <h2 class="folio-label">Nothing on this desk yet</h2>
+    <!-- attn-mkmz.5. The first-run slot used to be "What deserves your
+         attention?" — a document-shaped button whose whole offer was creating a
+         blank untitled.md, so the default way into the product was a file with
+         nothing in it. attn is a REVIEWER; the first thing it should ask for is
+         the document you already have.
+
+         One line, not a well (user ruling, 2026-08-20). The well this replaces
+         was the native "No file selected" panel ported onto the desk — brand
+         mark, title, lede, two buttons, privacy line — which then said the same
+         four things the workspace canvas says the moment you arrive there, one
+         click later. The desk states that it is empty and names the two ways
+         out; the canvas does the asking.
+
+         Import leads, because starting blank is deliberately NOT the default:
+         a reviewer's first move is the document they already have. Both routes
+         mint a workspace — they differ in what the canvas does when you land,
+         and `createIntent` is what carries that.
+
+         ORDER carries that lead now, not weight (user ruling, 2026-08-20). The
+         two routes used to be set at different weights, which made the second
+         one read as an afterthought rather than as the other half of a choice.
+         They are the same link now, capitalised alike, and the sentence still
+         puts import first — which is where a reviewer's first move belongs. -->
+    <p class="desk-empty-offer">
+      <button
+        class="link-button"
+        type="button"
+        data-action="import-files"
+        onclick={() => onCreate('import')}
+      >Import files</button>
+      <span class="desk-empty-or">or</span>
+      <button
+        class="link-button"
+        type="button"
+        data-action="start-blank"
+        onclick={() => onCreate('blank')}
+      >Start a blank untitled.md</button>
+    </p>
   {/if}
 </main>

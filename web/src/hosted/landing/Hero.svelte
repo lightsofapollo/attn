@@ -69,15 +69,25 @@
     <p class="hero-security">
       <strong>End-to-end encrypted when you share.</strong> The relay routes ciphertext and never holds a key.
     </p>
+    <!-- The front door does NOT create an empty file (user ruling, twice:
+         "Do NOT open an untitled file by default", then "we still default with
+         an untitled file which is wrong"). The primary CTA used to be
+         `/app#new`, so the single most-clicked control on the site dropped a
+         first-time visitor into a blank untitled.md — attn is a REVIEWER, and
+         the first thing it should ask for is the document you already have.
+
+         `#new` itself still creates: it is an explicit intent URL behind a
+         control that says "New workspace", and the desk keeps that offer. What
+         changed is that no DEFAULT path leads there. -->
     <div class="hero-actions">
       {#if deskCount > 0}
         <a class="button primary" href="/app" data-action="open-desk">
           Your desk ({deskCount}) <span aria-hidden="true">→</span>
         </a>
-        <a class="button" href="/app#new" data-action="new-workspace">New workspace</a>
+        <a class="button" href="/open" data-action="open-document">Open a document</a>
       {:else}
-        <a class="button primary" href="/app#new" data-action="new-workspace">
-          New workspace <span aria-hidden="true">→</span>
+        <a class="button primary" href="/open" data-action="open-document">
+          Open a document <span aria-hidden="true">→</span>
         </a>
         <!-- Same name as the nav link for the same destination (critique
              2026-08-18: one place, two labels). -->

@@ -4,6 +4,17 @@
    surfaces and the app share one identity — including INK dark, which is
    the cool blue-black study, not the old warm brown. Dark mode is the
    `.dark` class (theme.svelte.ts stamps it alongside data-theme). */
+
+/* The canonical layer order, restated here because layers are ordered by first
+   appearance and app.css — which declares the same list — is loaded LAZILY by
+   the hosted editor chunk. Without this line the hosted app entry established
+   `chrome` first, so when a workspace pulled in app.css/base.css the real order
+   became `chrome, theme, base, …` and every hosted anchor inherited base.css's
+   prose-link treatment: the masthead wordmark turned rust and underlined on
+   hover, but only for someone who had opened a document first. Same list, same
+   order, in the file the hosted entries load first. */
+@layer theme, base, chrome, doc, components, utilities;
+
 @import '../tokens.css';
 
 :root {
@@ -26,14 +37,23 @@
   --rust-deep: var(--primary-hover);
   --rust-contrast: var(--primary-foreground);
   /* Radii the hosted routes consume but never received (attn-n01r.42).
-     --radius-md/--radius-lg are declared in src/app.css inside a Tailwind
-     `@theme inline` block, which the hosted entries do not import — so
-     .file-row, .file-add-row, .viewing-safely and .arrival-toast were
-     rendering square against a design that specifies 8px/10px. Undefined
-     custom properties fail silently: no error, no lint, no visual alarm.
-     Derived from the same --radius as app.css so the two cannot drift. */
+     --radius-* are declared in src/app.css inside a Tailwind `@theme inline`
+     block, which the hosted entries do not import — so .file-row, .file-add-row,
+     .viewing-safely and .arrival-toast were rendering square against a design
+     that specifies 8px/10px. Undefined custom properties fail silently: no
+     error, no lint, no visual alarm. Derived from the same --radius as app.css
+     so the two cannot drift.
+
+     All four steps now, not just md/lg (2026-08-19): --radius is shadcn's own
+     default (0.625rem), the four derivations are shadcn's own ladder, and
+     DESIGN.md's `rounded` scale is the same ladder written out — 6 / 8 / 10 /
+     14. Declaring the full set is what lets hosted CSS name a step instead of
+     writing the pixel, which is how the square-cornered panels below got
+     missed in the first place. */
+  --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
   /* Hover wash for selection controls. Consumed by .share-selection-actions
      and defined nowhere, so that hover had no background at all. */
   --wash: var(--accent);

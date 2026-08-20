@@ -267,6 +267,7 @@ p {
   min-width: 190px;
   padding: 0.9rem 1rem;
   border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
   background: var(--sheet);
   box-shadow: var(--shadow-label);
   font-family: var(--sans);
@@ -359,6 +360,10 @@ p {
      inside a 390px viewport (attn-n01r.23). */
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   border: 1px solid var(--rule);
+  /* The hairline dividers are grid gap showing the container's own background,
+     so the cells have no radius of their own to round — clip them instead. */
+  border-radius: var(--radius-lg);
+  overflow: hidden;
   background: var(--rule);
   gap: 1px;
 }
@@ -539,6 +544,8 @@ p {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
 }
 
 .surface {

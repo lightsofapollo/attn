@@ -208,7 +208,7 @@ a:focus-visible {
 }
 
 /* Lists — markers restored over the Tailwind preflight reset: a small rust
-   point for unordered items, muted numerals for ordered. Real ::marker
+   point for unordered items and rust numerals for ordered ones. Real ::marker
    glyphs, not positioned pseudo-elements — a marker can't detach from its
    line or vanish when the item's positioning context changes. */
 .attn-doc :is(ul, ol):not(.task-list) {
@@ -232,8 +232,14 @@ a:focus-visible {
     list-style: decimal;
 }
 
+/* Numerals take the accent too, at the same 80% the bullets use (user ruling,
+   2026-08-19). They are the same typographic mark doing the same job — "this
+   line is an item" — and a document mixing the two list kinds showed them in
+   two different colours, which reads as two different meanings. Kept at 0.9em
+   rather than the bullet's 0.85em: a numeral carries a glyph shape a dot does
+   not, and shrinking it further costs legibility past single digits. */
 .attn-doc ol > li::marker {
-    color: var(--muted-foreground);
+    color: color-mix(in oklch, var(--primary) 80%, transparent);
     font-family: var(--sans);
     font-size: 0.9em;
 }

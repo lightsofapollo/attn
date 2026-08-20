@@ -45,6 +45,25 @@ function captureAssetRequests(page: Page): string[] {
 
 const LANDING_CAPTURE_IMAGES = '.product-stage img, .share-proof .capture img, .native-shot img';
 
+/**
+ * Drive the landing's appearance control to a given theme.
+ *
+ * The control became a three-state CYCLE in attn-08fa (Paper → Ink → System),
+ * so it is no longer "Switch to dark theme" and no longer flips in one press:
+ * from the default `system` the first press lands on `light`. Asserting the
+ * cycle's exact order here would just restate theme.svelte.ts, so press until
+ * the painted theme is the one asked for, bounded so a broken control fails
+ * rather than loops.
+ */
+async function setLandingTheme(page: Page, theme: 'light' | 'dark'): Promise<void> {
+  const control = page.getByRole('button', { name: /^Appearance: /u });
+  for (let press = 0; press < 3; press += 1) {
+    if ((await page.locator('html').getAttribute('data-theme')) === theme) return;
+    await control.click();
+  }
+  await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
+}
+
 async function waitForLandingCaptureImages(page: Page, theme: 'light' | 'dark'): Promise<void> {
   const images = page.locator(LANDING_CAPTURE_IMAGES);
   await expect(images).toHaveCount(3);
@@ -124,8 +143,13 @@ test('landing serves at / without editor, crypto, or other-entry chunks', async 
 test('landing leads with browser CTAs and keeps native install below', async ({ page }) => {
   await page.goto('/');
   const hero = page.locator('.hero');
-  await expect(hero.locator('a[data-action="new-workspace"]')).toHaveAttribute('href', '/app#new');
+  // No default path mints an untitled file (user ruling, 2026-08-19): the
+  // front door asks for the document you already have. `#new` still exists
+  // behind controls that say "New workspace" — the desk tile and the sidebar
+  // project menu — it is simply not what the landing's primary CTA does.
+  await expect(hero.locator('a[data-action="open-document"]')).toHaveAttribute('href', '/open');
   await expect(hero.locator('a[data-action="open-desk"]')).toHaveAttribute('href', '/app');
+  await expect(hero.locator('a[href="/app#new"]')).toHaveCount(0);
   await expect(page.locator('.native-section .code').first()).toContainText(
     'brew install lightsofapollo/attn/attn',
   );
@@ -147,7 +171,7 @@ test('landing theme toggle flips palette, swaps captures, and persists', async (
     ),
   ).toBe(true);
   expect(await heroShot.evaluate((image) => (image as HTMLImageElement).currentSrc)).toMatch(/\.avif$/u);
-  await page.getByRole('button', { name: /^Switch to (dark|light) theme$/u }).click();
+  await setLandingTheme(page, 'dark');
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
   await expect(heroShot).toHaveAttribute('src', /collab-dark/u);
   await waitForLandingCaptureImages(page, 'dark');
@@ -172,8 +196,7 @@ test('capture landing screenshots for design review', async ({ page }) => {
   await expect(page.locator('body')).toHaveAttribute('data-hydrated', 'true');
   await waitForLandingCaptureImages(page, 'light');
   await page.screenshot({ path: 'test-results/landing-desktop-light.png', fullPage: true });
-  await page.getByRole('button', { name: /^Switch to (dark|light) theme$/u }).click();
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await setLandingTheme(page, 'dark');
   await waitForLandingCaptureImages(page, 'dark');
   await page.screenshot({ path: 'test-results/landing-desktop-dark.png', fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
@@ -181,8 +204,7 @@ test('capture landing screenshots for design review', async ({ page }) => {
   // lives inside the disclosure. This test asserted it was clickable at 390
   // without opening the menu and had been failing on main for that reason.
   await page.getByRole('button', { name: 'Open menu' }).click();
-  await page.getByRole('button', { name: /^Switch to (dark|light) theme$/u }).click();
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'light');
+  await setLandingTheme(page, 'light');
   await waitForLandingCaptureImages(page, 'light');
   await page.screenshot({ path: 'test-results/landing-iphone-light.png', fullPage: true });
 });

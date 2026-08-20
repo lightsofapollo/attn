@@ -28,9 +28,23 @@
   }: Props = $props();
 </script>
 
-<!-- A status, never a control: save state reports a fact and opens no surface. -->
+<!-- A status, never a control: save state reports a fact and opens no surface.
+
+     `status` is the one branch that carries WORDS rather than a save state, so
+     it is the one branch that shows them. It used to render a bare ⓘ with the
+     sentence in `sr-only` text and a hover title — and ⓘ is the web's most
+     recognisable "click me for more" glyph, so a sighted mouse user clicked it
+     and nothing happened (owner, 2026-08-19: "Info icon appears to do nothing.
+     Either do something or remove it"). It now says its sentence out loud and
+     drops the icon; there is nothing to disclose because nothing is hidden.
+
+     The other three branches are unchanged: their glyphs are the whole message
+     ("saved", "saving", "needs attention") and each has a full text equivalent
+     for assistive tech. Only `status` was a riddle. -->
 <span
-  class={`inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground ${className}`}
+  class={`inline-flex shrink-0 items-center justify-center rounded-md text-muted-foreground ${
+    state === 'status' ? 'gap-1 px-1.5 min-h-7 font-sans text-[0.7rem] font-medium' : 'size-7'
+  } ${className}`}
   data-slot={dataSlot}
   data-state={state}
   data-save-state={label}
@@ -71,16 +85,10 @@
       <path d="M12 8v5" />
       <path d="M12 16.5v.5" />
     </svg>
-  {:else}
-    <svg
-      class="size-3.5 text-primary" viewBox="0 0 24 24" fill="none"
-      stroke="currentColor" stroke-width="2" stroke-linecap="round"
-      stroke-linejoin="round" aria-hidden="true"
-    >
-      <circle cx="12" cy="12" r="9" />
-      <path d="M12 11v5" />
-      <path d="M12 8v.5" />
-    </svg>
   {/if}
-  <span class="sr-only" data-slot={`${dataSlot}-label`}>{label}</span>
+  {#if state === 'status'}
+    <span data-slot={`${dataSlot}-label`}>{label}</span>
+  {:else}
+    <span class="sr-only" data-slot={`${dataSlot}-label`}>{label}</span>
+  {/if}
 </span>

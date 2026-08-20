@@ -6,6 +6,7 @@
   import BrandMark from '../../lib/BrandMark.svelte';
   import ReviewBar from '../../lib/ReviewBar.svelte';
   import Sidebar from '../../lib/Sidebar.svelte';
+  import ProjectPicker from '../../lib/ProjectPicker.svelte';
   import WorkspaceEditorFrame from '../../lib/WorkspaceEditorFrame.svelte';
   import { ScrollArea } from '$lib/components/ui/scroll-area';
   import { reviewStore } from '../../lib/review/store.svelte';
@@ -47,8 +48,38 @@
     onViewport?: (viewport: HTMLElement | null) => void;
     /** Jump the owner to a peer's file + caret (attn-qs03); threaded to ReviewBar. */
     onJumpTo?: (peer: ReviewStatusPeer) => void;
-    /** Keep saved review history visible even once the live room disconnects. */
+    /** Keep durable comments visible even once the live room disconnects. */
     reviewHistoryAvailable?: boolean;
+    /**
+     * False while nothing has been selected (user ruling, 2026-08-20): a
+     * workspace holding one blank untitled.md mounts no file rail at all. The
+     * picker moved to the header precisely so this can be dropped whole — the
+     * rail's remaining jobs are navigating files and adding them, and neither
+     * applies until there is a file that is not the one already open.
+     */
+    showSidebar?: boolean;
+    /**
+     * False while the canvas is still asking which document to open (user
+     * ruling, 2026-08-20).
+     *
+     * Minting a workspace creates a placeholder `untitled.md` and routes to it,
+     * so the path is non-empty from the first frame — long before anyone has
+     * chosen anything. The header was printing that placeholder's name beside a
+     * canvas whose whole content was "Open a document", which named a file the
+     * person had not picked. Same condition that drops the file rail.
+     */
+    fileChosen?: boolean;
+    /** True while a workspace rename is in flight; swaps the name for `rename`. */
+    renaming?: boolean;
+    /**
+     * The workspace-relative path of the file being renamed, and the field that
+     * takes its row's label. Converted to a tree path here, which is the only
+     * layer that knows both address spaces.
+     */
+    renamingEntryPath?: string;
+    entryRename?: Snippet;
+    /** The rename input, rendered in the name's own slot (attn-rjuo.2.1). */
+    rename?: Snippet;
   }
 
   let {
@@ -73,14 +104,20 @@
     onViewport,
     onJumpTo,
     reviewHistoryAvailable = false,
+    showSidebar = true,
+    fileChosen = true,
+    renaming = false,
+    rename,
+    renamingEntryPath,
+    entryRename,
   }: Props = $props();
 
   // This is intentionally created at the hosted-desktop boundary. Sidebar and
   // FileTree receive the narrow resolver contract, never the native registry.
   const hostedFileIconResolver = createHostedFileIconResolver();
-  // Saved review is durable content, not evidence of an active connection.
-  // Keep it discoverable in the document header, but do not reserve a gutter
-  // until the person explicitly opens that history.
+  // Comments are durable content, not evidence of an active connection.
+  // Keep them discoverable in the document header, but do not reserve a gutter
+  // until the person explicitly opens the column.
   let savedHistoryOpen = $state(false);
   const railVisible = $derived(reviewStore.railMode !== 'hidden' || savedHistoryOpen);
   const effectiveRailMode = $derived(
@@ -89,9 +126,18 @@
   // Reading wins over visual stability in the hosted owner workspace. A
   // durable review is a deliberate secondary task; when it opens, reserve a
   // real column for it rather than painting cards over the document. That
-  // means a line may reflow when the user explicitly chooses Saved review,
+  // means a line may reflow when the user explicitly opens Comments,
   // but the document's visible reading column is never covered by feedback.
   const dockedRailWidth = $derived(RAIL_WIDTH_PX[effectiveRailMode]);
+
+  // The header's last segment: the file's own name, not its path. The path
+  // lives in the title so a nested file can still be placed on hover, and the
+  // rail is where the shape of the workspace is read.
+  const activeFileName = $derived(
+    fileChosen && activeEntryPath
+      ? activeEntryPath.split('/').filter(Boolean).at(-1)
+      : undefined,
+  );
 
   const rootPath = $derived(workspaceVirtualRoot(workspaceId));
   const activePath = $derived(
@@ -171,6 +217,14 @@
     return shared;
   });
 
+  /* `workspaceName` wins for the open project: it tracks a live rename, while
+     `switcherLabels` is a snapshot of the whole desk taken when the summaries
+     last loaded. Same precedence Sidebar's own `formatRootLabel` uses. */
+  function projectLabel(path: string): string {
+    if (path === rootPath) return workspaceName;
+    return switcherLabels[path] ?? 'Workspace';
+  }
+
   function switchProject(projectRoot: string): void {
     const target = workspaces.find(
       (workspace) => workspaceVirtualRoot(workspace.id) === projectRoot,
@@ -230,15 +284,17 @@
     activeProjectPath={rootPath}
     rootLabel={workspaceName}
     projectLabels={switcherLabels}
-    onProjectSwitch={switchProject}
-    {projectMenuActions}
     {sharedProjects}
     showOutline={false}
+    showProjectPicker={false}
     showWindowDragRegion={false}
+    {onOpenDesk}
     {sharedPaths}
     {unreadByPath}
     iconResolver={hostedFileIconResolver}
     {footer}
+    renamingPath={renamingEntryPath ? workspaceTreePath(workspaceId, renamingEntryPath) : undefined}
+    renameField={entryRename}
     onNavigate={navigateTree}
     onRename={onRename ? renameTree : undefined}
     onDelete={onDelete ? deleteTree : undefined}
@@ -247,7 +303,7 @@
 
 {#snippet mainContent()}
   <!-- One header bar, matching the reviewer page's grammar (user ruling:
-       'make owner match the review'): brand · divider · document name on
+       'make owner match the review'): brand · divider · workspace · file on
        the left, save state + share/review chips inline on the right. This
        replaces the breadcrumb row and the floating ReviewBar dock. -->
   <!-- Chrome plane, matching App.svelte's native-header and the right rail:
@@ -255,35 +311,88 @@
        reads as a lit sheet between recessed chrome. See the longer note on
        `data-slot="native-header"` in App.svelte. -->
   <header
-    class="relative z-40 flex h-11 shrink-0 items-center gap-2 border-b border-[var(--panel-border)] bg-[var(--header-surface)] px-3"
+    class="relative z-40 flex h-11 shrink-0 items-center gap-2 border-b border-[var(--panel-border)] bg-[var(--header-surface)] px-[var(--chrome-inline-gutter)]"
     data-slot="owner-header"
   >
-    <span class="flex shrink-0 items-center gap-1.5" data-slot="owner-brand" aria-label="attn">
+    <!-- The mark is the way home (user ruling, 2026-08-20). It carried product
+         identity and nothing else, which in a browser tab is a dead corner:
+         every other site puts its home under the logo, so people click ours and
+         nothing happens. It leaves the app for the marketing home; the desk —
+         the app's own home — has its own named routes (the rail's "Back to
+         desk" and the picker's "All workspaces"), because those two
+         destinations are different places and must not share one target. -->
+    <a class="owner-brand" href="/" data-slot="owner-brand" aria-label="attn — home">
       <BrandMark size={18} />
       <span class="select-none font-serif text-sm font-bold leading-none text-foreground">attn</span>
-    </span>
+    </a>
     <span class="h-3 w-px shrink-0 bg-border" aria-hidden="true"></span>
-    <span
-      class="min-w-0 truncate font-sans text-meta font-medium text-foreground"
-      data-slot="owner-doc-name"
-    >{activeEntryPath ? activeEntryPath.split('/').at(-1) : workspaceName}</span>
+    <!-- The workspace switcher lives here, not in the rail (user ruling,
+         2026-08-20). It is app-level navigation — which project is open, and
+         every one you could open instead — so it belongs in the bar that is
+         present in every state, rather than inside a file rail that is not.
+
+         Mark · WORKSPACE · file (user ruling, 2026-08-20). The switcher briefly
+         wore the open FILE's name, on the theory that a workspace and its first
+         document are routinely called the same thing and one label would do.
+         They diverge the moment either is renamed or a second file is added,
+         and the trigger then advertised a list of workspaces under a file's
+         name. The two names are now two segments: the workspace opens the
+         switcher (it is what the menu lists), the file is where you are and
+         says so quietly. -->
+    <div class="flex min-w-0 shrink items-center gap-2" data-slot="owner-doc-name">
+      {#if renaming && rename}
+        <!-- In place: the input takes the trigger's slot rather than appearing
+             somewhere else in the bar (attn-rjuo.2.1). -->
+        {@render rename()}
+      {:else}
+      <ProjectPicker
+        projects={switcherProjects}
+        selected={rootPath}
+        labelFor={projectLabel}
+        {sharedProjects}
+        actions={projectMenuActions}
+        onSwitch={switchProject}
+        variant="header"
+      />
+      {/if}
+      {#if activeFileName}
+        <!-- The same hairline that follows the mark (user ruling, 2026-08-20),
+             not a breadcrumb chevron. Three names across one bar, divided the
+             same way twice: the bar reads as one line of chrome rather than a
+             wordmark, then a path, in two different grammars. -->
+        <span class="h-3 w-px shrink-0 bg-border" aria-hidden="true"></span>
+        <span class="owner-file-name" data-slot="owner-file-name" title={activeEntryPath}>
+          {activeFileName}
+        </span>
+      {/if}
+    </div>
     <div class="ml-auto flex h-full min-w-0 shrink-0 items-center gap-1.5">
       {@render actions()}
-      {#if reviewHistoryAvailable && reviewStore.railMode === 'hidden'}
+      <!-- "Comments", not "Saved review" (user ruling, 2026-08-19). The rail
+           holds comments; "saved review" named the storage state rather than
+           the thing, and no other surface in the product calls them that —
+           ReviewBar's own toggle has said "Show/Hide comments" all along.
+
+           Gated on there being NO active room, because ReviewBar renders its
+           rail toggle exactly when there is one (`hasActiveRoom` there is this
+           same `currentRoomId`). Without the gate, sharing a document with the
+           rail hidden put two identical panel-right buttons in one header,
+           both labelled "Show comments", opening two different things. -->
+      {#if reviewHistoryAvailable && reviewStore.railMode === 'hidden' && reviewStore.currentRoomId === null}
         <button
           type="button"
           class="inline-flex min-h-7 shrink-0 items-center gap-1 rounded-md px-1.5 font-sans text-[0.72rem] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
-          data-slot="saved-review-toggle"
+          data-slot="comments-toggle"
           aria-expanded={savedHistoryOpen}
-          aria-controls="saved-review-margin"
+          aria-controls="comments-margin"
           onclick={() => (savedHistoryOpen = !savedHistoryOpen)}
         >
           {#if savedHistoryOpen}
             <PanelRightClose class="size-3.5" aria-hidden="true" />
-            <span>Hide saved review</span>
+            <span>Hide comments</span>
           {:else}
             <PanelRightOpen class="size-3.5" aria-hidden="true" />
-            <span>Saved review</span>
+            <span>Comments</span>
           {/if}
         </button>
       {/if}
@@ -324,7 +433,14 @@
          exactly one viewport tall; its top spacer clears the floating
          ReviewBar, and its header carries the collapse toggle that used to
          live on the outer frame aside. -->
-    <div class="flex min-h-full flex-row">
+    <!-- `hosted-canvas-row` is the containing block the empty-canvas invitation
+         centres in: the full visible canvas, not the capped document column.
+         `--canvas-invite-end` hands it the docked rail's width so it centres on
+         what is on screen rather than sliding under an open comments column. -->
+    <div
+      class="hosted-canvas-row flex min-h-full flex-row"
+      style={`--canvas-invite-end: ${railVisible ? dockedRailWidth : 0}px;`}
+    >
       <!-- Fixed left gutter: the document anchors here in EVERY state —
            sharing or not, rail or not — so its left edge never moves and
            always has room to breathe (user ruling: not flush-left, not
@@ -339,7 +455,7 @@
         {@render content()}
       </div>
       {#if railVisible}
-        <!-- A closed live or saved review mounts no rail at all. Opening either
+        <!-- A closed live room and closed comments mount no rail at all. Opening either
              deliberately adds this in-flow column, and its header retains an
              explicit close action in the user's eye-line. -->
         <aside
@@ -359,7 +475,7 @@
             style="--review-overlay-top: 0.5rem; --review-overlay-bottom: 0.5rem;"
             data-expanded={effectiveRailMode === 'expanded'}
             data-layout="docked"
-            id="saved-review-margin"
+            id="comments-margin"
           >
             {#if railVisible}
               {@render rail()}
@@ -375,7 +491,7 @@
 
 <WorkspaceEditorFrame
   class="hosted-workspace-frame"
-  {sidebar}
+  sidebar={showSidebar ? sidebar : undefined}
   content={mainContent}
   rail={emptyRail}
   railMode="hidden"

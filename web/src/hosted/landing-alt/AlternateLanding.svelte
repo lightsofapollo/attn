@@ -35,7 +35,8 @@
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 15.2A9 9 0 0 1 8.8 3.5 9 9 0 1 0 20.5 15.2Z" /></svg>
         {/if}
       </button>
-      <a class="alt-nav-cta" href="/app#new">Open attn <span aria-hidden="true">→</span></a>
+      <!-- "Open attn" opens attn; it does not mint a blank file (user ruling). -->
+      <a class="alt-nav-cta" href="/app">Open attn <span aria-hidden="true">→</span></a>
     </div>
   </nav>
 
@@ -80,7 +81,9 @@
       <ReviewDemo />
       <div class="try-after">
         <p>That was the product. No tour required.</p>
-        <a href="/app#new">Start with a real document <span aria-hidden="true">→</span></a>
+        <!-- This one was an outright false promise: `#new` gives you an EMPTY
+             document, which is the opposite of what the link says. -->
+        <a href="/open">Start with a real document <span aria-hidden="true">→</span></a>
       </div>
     </section>
 

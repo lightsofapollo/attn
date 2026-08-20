@@ -3,11 +3,11 @@
   import type { SearchResultItem, TreeNode } from './types';
   import BrandMark from './BrandMark.svelte';
   import FileTree from './FileTree.svelte';
+  import ProjectPicker from './ProjectPicker.svelte';
   import ReviewFileTree from './ReviewFileTree.svelte';
   import { dragWindow, zoomWindow } from './ipc';
-  import ChevronsUpDown from '@lucide/svelte/icons/chevrons-up-down';
-  import Check from '@lucide/svelte/icons/check';
   import Search from '@lucide/svelte/icons/search';
+  import ChevronLeft from '@lucide/svelte/icons/chevron-left';
   import X from '@lucide/svelte/icons/x';
   import {
     Sidebar,
@@ -17,14 +17,6 @@
     SidebarRail,
   } from '$lib/components/ui/sidebar';
   import { ScrollArea } from '$lib/components/ui/scroll-area';
-  import {
-    DropdownMenu,
-    DropdownMenuContent,
-    DropdownMenuItem,
-    DropdownMenuSeparator,
-    DropdownMenuTrigger,
-  } from '$lib/components/ui/dropdown-menu';
-  import * as Command from '$lib/components/ui/command';
   import { reviewStore } from './review/store.svelte';
   import type { SidebarPresenceLocation } from './sidebar-presence';
   import UnreadBadge from './UnreadBadge.svelte';
@@ -83,6 +75,25 @@
     /** The owning shell supplies its registry; Sidebar and FileTree remain
      *  reusable without importing a platform-specific icon bundle. */
     iconResolver?: FileIconResolver;
+    /** False where the owning shell renders the project picker itself. */
+    showProjectPicker?: boolean;
+    /**
+     * The tree row being renamed, and the field that replaces its label.
+     *
+     * Pure pass-through to FileTree: the owning shell holds the value and owns
+     * the commit, because it is the shell that knows what a valid path is and
+     * what happens after one changes. See the longer note in FileTree.
+     */
+    renamingPath?: string;
+    renameField?: Snippet;
+    /**
+     * Hosted only: leaves the open workspace for the desk that lists them all.
+     *
+     * The rail is the one piece of chrome a person is already looking at while
+     * navigating files, so it is where the way OUT of this workspace belongs.
+     * The native app has no desk and passes nothing, so no row renders there.
+     */
+    onOpenDesk?: () => void;
   }
 
   let {
@@ -115,6 +126,10 @@
     showOutline = true,
     showBrand = false,
     iconResolver,
+    showProjectPicker = true,
+    renamingPath,
+    renameField,
+    onOpenDesk,
   }: Props = $props();
   let sidebarView: 'files' | 'outline' = $state('files');
   let query = $state('');
@@ -170,19 +185,11 @@
   let selectedProject = $derived(
     activeProjectPath || rootPath || projectOptions[0] || '',
   );
-  // Scale the switcher to the number of projects: a single project is just a
-  // heading (nothing to switch to) unless the menu also carries workspace
-  // actions; a short list needs no filter; a long list gets a filter field.
-  // With actions present the filter is always shown — the menu is a picker,
-  // and search doubles as keyboard-first selection.
-  let hasProjectMenu = $derived(projectOptions.length > 1 || projectMenuActions.length > 0);
-  let showProjectFilter = $derived(projectOptions.length >= 8 || projectMenuActions.length > 0);
   let markdownFileCount = $derived(entries.length ? countMarkdownFiles(entries) : 0);
   let totalFileCount = $derived(entries.length ? countFiles(entries) : 0);
   let outlineCount = $derived(outline.length);
   let filteredEntries = $derived(filterTree(entries, query));
   let filteredOutline = $derived(filterOutline(outline, query));
-  let projectPickerOpen = $state(false);
   let treeRenderKey = $state('');
   let normalizedQuery = $derived(query.trim().toLowerCase());
   let backendQueryAligned = $derived(remoteSearchQuery.trim().toLowerCase() === normalizedQuery);
@@ -338,6 +345,24 @@
   {/if}
 
   <div class="sidebar-controls" data-sidebar-controls="true">
+    {#if onOpenDesk}
+      <!-- First row in the rail, above everything about this workspace: the
+           way back out of it. Until now the only exit was buried in the
+           header picker's action list, three rows down a menu you had to know
+           to open — so the rail could show you every file in one workspace and
+           no way to reach the next one. A back chevron and the destination's
+           own name; nothing else in this column points up a level, so it does
+           not need to compete. -->
+      <button
+        type="button"
+        class="sidebar-back"
+        data-slot="sidebar-back"
+        onclick={onOpenDesk}
+      >
+        <ChevronLeft class="sidebar-back-glyph size-3.5" aria-hidden="true" />
+        <span>Back to desk</span>
+      </button>
+    {/if}
     {#if showBrand}
       <!-- Product identity, in the corner the browser leaves free
            (attn-64iy.5). It sits inside `.sidebar-controls`, which is outside
@@ -353,91 +378,22 @@
     {/if}
     <!-- Project identity: a quiet small-caps label (editorial furniture), not a
          button. It becomes an interactive switcher only when there is more
-         than one project to switch to. -->
+         than one project to switch to.
+
+         Hidden on the hosted surfaces, which carry this control in their own
+         header instead (user ruling, 2026-08-20). -->
+    {#if showProjectPicker}
     <div class="sidebar-project-row" style="-webkit-user-select: none">
-      {#if hasProjectMenu}
-        <DropdownMenu bind:open={projectPickerOpen}>
-          <DropdownMenuTrigger
-            class="sidebar-project-trigger"
-            aria-label="Project picker"
-            role="combobox"
-            aria-expanded={projectPickerOpen}
-          >
-            <span class="sidebar-project-name" title={selectedProject}>
-              {formatRootLabel(selectedProject)}
-            </span>
-            <ChevronsUpDown class="sidebar-project-chevron size-3" />
-          </DropdownMenuTrigger>
-          <DropdownMenuContent align="start" class="sidebar-project-menu p-0">
-            <Command.Root class="sidebar-project-command">
-              {#if showProjectFilter}
-                <Command.Input placeholder="Search projects..." />
-              {/if}
-              <!-- The scroll cap lives on the ScrollArea viewport so the list
-                   gets the themed thumb instead of a native gutter. -->
-              <ScrollArea viewportClasses="max-h-[300px]">
-                <Command.List class="max-h-none overflow-visible">
-                <Command.Empty class="px-3 py-5 text-xs text-muted-foreground">
-                  No projects found.
-                </Command.Empty>
-                <Command.Group>
-                  {#each projectOptions as projectPath (projectPath)}
-                    <Command.Item
-                      value={`${formatRootLabel(projectPath)} ${projectPath}`}
-                      class="sidebar-project-menu-item"
-                      data-current={projectPath === selectedProject}
-                      onSelect={() => {
-                        projectPickerOpen = false;
-                        if (projectPath !== selectedProject) {
-                          onProjectSwitch?.(projectPath);
-                        }
-                      }}
-                    >
-                      <Check
-                        class="sidebar-project-check size-3.5"
-                        data-active={projectPath === selectedProject}
-                      />
-                      <span class="sidebar-project-menu-label">{formatRootLabel(projectPath)}</span>
-                      {#if sharedProjects.has(projectPath)}
-                        <!-- Same rust-dot vocabulary as the ShareChip: this
-                             workspace has an active review link. -->
-                        <span
-                          class="sidebar-project-shared"
-                          data-slot="sidebar-project-shared"
-                          title="Shared for review"
-                        >
-                          <span class="sidebar-project-shared-dot" aria-hidden="true"></span>
-                          Shared
-                        </span>
-                      {/if}
-                    </Command.Item>
-                  {/each}
-                </Command.Group>
-              </Command.List>
-              </ScrollArea>
-            </Command.Root>
-            {#if projectMenuActions.length > 0}
-              <DropdownMenuSeparator />
-              {#each projectMenuActions as action (action.id)}
-                <DropdownMenuItem
-                  class="sidebar-project-menu-action"
-                  onSelect={() => {
-                    projectPickerOpen = false;
-                    action.run();
-                  }}
-                >
-                  {action.label}
-                </DropdownMenuItem>
-              {/each}
-            {/if}
-          </DropdownMenuContent>
-        </DropdownMenu>
-      {:else}
-        <span class="sidebar-project-name sidebar-project-name--static" title={selectedProject}>
-          {formatRootLabel(selectedProject)}
-        </span>
-      {/if}
+      <ProjectPicker
+        projects={projectOptions}
+        selected={selectedProject}
+        labelFor={formatRootLabel}
+        {sharedProjects}
+        actions={projectMenuActions}
+        onSwitch={onProjectSwitch}
+      />
     </div>
+    {/if}
 
     <!-- View control (native): text tabs, rust underline marks the current one
          — the same "rust = current" vocabulary as the file tick. -->
@@ -514,7 +470,9 @@
         <ScrollArea class="min-h-0 flex-1" scrollbarYClasses="pr-1">
           {#if sidebarView === 'files'}
             {#if reviewMode}
-              <div class="flex items-center gap-1.5 px-3 pb-1 pt-2 text-[0.7rem] font-medium uppercase tracking-wide text-muted-foreground" data-slot="sidebar-shared-label">
+              <!-- No px-3 here: the rail's inline gutter is `--sidebar-gutter`
+                   in app.css (attn-mkmz.4), and a utility would outrank it. -->
+              <div class="flex items-center gap-1.5 pb-1 pt-2 text-[0.7rem] font-medium uppercase tracking-wide text-muted-foreground" data-slot="sidebar-shared-label">
                 <span>Shared files</span>
                 <UnreadBadge
                   count={reviewStore.currentRoomUnread}
@@ -526,7 +484,7 @@
             {#if filteredEntries.length > 0}
               <SidebarMenu class="sidebar-tree-menu">
                 {#key treeRenderKey}
-                  <FileTree nodes={filteredEntries} {activePath} {rootPath} {onNavigate} {onExpand} {onShare} {onRename} {onDelete} {sharedPaths} {unreadByPath} {collaboratorLocations} {iconResolver} />
+                  <FileTree nodes={filteredEntries} {activePath} {rootPath} {onNavigate} {onExpand} {onShare} {onRename} {onDelete} {sharedPaths} {unreadByPath} {collaboratorLocations} {iconResolver} {renamingPath} {renameField} />
                 {/key}
               </SidebarMenu>
               {#if showBackendMatches && remoteSearchItems.length > 0}

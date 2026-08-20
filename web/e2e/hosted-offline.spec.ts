@@ -24,7 +24,10 @@ test('offline launch serves the cached shell and local content survives', async 
   await context.setOffline(true);
   await page.reload();
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible({ timeout: 30_000 });
-  await expect(page.getByRole('combobox', { name: 'Project picker' })).toContainText('Untitled');
+  // The workspace name is the witness, not a file name: this workspace has no
+  // chosen document yet, so the header names only the workspace. The point here
+  // is unchanged — it came back from IndexedDB with the network down.
+  await expect(page.locator('.owner-project-name').first()).toContainText('Untitled');
   await context.setOffline(false);
 });
 

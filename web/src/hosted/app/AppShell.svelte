@@ -3,10 +3,16 @@
   import { parseAppRoute, type AppRoute } from '../../lib/hosted/routes';
   import AppHeader from './AppHeader.svelte';
   import DeskHome from './DeskHome.svelte';
+  import LoadingLine from './LoadingLine.svelte';
   import OpenPage from './OpenPage.svelte';
+  import {
+    forgetAllWorkspaceOrigins,
+    forgetWorkspaceOrigin,
+    readWorkspaceOrigin,
+    rememberWorkspaceOrigin,
+  } from './workspace-origin';
   import StoragePage from './StoragePage.svelte';
   import NotFound from '../not-found/NotFound.svelte';
-  import type { HostedCommand } from './CommandPalette.svelte';
   import type {
     ImportFileInput,
     StorageHealth,
@@ -46,6 +52,14 @@
   let activePath = $state<string | undefined>(undefined);
   let bodyText = $state<string | null>(null);
   let isNewDraft = $state(false);
+  /* Why the workspace was opened, when this session opened it (attn-mkmz.5).
+     "blank" means the person asked for an empty page in so many words, so the
+     canvas must not then cover it with an offer to import something — that is
+     the one route where the invitation would be answering a question they had
+     already answered. Everything else, including the `#new` URL intent, leaves
+     the invitation up, because starting blank is deliberately NOT the default
+     (user ruling, 2026-08-20). */
+  let createIntent = $state<'blank' | 'import' | undefined>();
   let rememberedRooms = $state<string[]>([]);
 
   /* Desk state that must survive a trip into a document and back: the filter
@@ -60,12 +74,17 @@
       health = service.storageHealth();
       if (newIntent) {
         // The URL intent keeps its idempotency (attn-cjn).
-        await createAndOpen(true);
+        await createAndOpen(true, 'import');
         return;
       }
       if (route?.view === 'workspace') {
         detail = await service.getWorkspace(route.workspaceId);
         if (detail) {
+          /* A reload has no session intent, so recover it (attn-rjuo.1.2): an
+             explicitly blank workspace must not be re-covered with an offer to
+             import something. Unknown origin falls through to undefined, which
+             leaves the import-first default in place. */
+          createIntent = readWorkspaceOrigin(detail.id);
           activePath = route.filePath ?? detail.openPath;
           bodyText = await service.readBodyText(detail.id, activePath);
           // Sidebar project switcher: the editor needs the rest of the desk.
@@ -95,7 +114,8 @@
    * @param reuseEmpty  Reuse an existing untouched workspace rather than
    *   minting one. True only for the `/app#new` URL intent (attn-n01r.50).
    */
-  async function createAndOpen(reuseEmpty: boolean): Promise<void> {
+  async function createAndOpen(reuseEmpty: boolean, intent: 'blank' | 'import'): Promise<void> {
+    createIntent = intent;
     // #new is idempotent (attn-cjn): reuse the most recent empty, untouched
     // Untitled workspace instead of minting another — a bookmarked /app#new
     // or a back-button revisit must not grow the desk.
@@ -114,6 +134,7 @@
       const body = await service.readBodyText(candidate.id, candidateDetail.openPath);
       if (body !== null && body.trim().length > 0) continue;
       detail = candidateDetail;
+      rememberWorkspaceOrigin(detail.id, intent);
       activePath = candidateDetail.openPath;
       bodyText = body ?? '';
       isNewDraft = true;
@@ -124,6 +145,7 @@
       return;
     }
     detail = await service.createWorkspace();
+    rememberWorkspaceOrigin(detail.id, intent);
     activePath = detail.openPath;
     bodyText = '';
     isNewDraft = true;
@@ -134,11 +156,11 @@
     phase = 'ready';
   }
 
-  async function onCreate(): Promise<void> {
+  async function onCreate(intent: 'blank' | 'import' = 'blank'): Promise<void> {
     phase = 'loading';
     try {
       // The desk button always creates (attn-n01r.50).
-      await createAndOpen(false);
+      await createAndOpen(false, intent);
     } catch (error) {
       errorMessage = error instanceof Error ? error.message : String(error);
       phase = 'error';
@@ -196,6 +218,7 @@
       activePath = path;
       bodyText = body;
       isNewDraft = false;
+      createIntent = undefined;
       route = { view: 'workspace', workspaceId: detail.id, filePath: path };
       if (push) history.pushState(null, '', `/app/w/${detail.id}/${path}`);
     } catch (error) {
@@ -240,6 +263,7 @@
       activePath = undefined;
       bodyText = null;
       isNewDraft = false;
+      createIntent = undefined;
       health = service.storageHealth();
       route = next;
       phase = 'ready';
@@ -299,6 +323,7 @@
     activePath = path;
     bodyText = body;
     isNewDraft = false;
+    createIntent = undefined;
     if (workspaces.length === 0) workspaces = await service.listWorkspaces();
     route = { view: 'workspace', workspaceId: fresh.id, filePath: path };
     phase = 'ready';
@@ -379,6 +404,7 @@
       activePath = target;
     }
     isNewDraft = false;
+    createIntent = undefined;
     route = { view: 'workspace', workspaceId: fresh.id, filePath: target };
     history.replaceState(null, '', `/app/w/${fresh.id}/${target}`);
   }
@@ -469,6 +495,7 @@
 
   async function onClearAll(): Promise<void> {
     await service.clearAllWorkspaces();
+    forgetAllWorkspaceOrigins();
     workspaces = await service.listWorkspaces();
     health = service.storageHealth();
   }
@@ -485,44 +512,16 @@
 
   async function onDelete(workspaceId: string): Promise<void> {
     await service.deleteWorkspace(workspaceId);
+    forgetWorkspaceOrigin(workspaceId);
     workspaces = await service.listWorkspaces();
   }
 
-  /* The desk gets the palette too (attn-a9f7.3.4). ⌘K existed only inside a
-     workspace, so the one surface a keyboard-first user opens most had no
-     command surface at all. Loaded on first use, so the desk's static bundle
-     is unchanged. */
-  let CommandPalette = $state<typeof import('./CommandPalette.svelte').default | undefined>();
-  let paletteOpen = $state(false);
-
-  const deskCommands = $derived<HostedCommand[]>([
-    { id: 'new', label: 'New workspace', hint: 'Untitled.md', keywords: 'create sheet document', run: () => void onCreate() },
-    { id: 'import', label: 'Import files…', keywords: 'open upload folder zip', run: () => void navigate({ view: 'open' }) },
-    { id: 'join', label: 'Join a review', keywords: 'review link invite share', run: () => { window.location.assign('/app#join'); } },
-    { id: 'storage', label: 'Storage & recovery', keywords: 'export backup quota clear', run: () => void navigate({ view: 'storage' }) },
-    ...workspaces.map((workspace) => ({
-      id: `ws-${workspace.id}`,
-      label: `Open ${workspace.name}`,
-      hint: workspace.lastEditedLabel,
-      keywords: 'workspace open switch',
-      run: () => onOpenWorkspace(workspace.id, workspace.openPath),
-    })),
-  ]);
-
-  function onShellKeydown(event: KeyboardEvent): void {
-    if (editorMode) return; // The editor owns its own palette.
-    if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'k') {
-      event.preventDefault();
-      void openPalette();
-    }
-  }
-
-  async function openPalette(): Promise<void> {
-    if (!CommandPalette) {
-      CommandPalette = (await import('./CommandPalette.svelte')).default;
-    }
-    paletteOpen = true;
-  }
+  /* No desk-level command palette (attn-mkmz.6). attn-a9f7.3.4 added a second
+     one here with its own command set, so ⌘K meant two different lists
+     depending on which route you were standing on. The palette James introduced
+     (c810cb9) is document-scoped and lives in EditorShell; the native app puts
+     its palette in the same place for the same reason. The desk's own actions
+     are all on the desk, visible, one click away. */
 
   const chromeView = $derived(
     phase === 'ready' && route && route.view !== 'workspace' ? route.view : undefined,
@@ -531,13 +530,15 @@
   void load();
 </script>
 
-<svelte:window onkeydown={onShellKeydown} />
-
 {#if phase === 'loading'}
+  <!-- attn-mkmz.7. Both loading branches used to render `main.desk` with a
+       left-aligned eyebrow at the top of the page — so opening a DOCUMENT drew
+       a desk-shaped page first, then snapped to a three-column editor, and the
+       indicator itself sat in the top-left corner of a region it was standing
+       in for. One centred surface for every wait, and the editor route names
+       the same thing at every stage (see EditorShell's own loading text). -->
   <div class="app-shell" data-app-view="loading">
-    <main class="desk">
-      <p class="eyebrow" role="status">Opening your desk…</p>
-    </main>
+    <div class="app-loading" role="status"><LoadingLine text="Opening your desk" /></div>
   </div>
 {:else if phase === 'error'}
   <!-- The moment of real fear had the least design in the app (attn-a9f7.1.3):
@@ -577,6 +578,7 @@
     {activePath}
     {bodyText}
     {isNewDraft}
+    {createIntent}
     {onSelectEntry}
     {onWorkspaceChanged}
     {workspaces}
@@ -595,9 +597,7 @@
        is both wrong and alarming — the workspace is present, its UI is not
        downloaded yet. -->
   <div class="app-shell" data-app-view="editor-loading">
-    <main class="desk">
-      <p class="eyebrow" role="status">Opening {detail.name}…</p>
-    </main>
+    <div class="app-loading" role="status"><LoadingLine text={`Opening ${detail.name}`} /></div>
   </div>
 {:else if editorMode}
   <!-- The shared recovery surface (attn-08fa.10). This branch used to render a
@@ -660,6 +660,3 @@
   </div>
 {/if}
 
-{#if CommandPalette && !editorMode}
-  <CommandPalette bind:open={paletteOpen} commands={deskCommands} />
-{/if}

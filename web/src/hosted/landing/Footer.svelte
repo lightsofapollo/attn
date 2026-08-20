@@ -26,14 +26,15 @@
     No account, no upload, no naming step. It stays on this device until you decide otherwise.
   </p>
   <div class="closer-actions">
+    <!-- Same rule as the hero: no default path mints an untitled file. -->
     {#if deskCount > 0}
       <a class="button primary" href="/app" data-action="open-desk">
         Your desk ({deskCount}) <span aria-hidden="true">→</span>
       </a>
-      <a class="button" href="/app#new" data-action="new-workspace">New workspace</a>
+      <a class="button" href="/open" data-action="open-document">Open a document</a>
     {:else}
-      <a class="button primary" href="/app#new" data-action="new-workspace">
-        New workspace <span aria-hidden="true">→</span>
+      <a class="button primary" href="/open" data-action="open-document">
+        Open a document <span aria-hidden="true">→</span>
       </a>
       <a class="button" href="/app#join" data-action="join-review">Join a review</a>
     {/if}

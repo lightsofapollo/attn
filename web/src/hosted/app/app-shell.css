@@ -3,6 +3,33 @@
    the three-column workspace; under 900px the editor becomes a reader-first
    surface with a bottom action dock and sheets (ios-ux.md). */
 
+/* ROUNDED ENCLOSURES (user ruling, 2026-08-19: "anywhere there is a
+   non-rounded border in the web app, change to have rounded borders ... can be
+   subtle. Use the shadcn default").
+
+   Every element that DRAWS A BOX — a full border, not a single-side hairline —
+   takes a step from the shadcn ladder in chrome.css. `--radius-lg` (0.625rem,
+   shadcn's own default) for panels, cards, dialogs and drop wells;
+   `--radius-md` for the smaller controls inside them, because 10px on a 28px
+   box reads as a pill rather than a rounded rectangle. Single-side rules keep
+   square ends: a radius on one border edge does nothing, and the editorial
+   hairlines under the desk title and the project row are rules, not boxes.
+
+   Containers whose dividers are grid gap showing the parent's own background —
+   `.quick-actions` here, `.entry-strip` and `.surfaces` on the landing — also
+   need `overflow: hidden`, or the square-cornered cell backgrounds paint over
+   the corners the parent just rounded.
+
+   One inset for every chrome header, desk and document alike (attn-mkmz.2).
+   The desk/open/storage masthead had 1.4rem and the editor header 0.75rem, so
+   crossing into a document slid the brand 10px left and pulled the right-hand
+   controls almost onto the window edge. The two bars are the same plane (see
+   THE ACCENT PLANE below); a reader moving between them should not see the
+   furniture move. */
+:root {
+  --chrome-inline-gutter: 1.4rem;
+}
+
 .app-shell {
   min-height: 100dvh;
   display: grid;
@@ -39,7 +66,7 @@
      is correct, the page scrolling sideways is not (attn-n01r.43). */
   flex-wrap: wrap;
   gap: 0.8rem;
-  padding: 0.5rem 1.4rem;
+  padding: 0.5rem var(--chrome-inline-gutter);
   background: var(--header-surface);
   border-bottom: 1px solid var(--panel-border);
   font-family: var(--sans);
@@ -55,28 +82,18 @@
 }
 
 /* Danger ink has no contrast on terracotta, exactly as --amber-deep did not —
-   app.css already flattens that one to the on-accent foreground for the save
+   tokens.css already flattens that one to the on-accent foreground for the save
    chip, and this is the same move for the same reason. The state does not go
    with it: the dot's shape still separates healthy (filled) from caution
-   (hollow), and the pill below separates "needs attention" from "all good". */
-[data-slot='app-shell-header'] {
-  --danger-ink: var(--primary-foreground);
-}
+   (hollow), and the pill below separates "needs attention" from "all good".
 
-/* On a paper header, colour alone could carry "something needs you". On the
-   plane it cannot, so the actionable badge becomes an enclosed pill — the
-   header's own active convention (fill plus hairline, attn-11g4.6) rather than
-   a new invention. Only the anchor form gets it; the healthy badge is a span. */
-[data-slot='app-shell-header'] a.local-badge {
-  padding: 0.2rem 0.55rem;
-  border: 1px solid var(--border);
-  border-radius: 9999px;
-  background: var(--accent);
-  /* Full on-accent foreground, not the muted step. The pill's own wash already
-     darkens the ground it sits on, so muted text inside it lands close to the
-     fill in Ink; the enclosure is what steps the badge back, and the dot shape
-     is what separates caution from warn. */
-  color: var(--primary-foreground);
+   The EDITOR header is on the same plane and needs the same flattening: the
+   review-trouble chip renders `--danger-ink` there, and left at its own hue it
+   would be red on terracotta in Paper and red on steel in Ink — the exact
+   pairing this rule exists to prevent. Weight, not hue, separates the two chip
+   states up here (see .review-trouble-chip). */
+:is([data-slot='app-shell-header'], [data-slot='owner-header']) {
+  --danger-ink: var(--primary-foreground);
 }
 
 /* .button fills with `--sheet` (a paper tone) at 45%, which over terracotta
@@ -110,11 +127,24 @@
   gap: 0.7rem;
 }
 
+/* The wordmark is chrome, not prose. It states its own colour and decoration
+   rather than inheriting whatever anchor treatment happens to be loaded: the
+   hosted editor chunk brings base.css with it, and its prose-link rule painted
+   this rust and underlined it on hover. The layer order in chrome.css is the
+   real fix; this says the intent locally so the masthead cannot drift again. */
 .brand {
   display: flex;
   align-items: center;
   gap: 0.65rem;
+  color: inherit;
+  text-decoration: none;
   font: 750 1.25rem var(--serif);
+}
+
+.brand:hover,
+.brand:visited {
+  color: inherit;
+  text-decoration: none;
 }
 
 /* The mark carries its own tile, radius, and fixed palette (BrandMark.svelte):
@@ -124,11 +154,16 @@
   height: 29px;
 }
 
-/* Locality is INK, not green (attn-08fa.5). This badge reports where the file
-   lives — a chrome state, not a suggestion — and the Quarantine Rule keeps
-   green for the collaboration layer. Green here also read as a "you're safe"
-   tint, which is the security-theatre register "legible not loud" rejects. The
-   dot glyph and the wording carry the state; colour never carries it alone. */
+/* Locality is INK, not green (attn-08fa.5). This badge reports where a
+   workspace lives — a chrome state, not a suggestion — and the Quarantine Rule
+   keeps green for the collaboration layer. Green here also read as a "you're
+   safe" tint, which is the security-theatre register "legible not loud"
+   rejects. The dot and the wording carry the state; colour never carries it
+   alone.
+
+   One caller left: the desk row's "Shared · relay sees only ciphertext". The
+   header's storage badge was removed on 2026-08-20 and took the per-tone
+   colours with it. */
 .local-badge {
   display: flex;
   align-items: center;
@@ -137,29 +172,11 @@
   color: var(--ink);
 }
 
-/* Caution is its own tier: neither the collaboration green nor the destructive
-   red (attn-n01r.31). Muted ink carries "look at this" without claiming either
-   "you're fine" or "something failed". */
-.local-badge[data-tone='caution'] {
-  color: var(--hosted-muted);
-}
-
-.local-badge[data-tone='warn'] {
-  color: var(--danger-ink);
-}
-
 .local-badge .dot {
   width: 7px;
   height: 7px;
   border-radius: 50%;
   background: currentColor;
-}
-
-/* Shape carries the state as well as colour, per PRODUCT.md's "do not rely on
-   color alone": filled for healthy, hollow for caution, filled for failure. */
-.local-badge[data-tone='caution'] .dot {
-  background: transparent;
-  box-shadow: inset 0 0 0 1.5px currentColor;
 }
 
 .degraded-banner {
@@ -171,6 +188,7 @@
   margin: 0 0 2rem;
   padding: 1rem 1.2rem;
   border: 1px solid var(--rust);
+  border-radius: var(--radius-lg);
   background: color-mix(in oklch, var(--rust) 6%, var(--sheet));
   font: 0.95rem/1.5 var(--sans);
 }
@@ -198,17 +216,15 @@
   padding: clamp(2rem, 6vw, 6rem) clamp(1rem, 4vw, 6rem);
 }
 
+/* No rule under the title. The eyebrow above it and the whitespace below it
+   already separate the head from the page, and a hairline stretched the full
+   1300px desk was the loudest line on a page whose own content carries none. */
 .desk-title {
   display: flex;
   justify-content: space-between;
   align-items: end;
   gap: 1rem;
-  /* --rule, not solid --ink (attn-n01r.42). DESIGN.md: hairlines are
-     "ink at low alpha, never a solid gray line". At full opacity this
-     rendered oklch(0.87) in INK — the brightest element on the dark page,
-     brighter than the h1 it underlines. */
-  border-bottom: 1px solid var(--rule);
-  padding-bottom: 1.3rem;
+  padding-bottom: 0.4rem;
 }
 
 .desk-title h1 {
@@ -258,6 +274,8 @@
   grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr) minmax(0, 1fr);
   gap: 1px;
   border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
   background: var(--rule);
   margin: 2.5rem 0 4rem;
 }
@@ -344,11 +362,22 @@
    the collapse resolves 64px ABOVE the panel and 0px below, dropping this label
    onto the panel's border. Spacing that belongs to an element lives on that
    element. */
+/* Stated margins, not the browser's h2 defaults. Those are `em`-relative, so at
+   this 0.7rem step they collapsed to ~9px of clearance between the label and a
+   filled row — and they scaled the wrong way against a filter box measured in
+   px (attn-n01r.29). */
 .folio-label {
+  margin: 0 0 0.7rem;
   font: 600 0.7rem var(--sans);
   color: var(--hosted-muted);
   text-transform: uppercase;
   letter-spacing: 0.06em;
+}
+
+/* A second group heading needs its own air now that the rows above it end in a
+   filled edge rather than a hairline — the divider used to double as the gap. */
+.workspace-list + .folio-label {
+  margin-top: 1.7rem;
 }
 
 /* The rows are a list now (attn-n01r.30); strip the default list presentation
@@ -365,10 +394,17 @@
 }
 
 /* Filter alone, above every group it narrows. The group headings below own
-   the list semantics (attn-a9f7.3.3). */
+   the list semantics (attn-a9f7.3.3).
+
+   It gets its own line rather than being overlapped into the first heading's.
+   The -1.4rem pull this replaces was tuned against transparent rows: it lifted
+   the heading beside the filter, but the list came up with it and the first row
+   landed on the filter's bottom edge — invisible while a row was a bare strip,
+   an actual collision now that a row is a filled card, and worse at any larger
+   base font, since the pull is rem and the input's height is px. */
 .folio-head-filter-only {
   justify-content: flex-end;
-  margin-block-end: -1.4rem;
+  margin-block-end: 1rem;
 }
 
 .folio-filter {
@@ -416,7 +452,12 @@
   opacity: 0;
 }
 
+/* Rows are separated by the gap between two filled surfaces now, not by a
+   hairline between two transparent ones — so the list needs the gap the divider
+   used to stand in for. */
 .workspace-list {
+  display: grid;
+  gap: 0.35rem;
   margin: 0;
   padding: 0;
   list-style: none;
@@ -443,9 +484,28 @@
   gap: 1rem;
   padding: 1.25rem 0.6rem;
   border-radius: 8px;
-  border-bottom: 1px solid var(--rule);
   font-family: var(--sans);
   color: var(--ink);
+}
+
+/* A surface, not a line. The rows used to be transparent strips divided by a
+   hairline, which made a list of workspaces read as a table rule rather than as
+   a stack of things you can pick up; each row now carries its own quiet fill
+   and deepens by one step under the pointer.
+
+   The fill is an INK wash rather than the `--sheet` step, because the raised
+   surfaces are lighter than the page in BOTH themes and hover had nowhere left
+   to go but lighter still. A wash of the foreground deepens the row in Paper
+   and lifts it in Ink — one declaration, the correct direction in each. */
+.workspace-list .workspace-row {
+  background: color-mix(in oklch, var(--ink) 4%, transparent);
+  transition: background-color 140ms var(--ease);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .workspace-list .workspace-row {
+    transition: none;
+  }
 }
 
 /* Do not narrow this to `a.workspace-row:hover`: the element is a <div>, so
@@ -455,6 +515,12 @@
 .workspace-row:focus-within,
 .workspace-row[data-selected='true'] {
   background: color-mix(in oklch, var(--sheet) 70%, transparent);
+}
+
+.workspace-list .workspace-row:hover,
+.workspace-list .workspace-row:focus-within,
+.workspace-list .workspace-row[data-selected='true'] {
+  background: color-mix(in oklch, var(--ink) 9%, transparent);
 }
 
 .workspace-row[data-selected='true'] {
@@ -511,9 +577,10 @@
 
 @media (pointer: coarse) {
   /* Compact desktop-style controls keep their visual density, while their
-     touch acquisition area meets the shared 44px hosted contract. */
-  .app-header .brand,
-  .app-header .local-badge {
+     touch acquisition area meets the shared 44px hosted contract. The badge is
+     no longer listed: it is a 46px square at every pointer type now, and a 44px
+     min-height here would have quietly shrunk it back. */
+  .app-header .brand {
     display: inline-flex;
     align-items: center;
     min-height: 44px;
@@ -549,61 +616,46 @@
   color: var(--ink);
 }
 
-.empty-desk {
-  display: block;
-  width: 100%;
-  text-align: left;
-  cursor: pointer;
+/* The first-run offer (attn-mkmz.5), one line rather than a well.
+   
+   The well this replaces carried a brand mark, a title, a lede, two buttons and
+   a privacy line — every one of which the workspace canvas says again the
+   moment you arrive there, one click later. The desk states that it is empty
+   and names the two ways out; the canvas does the asking. */
+.desk-empty-offer {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.4rem;
+  margin: 0.7rem 0 0;
+  font: 0.95rem/1.6 var(--sans);
+  color: var(--hosted-muted);
+}
+
+.desk-empty-or {
+  color: var(--hosted-muted);
+}
+
+/* Both routes out of an empty desk, set alike (user ruling, 2026-08-20). The
+   weight used to differ — bold import, regular blank — to mark which one leads.
+   Printed inside one sentence that read as one route offered and one mentioned,
+   rather than as a choice between two. Bold is the register for both; the lead
+   is carried by order, which is the cheaper signal and the one the sentence was
+   already sending. */
+.link-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--rust);
   font: inherit;
-  color: var(--ink);
-  /* 2.5rem pushed the card's bottom to 916px against a 900px viewport, so the
-     closing line and its caret — the payoff of the whole composition — sat
-     below the fold (attn-n01r.35). */
-  margin-top: 1.5rem;
-  max-width: 560px;
-  /* The mono meta line ("UNTITLED.MD · NOT CREATED YET") carries 0.1em
-     tracking and cannot shrink; at 200% text it drove 87px past the card.
-     Let it break instead of widening the page (attn-n01r.43). */
-  overflow-wrap: anywhere;
-  border: 1px solid var(--rule);
-  background: var(--sheet);
-  box-shadow: var(--shadow-soft);
-  padding: 2.4rem 2.6rem 3rem;
-  transform: rotate(-0.3deg);
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+  cursor: pointer;
 }
 
-.empty-desk .meta {
-  display: block;
-  font: 0.7rem var(--mono);
-  color: var(--hosted-muted);
-  border-bottom: 1px solid var(--rule);
-  padding-bottom: 0.9rem;
-}
-
-.empty-desk-title {
-  display: block;
-  margin: 2rem 0 0.9rem;
-  font-size: 2rem;
-  letter-spacing: -0.03em;
-}
-
-.empty-desk-body {
-  display: block;
-  margin: 0;
-  font-size: 1rem;
-  line-height: 1.7;
-}
-
-.empty-desk .cursor-line {
-  color: var(--hosted-muted);
-}
-
-.empty-desk .caret {
-  display: inline-block;
-  width: 2px;
-  height: 1.05em;
-  vertical-align: -0.18em;
-  background: var(--rust);
+.link-button:hover {
+  color: var(--rust-deep);
 }
 
 /* ————— editor ————— */
@@ -861,6 +913,7 @@
   margin: 0 auto;
   background: var(--sheet);
   border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
   box-shadow: var(--shadow-soft);
   padding: clamp(2.2rem, 6vw, 5.5rem);
 }
@@ -890,6 +943,7 @@
 .asset-preview {
   margin: 1.6rem 0 0;
   border: 1px dashed var(--rule);
+  border-radius: var(--radius-lg);
   padding: 2.4rem 1.6rem;
   text-align: center;
   color: var(--hosted-muted);
@@ -932,6 +986,7 @@
   margin-top: 0.7rem;
   padding: 0.65rem;
   border: 1px solid var(--rust);
+  border-radius: var(--radius-md);
   color: var(--rust-deep);
   font-size: 0.78rem;
   line-height: 1.35;
@@ -943,6 +998,7 @@
 .review-card {
   background: var(--sheet);
   border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
   padding: 0.9rem;
   margin-top: 1rem;
   box-shadow: var(--shadow-label);
@@ -985,13 +1041,43 @@
   height: 100%;
 }
 
+/* ONE loading surface for the whole app (attn-mkmz.7). Opening a document used
+   to cross up to three of these — a left-aligned eyebrow on a desk-shaped page,
+   a centred mono line, then a left-aligned sans line inside the content column
+   — so a single wait read as three unrelated stages. They are now one box in
+   one place saying one thing, and each stage names the workspace it is opening,
+   so nothing appears to restart mid-wait. */
+/* SAID IN THE PAGE'S OWN VOICE (user ruling, 2026-08-20). This was 0.85rem
+   sans in muted grey — the size and colour the app uses for captions, on a
+   surface with nothing else on it. A whole empty viewport carrying one caption
+   reads as a page that has failed to load rather than one that is loading.
+   It now wears the desk title's register (serif, the h1's letter-spacing) at a
+   step below the h1's size, so what you are waiting for is announced in the
+   same voice as the thing that arrives. */
+.app-loading,
 .hosted-shell-loading {
   display: grid;
+  min-height: 100%;
   height: 100%;
   place-items: center;
-  color: var(--muted-foreground);
+  padding: 2rem;
+  color: var(--foreground);
   background: var(--background);
-  font: 400 0.85rem/1.55 var(--mono);
+  font: 600 1.5rem/1.35 var(--serif);
+  letter-spacing: -0.02em;
+  text-align: center;
+}
+
+/* The shell's two loading views have no header row to reserve, so the single
+   centred child owns the whole viewport rather than the 64px masthead band. */
+.app-shell[data-app-view='loading'],
+.app-shell[data-app-view='editor-loading'] {
+  grid-template-rows: 1fr;
+}
+
+.app-shell[data-app-view='loading'] .app-loading,
+.app-shell[data-app-view='editor-loading'] .app-loading {
+  min-height: 100dvh;
 }
 
 .hosted-content-viewport {
@@ -1038,6 +1124,96 @@
   display: contents;
 }
 
+/* ————— the empty-canvas invitation (attn-mkmz.5) ————— */
+
+/* The positioned ancestor the invitation centres itself in.
+   
+   NOT `.hosted-native-document`: that is the document COLUMN, capped at the
+   reading measure and anchored to a fixed left gutter, so centring inside it
+   put the invitation ~160px left of the window's middle on a 1440px display
+   (user report, 2026-08-20). The invitation is not document content — it is the
+   state of the whole canvas — so it centres on the canvas.
+   
+   `.hosted-canvas-row` is that canvas: the full-width row in
+   HostedDesktopWorkspaceFrame that holds the gutter, the column and the rail.
+   `--canvas-invite-end` is the rail's width when one is docked, so the
+   invitation centres on what is actually visible rather than sliding under an
+   open comments column. `.hosted-editor-surface` cannot be the ancestor at all:
+   on desktop it is `display: contents` and generates no box. */
+.hosted-canvas-row,
+.writing-sheet {
+  position: relative;
+}
+
+/* Centred ON the canvas, with no box of its own. A dashed well here would draw
+   a boundary that is not the real one — the whole workspace surface is the drop
+   target, and it already announces itself on drag through `data-drop-label`.
+
+   Pointer-transparent except its two buttons: this sits over a live editor, so
+   a click anywhere else must reach the ProseMirror and place a caret exactly as
+   it does on any other empty document. */
+.canvas-invite {
+  position: absolute;
+  inset: 0 var(--canvas-invite-end, 0) 0 0;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  padding: 2rem;
+  pointer-events: none;
+}
+
+.canvas-invite-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.9rem;
+  max-width: 34rem;
+  text-align: center;
+  font-family: var(--sans);
+}
+
+/* Serif: this names the state of the canvas, so it belongs to the reading voice
+   rather than the operating one — the same call as `.open-prompt-title`. */
+.canvas-invite-title {
+  margin: 0;
+  font: 600 1.15rem/1.3 var(--serif);
+  color: var(--ink);
+}
+
+.canvas-invite-lede {
+  margin: 0;
+  color: var(--hosted-muted);
+  font-size: 0.95rem;
+}
+
+.canvas-invite-privacy {
+  margin: 0;
+  color: var(--hosted-muted);
+  font-size: 0.78rem;
+}
+
+/* The one clickable region inside a pointer-transparent overlay. Everything
+   else lets the pointer through to the editor beneath. */
+.canvas-invite-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.6rem;
+  pointer-events: auto;
+}
+
+/* One hint, not two. The invitation's own lede already says "or just start
+   typing", so the ProseMirror placeholder underneath would say it again — two
+   sentences of first-run copy stacked on one empty page. */
+/* Keyed off the document WRAPPER, not `.hosted-editor-surface`: the invitation
+   is a sibling of the whole branch chain now, so that it can render before the
+   editor chunk resolves (attn-rjuo.1.1) — it is no longer inside the surface it
+   used to be nested in. */
+:is(.hosted-native-document, .writing-sheet):has(.canvas-invite)
+  .ProseMirror p.is-editor-empty:first-child::before {
+  content: none;
+}
+
 /* HTML is a read-only document surface, not an asset card. Keep its frame in
    the same generous reading canvas as the editor while the iframe owns its
    own document scrolling and annotation geometry. */
@@ -1056,67 +1232,255 @@
   margin: 0.75rem auto 0;
 }
 
+/* The last stage of the same wait: the document is on screen and the editable
+   surface is still resolving. Centred in the column it stands in for, in the
+   same voice as the shell's loading box above (attn-mkmz.7) — it used to be a
+   bold line pinned to the top-left of the measure. */
 .hosted-editor-loading {
+  display: grid;
   max-width: var(--content-measure);
+  min-height: 8rem;
   margin: 0 auto;
+  place-items: center;
   padding: 1rem 2.25rem;
-  color: var(--muted-foreground);
-  font: 600 0.85rem/1.4 var(--sans);
+  color: var(--foreground);
+  /* The same voice, one step quieter: this stage stands inside the document's
+     own column with the header already drawn around it, so it is a line on a
+     page rather than the only thing on screen. */
+  font: 600 1.15rem/1.4 var(--serif);
+  letter-spacing: -0.01em;
+  text-align: center;
 }
 
+/* Three periods that arrive one at a time and clear together. Real dots in the
+   line's own serif, all three always occupying their space — only the ink
+   animates — so a centred sentence never shuffles sideways for the length of
+   the wait. */
+/* One grid item, so the spinner and the sentence stay on one line: every
+   surface that mounts this centres its child with `place-items: center`, and
+   two children there would be two rows. Flex rather than inline, so a long
+   workspace name wraps as a block beside the spinner instead of flowing back
+   underneath it. */
+.loading-line {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5em;
+}
+
+.loading-spinner {
+  flex: none;
+  width: 0.8em;
+  height: 0.8em;
+  animation: loading-spin 0.9s linear infinite;
+}
+
+.loading-spinner circle {
+  fill: none;
+  stroke-width: 2.5;
+}
+
+/* The track is the line's own ink at low alpha rather than a fixed grey, so the
+   ring sits at the same distance from the page in either theme. */
+.loading-spinner-track {
+  stroke: color-mix(in oklch, currentColor 18%, transparent);
+}
+
+/* A quarter turn of accent, round-capped. Progress is the accent's own job. */
+.loading-spinner-arc {
+  stroke: var(--primary);
+  stroke-linecap: round;
+  stroke-dasharray: 14 43;
+}
+
+@keyframes loading-spin {
+  to {
+    transform: rotate(1turn);
+  }
+}
+
+/* Reduced motion asks for no MOVEMENT, not for no signal. The ring stops
+   turning and the arc breathes instead — the page still reads as working, and
+   nothing travels across it. */
+@media (prefers-reduced-motion: reduce) {
+  .loading-spinner {
+    animation: none;
+  }
+
+  .loading-spinner-arc {
+    animation: loading-spinner-breathe 1.8s ease-in-out infinite;
+  }
+}
+
+@keyframes loading-spinner-breathe {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+/* The `margin-top: -0.75rem` that used to be here was a nudge, and it was the
+   whole of attn-mkmz.1: it lifted this group 12px out of a row its parent had
+   already centred, so the save chip sat ~6px above the share icon beside it and
+   above the brand opposite it. The row is centred by `items-center` on the
+   header; nothing here may fight that.
+
+   One control height for everything in the right-hand group, so the gaps
+   between items read as gaps rather than as staggered boxes. 1.75rem matches
+   the share icon and the saved-review toggle, which are Tailwind `size-7` /
+   `min-h-7` in HostedDesktopWorkspaceFrame. */
 .hosted-header-actions {
   display: flex;
   min-width: 0;
   align-items: center;
-  gap: 0.5rem;
-  margin-top: -0.75rem;
+  gap: 0.375rem;
   font-family: var(--sans);
 }
 
-/* Sits on the accent plane, so it borrows the header's own re-pointed tokens
-   rather than the hosted paper aliases (attn-a9f7.1.8). */
-.palette-hint {
+.hosted-header-actions > * {
+  min-height: 1.75rem;
+}
+
+/* THE REVIEW-TROUBLE CHIP (user ruling, 2026-08-19: "surface this as a red or
+   error warning in the header rather than here"). The only control in this
+   header that reports something being wrong, so it is the only one that is
+   enclosed and tinted rather than a resting ghost — that difference IS the
+   signal, and it is why the rest of the row stays quiet.
+
+   `--danger-ink` is already re-pointed to the on-accent foreground for this
+   subtree (see the app-shell-header block at the top of this file), because
+   red has no contrast on terracotta. On the plane the enclosure and the dot
+   carry the alarm; off it, the colour does. */
+.review-trouble-chip {
   display: inline-flex;
   align-items: center;
-  gap: 0.4rem;
-  min-height: 28px;
-  padding: 0.15rem 0.4rem;
-  border: 0;
-  border-radius: 8px;
-  background: transparent;
-  color: var(--muted-foreground);
-  font: 500 0.78rem var(--sans);
+  gap: 0.35rem;
+  padding: 0.15rem 0.5rem;
+  border: 1px solid color-mix(in oklch, var(--danger-ink) 45%, transparent);
+  border-radius: 9999px;
+  background: color-mix(in oklch, var(--danger-ink) 12%, transparent);
+  color: var(--danger-ink);
+  font: 550 0.7rem var(--sans);
+  white-space: nowrap;
   cursor: pointer;
-  transition: background-color 120ms ease, color 120ms ease;
+  transition: background-color 120ms ease;
 }
 
-.palette-hint:hover {
-  background: var(--accent);
-  color: var(--foreground);
+.review-trouble-chip:hover {
+  background: color-mix(in oklch, var(--danger-ink) 20%, transparent);
 }
 
-/* The keycap alone still says "command palette" once the label is gone. */
-@media (max-width: 1100px) {
-  .palette-hint-label {
-    display: none;
-  }
+/* On the accent plane both --danger-ink and --amber-deep flatten to the same
+   on-accent foreground, so hue cannot separate "stuck" from "working on it"
+   up here. WEIGHT does: a real fault gets a filled pill (the header's own
+   active convention, attn-11g4.6), transient trouble keeps the light wash
+   below. Off the plane the hues carry it and this simply reads as emphasis. */
+[data-slot='owner-header'] .review-trouble-chip:not([data-transient='true']) {
+  border-color: var(--danger-ink);
+  background: color-mix(in oklch, var(--danger-ink) 92%, transparent);
+  color: var(--header-surface);
+}
+
+[data-slot='owner-header'] .review-trouble-chip:not([data-transient='true']):hover {
+  background: var(--danger-ink);
+}
+
+.review-trouble-chip:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+/* Transient trouble is ACTIVITY, not failure — the head-moved republish that
+   the owner kept seeing resolves itself the moment they stop typing. Reporting
+   it in alarm red teaches people to distrust the red. Amber, and the dot
+   pulses to say "in progress" rather than sitting still to say "stuck". */
+.review-trouble-chip[data-transient='true'] {
+  border-color: color-mix(in oklch, var(--amber-deep) 45%, transparent);
+  background: color-mix(in oklch, var(--amber-deep) 12%, transparent);
+  color: var(--amber-deep);
+}
+
+.review-trouble-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: currentColor;
+}
+
+.review-trouble-chip[data-transient='true'] .review-trouble-dot {
+  animation: review-trouble-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes review-trouble-pulse {
+  50% { opacity: 0.35; }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .palette-hint {
+  .review-trouble-chip {
     transition: none;
+  }
+  .review-trouble-chip[data-transient='true'] .review-trouble-dot {
+    animation: none;
   }
 }
 
-.hosted-title-input {
-  width: min(12rem, 25vw);
-  height: 1.75rem;
-  padding: 0 0.5rem;
-  border: 1px solid var(--input);
-  border-radius: 6px;
-  background: var(--background);
-  color: var(--foreground);
-  font-size: 0.7rem;
+/* The dialog behind that chip. Same material as the palette and the shortcut
+   sheet — they are the app's three floating panels and must not read as three
+   different products. */
+.review-trouble {
+  position: fixed;
+  z-index: 71;
+  left: 50%;
+  top: 18%;
+  width: min(30rem, calc(100vw - 40px));
+  transform: translateX(-50%);
+  padding: 1.15rem 1.25rem 1rem;
+  border: 1px solid var(--rule);
+  border-radius: 14px;
+  background: var(--sheet-raised);
+  box-shadow: var(--shadow-strong);
+  font-family: var(--sans);
+}
+
+.review-trouble-title {
+  margin: 0;
+  font: 600 1.15rem/1.3 var(--serif);
+  color: var(--ink);
+}
+
+.review-trouble-body {
+  margin: 0.5rem 0 0;
+  color: var(--hosted-muted);
+  font-size: 0.85rem;
+  line-height: 1.55;
+}
+
+.review-trouble-detail {
+  margin-top: 0.9rem;
+  font-size: 0.78rem;
+  color: var(--hosted-muted);
+}
+
+.review-trouble-detail summary {
+  cursor: pointer;
+}
+
+/* Mono, because the contents are a program's words rather than the product's
+   — the Read/Do Rule's third face, used here to mark exactly that. */
+.review-trouble-detail p {
+  margin: 0.4rem 0 0;
+  font-family: var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.review-trouble-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 1.1rem;
 }
 
 /* iOS view-only reassurance banner. Calm steel-blue (an intentional
@@ -1231,22 +1595,105 @@
   box-shadow: none;
 }
 
-/* Shown only during a file drag (attn-08fa.12) — it was a permanent dashed box
-   in the rail, standing chrome for a rare action. Now it is a hint that arrives
-   with the drag and leaves with it, so it can be more emphatic than a resting
-   fixture could afford to be. */
+/* Same reason, same place: the in-place renames are words with carets, and the
+   global ring would draw the box back around them. Their focus indicator is the
+   rust underline their wrapper paints — `.owner-name-edit::before` in the
+   header, `.sidebar-name-edit::after` on a tree row. */
+.owner-title-input:focus,
+.owner-title-input:focus-visible,
+.sidebar-rename-input:focus,
+.sidebar-rename-input:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+/* The resting upload control (attn-mkmz.3). Quiet enough to be furniture — no
+   dashed box at rest, since nothing is being dropped yet — but a real focusable
+   button occupying the same footprint the drag state below takes over, so the
+   footer does not change height when a drag starts. */
+/* A drop AREA, not a label (user ruling, 2026-08-19). attn-mkmz.3 restored the
+   click path as a one-line text button, which is a target you cannot aim a drag
+   at — the rail lost the space that said "things go here". This is the standing
+   target again: a dashed well with real height, still a single <button> so the
+   keyboard path is one Tab stop and the pointer path is one click. The drag
+   state below takes over the SAME box, so nothing moves under the cursor when a
+   drag starts. */
+.hosted-sidebar-add {
+  display: grid;
+  width: 100%;
+  justify-items: center;
+  align-content: center;
+  gap: 0.15rem;
+  min-height: 74px;
+  padding: 0.7rem 0.55rem;
+  border: 1px dashed color-mix(in oklch, var(--sidebar-foreground) 18%, transparent);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--sidebar-foreground);
+  font: 500 0.7rem var(--sans);
+  text-align: center;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.hosted-sidebar-add-label {
+  font-weight: 550;
+}
+
+/* The second line names the gesture the box exists for. Quieter than the label
+   so the control still reads as one offer rather than two. */
+.hosted-sidebar-add-hint {
+  color: color-mix(in oklch, var(--sidebar-foreground) 62%, transparent);
+  font-size: 0.7rem;
+  font-weight: 400;
+}
+
+.hosted-sidebar-add-glyph {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.7;
+  stroke-linecap: round;
+}
+
+/* Focus is the sidebar's own ring, not the global outline: this is a rail
+   control and it should look like the tree rows it sits under. */
+.hosted-sidebar-add:focus-visible {
+  outline: 2px solid var(--sidebar-ring);
+  outline-offset: 1px;
+}
+
+.hosted-sidebar-add:hover {
+  border-color: color-mix(in oklch, var(--sidebar-foreground) 14%, transparent);
+  background: var(--sidebar-accent);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .hosted-sidebar-add {
+    transition: none;
+  }
+}
+
+/* The drag state (attn-08fa.12, kept): the SAME box as the resting well above —
+   same height, same padding, same radius — so arming the target only changes
+   its edge and fill. Nothing shifts under a cursor that is already mid-drag,
+   which is the one moment a layout jump actually costs the user the drop. */
 .hosted-sidebar-dropzone {
   display: grid;
   width: 100%;
   margin: 0;
   justify-items: center;
+  align-content: center;
   gap: 0.15rem;
-  padding: 0.75rem 0.55rem;
+  min-height: 74px;
+  padding: 0.7rem 0.55rem;
   border: 1px dashed color-mix(in oklch, var(--sidebar-primary) 55%, transparent);
   border-radius: 8px;
   background: var(--sidebar-accent);
   color: var(--sidebar-accent-foreground);
-  font-size: 0.7rem;
+  font: 550 0.7rem var(--sans);
   text-align: center;
 }
 
@@ -1256,15 +1703,7 @@
 }
 
 .hosted-dropzone-copy {
-  display: grid;
-  gap: 0.05rem;
   font-weight: 550;
-}
-
-.hosted-dropzone-hint {
-  display: block;
-  color: color-mix(in oklch, var(--muted-foreground) 75%, transparent);
-  font-weight: 400;
 }
 
 .hosted-delete-confirm button {
@@ -1742,6 +2181,7 @@
   min-width: 0;
   margin-top: 1.4rem;
   border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
   background: var(--paper);
   padding: 0.85rem;
   font: 0.78rem/1.5 var(--mono);
@@ -1948,6 +2388,7 @@
   gap: 0.5rem;
   padding: 0.75rem;
   border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
   background: var(--paper);
   cursor: pointer;
 }
@@ -1987,6 +2428,7 @@
   margin-top: 0.7rem;
   overflow: auto;
   border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
   background: var(--paper);
 }
 
@@ -2179,6 +2621,7 @@
   gap: 0.9rem;
   padding: 1.2rem;
   border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
   background: var(--paper);
 }
 
@@ -2283,6 +2726,7 @@
   min-height: 48px;
   padding: 0.65rem 0.75rem;
   border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
   background: var(--paper);
   cursor: pointer;
 }
@@ -2682,6 +3126,7 @@
 .status-box {
   background: var(--sheet);
   border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
   padding: 1.2rem;
   font-family: var(--sans);
 }
@@ -2773,6 +3218,7 @@
 .confirm-clear {
   margin-top: 1rem;
   border: 1px solid var(--rust);
+  border-radius: var(--radius-lg);
   background: var(--sheet);
   padding: 1rem 1.2rem;
   font: 0.85rem/1.5 var(--sans);
@@ -2801,14 +3247,20 @@
 
 /* Storage's rows are a four-column table of its own — name, size, backup
    state, action — not the desk's six-column workspace scan. Borrowing the
-   desk template squeezed "Never backed up" into a 0.4fr track. */
+   desk template squeezed "Never backed up" into a 0.4fr track.
+
+   They also keep the divider the desk gave up: these are rows of facts on a
+   panel that is already a filled surface, so a per-row fill would only muddy
+   it, and a table is exactly what a rule is for. */
 .storage-panel .workspace-row {
   grid-template-columns: minmax(0, 1.4fr) minmax(0, 0.45fr) minmax(0, 0.7fr) auto;
+  border-bottom: 1px solid var(--rule);
 }
 
 .drop-zone {
   margin-top: 2.5rem;
   border: 2px dashed var(--rule);
+  border-radius: var(--radius-lg);
   background: color-mix(in srgb, var(--sheet) 60%, transparent);
   padding: clamp(2.5rem, 8vw, 5rem) 1.5rem;
   text-align: center;
@@ -2862,18 +3314,35 @@
   line-height: 1.6;
 }
 
-/* A "·"-separated sentence about what you can drop, not a code sample — sans
-   at the meta step, which also lifts it off the 11px floor (attn-08fa.6). */
 /* A centred paragraph still owes the reader a measure (attn-a9f7.1.6). */
 .drop-zone .drop-copy {
   max-width: 62ch;
   margin-inline: auto;
 }
 
+/* A row of literal accepted forms, each one a chip. Every item is an
+   identifier, so the whole row is mono — the same treatment `.share-link-row
+   code` already uses for a value you would type or paste, rather than a fourth
+   private code style. */
 .drop-zone .formats {
-  margin-top: 1.4rem;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.4rem;
+  max-width: 40rem;
+  margin: 1.5rem auto 0;
+  padding: 0;
+  list-style: none;
+}
+
+.drop-zone .formats code {
+  display: block;
+  padding: 0.2rem 0.5rem;
+  border: 1px solid var(--rule);
+  border-radius: 6px;
+  background: var(--paper);
   color: var(--hosted-muted);
-  font: 0.78rem var(--sans);
+  font: 0.7rem/1.5 var(--mono);
 }
 
 /* ————— small screens ————— */
@@ -3153,12 +3622,19 @@
 
 /* ————— desk row actions (attn-7xl.3.2) ————— */
 
+/* The whole row is the target and the row's fill is the hover state, so the
+   name needs no link dress of its own. Underlining it on hover said "this word
+   is the link" about a hit area that covers the entire row, and left the desk
+   looking like a page of prose links. */
 .row-open {
   color: var(--ink);
+  text-decoration: none;
 }
 
-.row-open:hover strong {
-  text-decoration: underline;
+.row-open:hover,
+.row-open:visited {
+  color: var(--ink);
+  text-decoration: none;
 }
 
 .row-tail {
@@ -3268,6 +3744,7 @@
   height: auto;
   margin-top: 1.4rem;
   border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
 }
 
 /* ————— iOS reader (attn-7xl.3.7) ————— */

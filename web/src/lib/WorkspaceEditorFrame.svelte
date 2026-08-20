@@ -52,7 +52,8 @@
   import UnreadBadge from './UnreadBadge.svelte';
 
   interface Props {
-    sidebar: Snippet;
+    /** Optional: a surface with nothing to navigate mounts no file rail. */
+    sidebar?: Snippet;
     content: Snippet;
     rail: Snippet;
     banner?: Snippet;
@@ -255,7 +256,7 @@
 </script>
 
 <SidebarProvider class={`h-svh overflow-hidden ${className}`}>
-  {@render sidebar()}
+  {@render sidebar?.()}
   <SidebarInset class="overflow-hidden">
     {@render chrome?.()}
     {@render banner?.()}

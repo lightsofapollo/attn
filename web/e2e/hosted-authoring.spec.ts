@@ -19,12 +19,58 @@ function activeSidebarEntry(page: Page) {
   return page.locator('[data-path][data-active="true"]');
 }
 
+/**
+ * Give a bare workspace a second file, then reopen `untitled.md`.
+ *
+ * A workspace holding one blank untitled.md mounts NO file rail (attn-mkmz.5):
+ * the canvas invitation is the whole page and the workspace switcher lives in
+ * the header. Every flow below that drives the rail — the tree row, its context
+ * menu, the filter field — therefore has to give the rail something to list
+ * first. The reopen restores the original precondition (blank untitled.md
+ * active) with the rail present.
+ */
+async function giveWorkspaceASecondFile(page: Page): Promise<void> {
+  // untitled.md has to be given CONTENT before the import, or the import
+  // supersedes it (attn-rjuo.3.1) and the workspace ends up holding only the
+  // imported file — which is the whole point of that fix. A typed placeholder
+  // is the caller's document and survives.
+  const editor = documentEditor(page);
+  await editor.click();
+  await page.keyboard.type('Seed.');
+  const chooser = page.waitForEvent('filechooser');
+  await runPaletteCommand(page, /Add files to this workspace/u);
+  await (await chooser).setFiles({
+    name: 'second.md',
+    mimeType: 'text/markdown',
+    buffer: Buffer.from('# Second\n'),
+  });
+  await expect(page.getByRole('textbox', { name: 'Filter files' })).toBeVisible();
+  await page.getByRole('button', { name: 'untitled.md', exact: true }).click();
+  await expect(page).toHaveURL(/\/untitled\.md$/u);
+}
+
+/**
+ * Assert which workspace is open.
+ *
+ * Addressed through the picker's own list rather than the header label. The
+ * header does name the workspace (mark | workspace | file), but the checked row
+ * is the assertion that survives the trigger changing register again, and it is
+ * where a list of projects should name the current project anyway.
+ */
+async function expectOpenWorkspace(page: Page, name: string): Promise<void> {
+  await page.getByRole('combobox', { name: 'Project picker' }).click();
+  await expect(page.locator('.sidebar-project-menu-item[data-current="true"]')).toContainText(name);
+  await page.keyboard.press('Escape');
+  await expect(page.locator('.sidebar-project-menu')).toHaveCount(0);
+}
+
 function documentEditor(page: Page) {
   return page.locator('[data-body-text] .ProseMirror');
 }
 
-// Workspace-level actions live in the ⌘K palette (the sidebar footer is a
-// pure drop zone; per-file actions are in the tree context menu).
+// Workspace-level actions live in the ⌘K palette; per-file actions are in the
+// tree context menu. The sidebar footer carries one standing control, "Add
+// files" (attn-mkmz.3) — everything else there is transient.
 async function runPaletteCommand(page: Page, label: RegExp): Promise<void> {
   await page.keyboard.press('ControlOrMeta+KeyK');
   await page.getByRole('option', { name: label }).click();
@@ -37,14 +83,21 @@ test('one-click create is real: persists across reload with zero relay traffic',
   // The editor opens in place and the URL is rewritten to the workspace.
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
   await expect(page).toHaveURL(/\/app\/w\/[A-Za-z0-9_-]+\/untitled\.md$/u);
-  await expect(page.getByRole('combobox', { name: 'Project picker' })).toContainText('Untitled');
+  await expectOpenWorkspace(page, 'Untitled');
   expect(offOrigin).toEqual([]);
 
   // A full reload restores the workspace from IndexedDB.
   await page.reload();
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
-  await expect(page.getByRole('combobox', { name: 'Project picker' })).toContainText('Untitled');
-  await expect(activeSidebarEntry(page)).toContainText('untitled.md');
+  await expectOpenWorkspace(page, 'Untitled');
+  // No rail for a bare workspace; the header carries the file name.
+  //
+  // It DOES carry it here, unlike the import route (hosted-shells.spec.ts):
+  // "New workspace" is the blank origin, so no invitation is raised and the
+  // untitled.md is a document being worked on rather than a placeholder
+  // standing in for a choice nobody has made. The header goes quiet on exactly
+  // the condition that raises the invitation, which is not this one.
+  await expect(page.locator('[data-slot="owner-file-name"]')).toContainText('untitled.md');
   await expect(page.locator('[data-degraded="lease-denied"]')).toHaveCount(0);
   await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true');
 
@@ -108,6 +161,8 @@ test('desktop editor fills the canvas and has no edit mode toggle', async ({ pag
 
   // Removing the canvas rectangle must not weaken visible focus on controls:
   // the sidebar filter draws its box via :focus-within when it holds focus.
+  // The filter only exists once the rail does.
+  await giveWorkspaceASecondFile(page);
   const filterField = page.locator('.sidebar-filter');
   const blurredBorder = await filterField.evaluate((el) => getComputedStyle(el).borderColor);
   await page.getByRole('textbox', { name: 'Filter files' }).focus();
@@ -123,7 +178,7 @@ test('workspace picker is bounded and provides switch, create, rename, and desk 
   await page.getByRole('menuitem', { name: 'Rename workspace' }).click();
   await page.getByRole('textbox', { name: 'Workspace title' }).fill('First workspace');
   await page.getByRole('textbox', { name: 'Workspace title' }).press('Enter');
-  await expect(page.getByRole('combobox', { name: 'Project picker' })).toContainText('First workspace');
+  await expectOpenWorkspace(page, 'First workspace');
 
   const picker = page.getByRole('combobox', { name: 'Project picker' });
   await picker.click();
@@ -149,7 +204,7 @@ test('workspace picker is bounded and provides switch, create, rename, and desk 
   await expect(title).toBeFocused();
   await title.fill('Second workspace');
   await title.press('Enter');
-  await expect(page.getByRole('combobox', { name: 'Project picker' })).toContainText('Second workspace');
+  await expectOpenWorkspace(page, 'Second workspace');
 
   await page.getByRole('combobox', { name: 'Project picker' }).click();
   await page.getByPlaceholder('Search projects...').fill('First workspace');
@@ -167,6 +222,8 @@ test('desktop Markdown formatting is keyboard-correct and supports input rules',
   // formatting toolbar — keyboard shortcuts and Markdown input rules are
   // the formatting surface (mobile keeps its thumb-reachable edit bar).
   await page.goto('/app#new');
+  // The sidebar-state assertions below need a rail to assert about.
+  await giveWorkspaceASecondFile(page);
   const editor = documentEditor(page);
 
   await editor.click();
@@ -201,8 +258,12 @@ test('the workspace drop target opens dropped Markdown files', async ({ page }) 
   await page.goto('/app#new');
   await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true');
 
-  const workspaceDrop = page.locator('.hosted-sidebar-dropzone');
-  await expect(workspaceDrop).toContainText('Drop files anywhere');
+  // For a BARE workspace the resting drop affordance is the canvas invitation,
+  // not the rail's "Add files" button — the rail is not mounted at all
+  // (attn-mkmz.5). The drop still bubbles to the workspace-level `use:fileDrop`
+  // container, which is what this gate is really about.
+  const workspaceDrop = page.locator('[data-slot="canvas-invite"]');
+  await expect(workspaceDrop).toContainText('Drop a Markdown file or a folder here');
   await workspaceDrop.evaluate((target) => {
     const transfer = new DataTransfer();
     transfer.items.add(new File(['## Added note'], 'added.md', { type: 'text/markdown' }));
@@ -211,6 +272,9 @@ test('the workspace drop target opens dropped Markdown files', async ({ page }) 
   await expect(page.getByRole('button', { name: 'added.md', exact: true })).toBeVisible();
   await expect(page).toHaveURL(/\/added\.md$/u);
   await expect(documentEditor(page)).toContainText('Added note');
+  // The drop route carries the placeholder rule too (attn-rjuo.3.2): every
+  // import reaches one function, so none of them can leave an untitled.md.
+  await expect(page.getByRole('button', { name: 'untitled.md', exact: true })).toHaveCount(0);
 });
 
 test('the mobile Files add flow opens its imported document', async ({ page }) => {
@@ -262,9 +326,54 @@ test('import creates a real multi-file workspace preserving paths', async ({ pag
   ]);
   // Import navigates into the imported workspace's editor.
   await expect(page).toHaveURL(/\/app\/w\/[A-Za-z0-9_-]+\//u);
-  await expect(page.getByRole('combobox', { name: 'Project picker' })).toContainText('direction');
+  // The header path is workspace › file; the leaf names the open document.
+  await expect(page.locator('[data-slot="owner-file-name"]')).toContainText('direction');
   await expect(page.locator('[data-body-text]')).toContainText('Imported direction');
   await expect(page.getByRole('button', { name: 'desk.png' })).toBeVisible();
+});
+
+test('importing into a bare workspace leaves no untitled.md behind', async ({ page }) => {
+  // THE FAILURE THIS PINS (attn-rjuo.3.1): both desk routes mint a workspace by
+  // creating untitled.md, and the import path only ever ADDED — so choosing
+  // import first left the imported document sitting beside an empty placeholder
+  // nobody asked for.
+  await page.goto('/app');
+  await page.locator('[data-action="import-files"]').click();
+  await expect(page.locator('[data-slot="canvas-invite"]')).toBeVisible();
+  const chooser = page.waitForEvent('filechooser');
+  await page.locator('[data-slot="canvas-invite"] .button.primary').click();
+  await (await chooser).setFiles({
+    name: 'brief.md',
+    mimeType: 'text/markdown',
+    buffer: Buffer.from('# Real brief\n\nFrom disk.\n'),
+  });
+  await expect(page).toHaveURL(/\/brief\.md$/u);
+  await expect(page.getByRole('button', { name: 'brief.md', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'untitled.md', exact: true })).toHaveCount(0);
+  await expect(page.locator('[data-path]')).toHaveCount(1);
+  // A workspace still on its auto-name takes the import's name, the same way
+  // the desk's own import route does.
+  await expectOpenWorkspace(page, 'brief');
+});
+
+test('a placeholder that has been typed into survives a later import', async ({ page }) => {
+  // The guard is emptiness, not intent: a blank page someone typed into is
+  // theirs whatever they clicked to reach it.
+  await page.goto('/app#new');
+  const editor = documentEditor(page);
+  await editor.click();
+  await page.keyboard.type('Words I typed before importing.');
+  const chooser = page.waitForEvent('filechooser');
+  await runPaletteCommand(page, /Add files to this workspace/u);
+  await (await chooser).setFiles({
+    name: 'extra.md',
+    mimeType: 'text/markdown',
+    buffer: Buffer.from('# Extra\n'),
+  });
+  await expect(page.getByRole('button', { name: 'extra.md', exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'untitled.md', exact: true })).toBeVisible();
+  await page.getByRole('button', { name: 'untitled.md', exact: true }).click();
+  await expect(documentEditor(page)).toContainText('Words I typed before importing.');
 });
 
 test('imported HTML opens as a document rather than a download-only asset', async ({ page }) => {
@@ -323,7 +432,16 @@ test('desk rename and delete are real and confirmed in-app', async ({ page }) =>
   await expect(page.locator('.workspace-row')).toHaveCount(0);
   await page.reload();
   await expect(page.locator('.workspace-row')).toHaveCount(0);
-  await expect(page.locator('.empty-desk')).toBeVisible();
+  // An emptied desk leads with import, not with a blank untitled.md
+  // (attn-mkmz.5). The well this replaced said in five elements what the
+  // workspace canvas says a click later; the desk states that it is empty and
+  // names the two ways out.
+  const offer = page.locator('.desk-empty-offer');
+  await expect(offer).toBeVisible();
+  await expect(offer.locator('[data-action="import-files"]')).toHaveText('Import files');
+  await expect(offer.locator('[data-action="start-blank"]')).toHaveText(
+    'Start a blank untitled.md',
+  );
 });
 
 test('editing autosaves durable revisions and recovers after reload', async ({ page }) => {
@@ -355,6 +473,7 @@ test('editing autosaves durable revisions and recovers after reload', async ({ p
 
 test('active Markdown rename stays mounted and autosave follows the new path', async ({ page }) => {
   await page.goto('/app#new');
+  await giveWorkspaceASecondFile(page);
   const editor = documentEditor(page);
   const navigationCount = await page.evaluate(() => performance.getEntriesByType('navigation').length);
 
@@ -470,9 +589,7 @@ test('workspace rename stays mounted and keeps the same tab writable', async ({ 
   await input.fill('Lease handoff');
   await input.press('Enter');
 
-  await expect(page.getByRole('combobox', { name: 'Project picker' })).toContainText(
-    'Lease handoff',
-  );
+  await expectOpenWorkspace(page, 'Lease handoff');
   await expect(page.locator('[data-degraded="lease-denied"]')).toHaveCount(0);
   await expect(documentEditor(page)).toHaveAttribute('contenteditable', 'true');
   expect(await page.evaluate(() => performance.getEntriesByType('navigation').length)).toBe(
@@ -654,9 +771,12 @@ test('phase gate: create → type → reload → edit → export → reimport wi
     allRequests.push(request.url());
   });
 
-  // From the landing, one click into a real editor.
-  await page.goto('/');
-  await page.locator('.hero a[data-action="new-workspace"]').click();
+  // Into a real editor. This used to click the landing's primary CTA, which no
+  // longer creates anything (the front door asks for an existing document —
+  // user ruling, 2026-08-19). The subject of this test is the offline journey
+  // through a live workspace, not which control starts one, so it takes the
+  // create intent directly.
+  await page.goto('/app#new');
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
 
   // Type through the real editor; wait for the durable commit.
@@ -737,7 +857,7 @@ test('storage page: export marks backup, reimport dedupes names, clear-all erase
     { name: 'backup.zip', mimeType: 'application/zip', buffer: fs.readFileSync(zipPath!) },
   ]);
   await expect(page).toHaveURL(/\/app\/w\//u);
-  await expect(page.getByRole('combobox', { name: 'Project picker' })).toContainText('Untitled 2');
+  await expectOpenWorkspace(page, 'Untitled 2');
 
   // Clear all local data: in-app confirm, durable erasure.
   await page.goto('/app/storage');

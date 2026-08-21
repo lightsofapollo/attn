@@ -665,20 +665,16 @@ fn toggle_checkbox(state: &Arc<Mutex<AppState>>, line: usize, checked: bool) {
     }
 
     let current_line = lines[idx];
-    let new_line;
-    let replaced: String;
-
-    if checked {
+    let replaced = if checked {
         // Want to check: replace `- [ ]` with `- [x]`
-        replaced = current_line.replacen("- [ ]", "- [x]", 1);
-        new_line = replaced.as_str();
+        current_line.replacen("- [ ]", "- [x]", 1)
     } else {
         // Want to uncheck: replace `- [x]` or `- [X]` with `- [ ]`
-        replaced = current_line
+        current_line
             .replacen("- [x]", "- [ ]", 1)
-            .replacen("- [X]", "- [ ]", 1);
-        new_line = replaced.as_str();
-    }
+            .replacen("- [X]", "- [ ]", 1)
+    };
+    let new_line = replaced.as_str();
 
     if new_line == current_line {
         tracing::warn!("line {} does not contain a checkbox", line);

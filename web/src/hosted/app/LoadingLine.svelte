@@ -1,14 +1,21 @@
 <script lang="ts">
   /**
-   * One line of "we are still working": a spinner, then the sentence, then a
-   * plain ellipsis.
+   * One line of "we are still working": the sentence, then a plain ellipsis.
    *
-   * It is a COMPONENT rather than loose markup at each call site, and the
-   * wrapping span is the reason: every surface that mounts this centres its
-   * child with `place-items: center` on a grid, so a spinner and a sentence
-   * passed in separately are two grid items — the second lands on its own row,
-   * centred by itself, half a viewport from the first. One element in, one item
-   * out.
+   * There was a spinner in front of it, and it cost the sentence its centre
+   * (attn-ze60.5). Every surface that mounts this centres its child, so what
+   * was centred was the GROUP — spinner, gap, sentence — leaving the words
+   * themselves ~15px right of the middle of the page. The offset then changed
+   * with the sentence: the desk's wait and the workspace's wait are different
+   * lengths, so crossing from one to the next slid the line sideways under a
+   * reader who had been given no reason to expect movement.
+   *
+   * It is still a COMPONENT rather than loose markup at each call site, and the
+   * wrapping span is still the reason: the surfaces centre with
+   * `place-items: center` on a grid, so a sentence and anything beside it
+   * passed in separately would be two grid items — the second landing on its
+   * own row, centred by itself, half a viewport from the first. One element in,
+   * one item out.
    */
   interface Props {
     /** The sentence, without its ellipsis — this supplies that. */
@@ -18,19 +25,7 @@
   const { text }: Props = $props();
 </script>
 
-<span class="loading-line">
-  <!-- Sized in `em`, so the one spinner serves both the full-viewport waits
-       (1.5rem) and the in-column one (1.15rem) without a second rule.
-
-       Two circles rather than a bordered box: at this size a border-drawn ring
-       renders lumpy at the quadrant joins, and a stroked arc with a round cap
-       is the shape the design actually asks for. -->
-  <svg class="loading-spinner" viewBox="0 0 24 24" aria-hidden="true">
-    <circle class="loading-spinner-track" cx="12" cy="12" r="9" />
-    <circle class="loading-spinner-arc" cx="12" cy="12" r="9" />
-  </svg>
-  <!-- The ellipsis is part of the sentence, not a separate animated element:
-       this sits inside a `role="status"` region, and anything that ticks inside
-       one re-fires the whole announcement on every step. -->
-  <span class="loading-line-text">{text}…</span>
-</span>
+<!-- The ellipsis is part of the sentence, not a separate animated element:
+     this sits inside a `role="status"` region, and anything that ticks inside
+     one re-fires the whole announcement on every step. -->
+<span class="loading-line">{text}…</span>

@@ -1057,8 +1057,15 @@
 .app-loading,
 .hosted-shell-loading {
   display: grid;
-  min-height: 100%;
-  height: 100%;
+  /* The wait owns the whole screen it stands in for (attn-ze60.5). A pair of
+     percentage heights made that conditional on every ancestor holding a
+     definite height of its own: lose one anywhere up the chain and the surface
+     collapses to the height of its sentence, which then sits against the top
+     edge rather than in the middle — the page appearing to jump when the real
+     content arrives at full height. Both callers are the only thing on screen,
+     so the viewport is the honest floor, and a grid item still stretches to
+     fill a parent that is taller. */
+  min-height: 100dvh;
   place-items: center;
   padding: 2rem;
   color: var(--foreground);
@@ -1073,11 +1080,6 @@
 .app-shell[data-app-view='loading'],
 .app-shell[data-app-view='editor-loading'] {
   grid-template-rows: 1fr;
-}
-
-.app-shell[data-app-view='loading'] .app-loading,
-.app-shell[data-app-view='editor-loading'] .app-loading {
-  min-height: 100dvh;
 }
 
 .hosted-content-viewport {
@@ -1256,70 +1258,17 @@
    line's own serif, all three always occupying their space — only the ink
    animates — so a centred sentence never shuffles sideways for the length of
    the wait. */
-/* One grid item, so the spinner and the sentence stay on one line: every
-   surface that mounts this centres its child with `place-items: center`, and
-   two children there would be two rows. Flex rather than inline, so a long
-   workspace name wraps as a block beside the spinner instead of flowing back
-   underneath it. */
+/* One grid item, and one line (attn-ze60.5). Every surface that mounts this
+   centres its child with `place-items: center`, so what that rule centres has
+   to BE the sentence: a spinner beside it made the centred thing a group, and
+   the words sat ~15px right of the page's middle — by a distance that changed
+   with the sentence, so moving from one stage of a wait to the next slid the
+   line sideways. Block rather than flex for the same reason: nothing is beside
+   it to lay out, and `text-align: center` on the surface now lands on the text
+   itself. */
 .loading-line {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 0.5em;
-}
-
-.loading-spinner {
-  flex: none;
-  width: 0.8em;
-  height: 0.8em;
-  animation: loading-spin 0.9s linear infinite;
-}
-
-.loading-spinner circle {
-  fill: none;
-  stroke-width: 2.5;
-}
-
-/* The track is the line's own ink at low alpha rather than a fixed grey, so the
-   ring sits at the same distance from the page in either theme. */
-.loading-spinner-track {
-  stroke: color-mix(in oklch, currentColor 18%, transparent);
-}
-
-/* A quarter turn of accent, round-capped. Progress is the accent's own job. */
-.loading-spinner-arc {
-  stroke: var(--primary);
-  stroke-linecap: round;
-  stroke-dasharray: 14 43;
-}
-
-@keyframes loading-spin {
-  to {
-    transform: rotate(1turn);
-  }
-}
-
-/* Reduced motion asks for no MOVEMENT, not for no signal. The ring stops
-   turning and the arc breathes instead — the page still reads as working, and
-   nothing travels across it. */
-@media (prefers-reduced-motion: reduce) {
-  .loading-spinner {
-    animation: none;
-  }
-
-  .loading-spinner-arc {
-    animation: loading-spinner-breathe 1.8s ease-in-out infinite;
-  }
-}
-
-@keyframes loading-spinner-breathe {
-  0%,
-  100% {
-    opacity: 0.35;
-  }
-  50% {
-    opacity: 1;
-  }
+  display: block;
+  text-align: center;
 }
 
 /* The `margin-top: -0.75rem` that used to be here was a nudge, and it was the

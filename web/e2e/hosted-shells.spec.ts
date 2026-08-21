@@ -208,12 +208,56 @@ test('the invitation still paints while the editor chunk is stalled', async ({ p
   await expect(page.locator('[data-slot="canvas-invite"]')).toBeVisible({ timeout: 10_000 });
 });
 
-test.describe('a missing editor chunk', () => {
+test.describe('while the editor chunk is not here', () => {
   /* The service worker caches chunks — which is what makes the app work
-     offline, and what would hide a network abort from this test: a cached
-     copy is served without the request ever reaching the network. Blocking it
-     puts the fetch back where the failure being pinned actually happens. */
+     offline, and what would hide these tests' control of the network from
+     them: a cached copy is served without the request ever reaching it.
+     Blocking it puts the fetch back where both cases below actually live. */
   test.use({ serviceWorkers: 'block' });
+
+  test('the wait fills its screen and centres its sentence', async ({ page }) => {
+    /* attn-ze60.5: the wait ran a spinner in front of the sentence, and the
+       surfaces centre their single child — so what was centred was the GROUP, and
+       the words sat ~15px right of the middle by a distance that changed with the
+       sentence. Crossing from one stage of a wait to the next therefore slid the
+       line sideways. Asserted as geometry because that is what the defect was:
+       the markup looked centred at every step. */
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto('/app');
+    await page.locator('[data-action="start-blank"]').click();
+    await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
+    const workspaceUrl = page.url();
+
+    // Hold the desktop frame's chunk so its wait stays on screen to be measured.
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    await page.route('**/*', async (route) => {
+      if (/HostedDesktopWorkspaceFrame/u.test(route.request().url())) await held;
+      return route.continue();
+    });
+    await page.goto(workspaceUrl, { waitUntil: 'domcontentloaded' });
+
+    const wait = page.locator('.hosted-shell-loading');
+    await expect(wait).toBeVisible();
+
+    const geometry = await page.evaluate(() => {
+      const surface = document.querySelector('.hosted-shell-loading')!.getBoundingClientRect();
+      const line = document.querySelector('.loading-line')!.getBoundingClientRect();
+      return {
+        surface: { width: surface.width, height: surface.height },
+        lineCentre: line.x + line.width / 2,
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+      };
+    });
+    // Full available space, and the sentence in the middle of it.
+    expect(geometry.surface.width).toBe(geometry.viewport.width);
+    expect(geometry.surface.height).toBe(geometry.viewport.height);
+    expect(Math.abs(geometry.lineCentre - geometry.viewport.width / 2)).toBeLessThanOrEqual(1);
+    // The mechanism, after the outcome: nothing shares the centred line.
+    await expect(page.locator('.loading-spinner')).toHaveCount(0);
+
+    release();
+  });
 
   test('an editor chunk that never arrives reloads once, then says so', async ({ page }) => {
     /* attn-ze60.1: the loader had no rejection handler, so a chunk that failed to

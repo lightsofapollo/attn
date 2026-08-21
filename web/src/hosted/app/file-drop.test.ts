@@ -15,8 +15,10 @@
 
 import {
   DropLimitError,
+  DropReadError,
   MAX_DROP_DEPTH,
   MAX_DROP_FILES,
+  fileDrop,
   filesToPicked,
   readDroppedFiles,
 } from './file-drop';
@@ -56,7 +58,7 @@ function assertEqual<T>(actual: T, expected: T, message: string): void {
 
 /* ————— a minimal stand-in for the entries API ————— */
 
-type Entry = FileEntryStub | DirEntryStub;
+type Entry = FileEntryStub | DirEntryStub | FailingDirEntryStub | FailingFileEntryStub;
 
 class FileEntryStub {
   isFile = true as const;
@@ -86,8 +88,45 @@ class DirEntryStub {
   }
 }
 
+/* Directories and files that fail PARTWAY (attn-ze60.2). The real entries API
+   reports both through an error callback. `readAllEntries` used to answer one
+   by resolving an empty batch — which is its own end-of-directory signal — and
+   `entryFile` by resolving null, which the walk skipped. Either way the drop
+   arrived as a shorter tree that looked complete. */
+
+class FailingDirEntryStub {
+  isFile = false as const;
+  isDirectory = true as const;
+  constructor(readonly fullPath: string, private readonly firstBatch: Entry[]) {}
+  createReader(): {
+    readEntries: (cb: (entries: Entry[]) => void, onError: (error: unknown) => void) => void;
+  } {
+    // One good batch, then a failure: the shape where "resolve empty" and
+    // "genuinely finished" are indistinguishable to the caller.
+    let handed = false;
+    return {
+      readEntries: (cb, onError) => {
+        if (handed) return onError(new Error('readEntries failed'));
+        handed = true;
+        cb(this.firstBatch);
+      },
+    };
+  }
+}
+
+class FailingFileEntryStub {
+  isFile = true as const;
+  isDirectory = false as const;
+  constructor(readonly fullPath: string) {}
+  file(_onSuccess: (file: File) => void, onError: (error: unknown) => void): void {
+    onError(new Error('file() failed'));
+  }
+}
+
 function transfer(entries: Entry[], files: File[] = []): DataTransfer {
   return {
+    // `types` is what the drop handler checks before it accepts a drag at all.
+    types: ['Files'],
     items: entries.map((entry) => ({ kind: 'file', webkitGetAsEntry: () => entry })),
     files,
   } as unknown as DataTransfer;
@@ -216,6 +255,107 @@ defineCase('a folder exactly at the file ceiling still imports', async () => {
   );
   const dropped = await readDroppedFiles(transfer([new DirEntryStub('/full', many)]));
   assertEqual(dropped.length, MAX_DROP_FILES, 'every file survives');
+});
+
+/* ————— reads that fail partway (attn-ze60.2) ————— */
+
+async function expectReadError(run: () => Promise<unknown>, path: string): Promise<void> {
+  let thrown: unknown = null;
+  try {
+    await run();
+  } catch (error) {
+    thrown = error;
+  }
+  assert(thrown instanceof DropReadError, `expected a DropReadError, got ${String(thrown)}`);
+  assertEqual(thrown.path, path, 'names the entry that would not read');
+  assert(thrown.message.includes('Nothing was imported'), 'says nothing was imported');
+}
+
+defineCase('a directory read that fails midway reports, not imports what it had', async () => {
+  const dir = new FailingDirEntryStub('/notes', [
+    new FileEntryStub('/notes/a.md', 'a'),
+    new FileEntryStub('/notes/b.md', 'b'),
+  ]);
+  await expectReadError(() => readDroppedFiles(transfer([dir])), 'notes');
+});
+
+defineCase('a file that will not open fails the drop rather than vanishing from it', async () => {
+  const dir = new DirEntryStub('/notes', [
+    new FileEntryStub('/notes/a.md', 'a'),
+    new FailingFileEntryStub('/notes/gone.md'),
+  ]);
+  await expectReadError(() => readDroppedFiles(transfer([dir])), 'notes/gone.md');
+});
+
+/* ————— and the whole way out to the drop surface —————
+
+   The callbacks are the contract every drop surface is written against: a read
+   that could not finish must arrive as onError, never as a shorter onFiles. */
+
+function fakeDropTarget(): { node: HTMLElement; drop: (data: DataTransfer) => void } {
+  const listeners = new Map<string, (event: unknown) => void>();
+  const node = {
+    addEventListener: (type: string, fn: (event: unknown) => void) => void listeners.set(type, fn),
+    removeEventListener: (type: string) => void listeners.delete(type),
+    setAttribute: () => undefined,
+    removeAttribute: () => undefined,
+  } as unknown as HTMLElement;
+  return {
+    node,
+    drop: (dataTransfer) =>
+      listeners.get('drop')?.({ dataTransfer, preventDefault: () => undefined }),
+  };
+}
+
+/** Let the drop handler's promise chain run out; every stub resolves in-process. */
+async function settle(): Promise<void> {
+  for (let tick = 0; tick < 20; tick += 1) await Promise.resolve();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+defineCase('a failed read reaches the surface as onError, never a short onFiles', async () => {
+  const target = fakeDropTarget();
+  let imported: number | null = null;
+  let reported: string | null = null;
+  fileDrop(target.node, {
+    onFiles: (files) => {
+      imported = files.length;
+    },
+    onError: (message) => {
+      reported = message;
+    },
+  });
+  target.drop(
+    transfer([
+      new FailingDirEntryStub('/notes', [new FileEntryStub('/notes/a.md', 'a')]),
+    ]),
+  );
+  await settle();
+  assertEqual(imported, null, 'nothing is imported');
+  assert(reported !== null, 'the failure is reported');
+  assert(
+    (reported as string).includes('Nothing was imported'),
+    `the message says so, got ${String(reported)}`,
+  );
+});
+
+defineCase('a whole drop still reaches onFiles', async () => {
+  // The counterpart: the reject path must not have made every drop an error.
+  const target = fakeDropTarget();
+  let imported: number | null = null;
+  let reported: string | null = null;
+  fileDrop(target.node, {
+    onFiles: (files) => {
+      imported = files.length;
+    },
+    onError: (message) => {
+      reported = message;
+    },
+  });
+  target.drop(transfer([new DirEntryStub('/notes', [new FileEntryStub('/notes/a.md', 'a')])]));
+  await settle();
+  assertEqual(reported, null, 'no error');
+  assertEqual(imported, 1, 'the file is imported');
 });
 
 async function runAllCases(): Promise<void> {

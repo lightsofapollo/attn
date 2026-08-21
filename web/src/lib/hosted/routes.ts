@@ -63,6 +63,29 @@ export type AppRoute =
   | { view: 'workspace'; workspaceId: string; filePath: string | undefined };
 
 /**
+ * The desk's two URL intents live in the fragment, not the path: `/app#new`
+ * asks for a fresh workspace, `/app#join` for the join-a-review panel.
+ *
+ * A caller must read this at the moment the surface that answers it mounts,
+ * never from a copy taken at boot (attn-ze60.3). The desk unmounts when a
+ * workspace opens and mounts again on the way back, so a boot-time snapshot
+ * outlives the URL that justified it: the panel would reopen on a Back
+ * navigation whose address bar says plain `/app`, having been closed — and the
+ * hash removed — several screens earlier. The fragment is the only record that
+ * stays honest, because closing the panel rewrites it.
+ */
+export function appHashIntent(hash: string): 'new' | 'join' | undefined {
+  switch (hash) {
+    case '#new':
+      return 'new';
+    case '#join':
+      return 'join';
+    default:
+      return undefined;
+  }
+}
+
+/**
  * Build the canonical URL for a workspace route (attn-1l2f.3).
  *
  * Every `/app/w/…` URL the app writes must come through here. Entry paths are

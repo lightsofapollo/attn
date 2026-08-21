@@ -6,6 +6,7 @@
     createNavigationGuard,
     type PendingWorkspaceRead,
   } from './navigation-guard';
+  import { clearChunkReload, takeChunkReload } from './chunk-reload';
   import AppHeader from './AppHeader.svelte';
   import DeskHome from './DeskHome.svelte';
   import LoadingLine from './LoadingLine.svelte';
@@ -32,10 +33,9 @@
     /** The landing's one-click intent (`/app#new`): atomically create a
      * fresh untitled workspace and open its editor with no dialog. */
     newIntent: boolean;
-    joinIntent?: boolean;
   }
 
-  const { service, route: initialRoute, newIntent, joinIntent = false }: Props = $props();
+  const { service, route: initialRoute, newIntent }: Props = $props();
 
   /* The route is state, not a fixed prop (attn-a9f7.3.1). It used to be read
      once at mount, so every desk↔document move had to be a full page load:
@@ -215,13 +215,41 @@
      chunk resolves is safe. */
   let EditorShell = $state<typeof import('./EditorShell.svelte').default | undefined>();
   let editorShellPending = false;
+  let editorShellFailed = $state(false);
+  let editorShellError = $state<string | null>(null);
 
+  /* A chunk that never arrives is not a slow chunk (attn-ze60.1). This loader
+     used to be a bare `import().then()` with no rejection handler, so a failed
+     fetch — the tab lost the network mid-navigation, or the deployment this
+     document came from has been replaced and its hashed chunks are now 404s —
+     left `EditorShell` undefined with nothing to re-trigger the effect above.
+     The workspace then sat under "Opening ..." for as long as the person was
+     willing to watch it, and the only record of the fault was an unhandled
+     rejection in a console they had no reason to open. */
   function loadEditorShell(): void {
     if (EditorShell || editorShellPending) return;
     editorShellPending = true;
+    editorShellFailed = false;
     void import('./EditorShell.svelte')
       .then((module) => {
         EditorShell = module.default;
+        // The chunk arrived, so a later, unrelated failure in this tab is a
+        // different failure and gets its own reload.
+        clearChunkReload();
+      })
+      .catch((error: unknown) => {
+        console.error('[attn] the editor chunk failed to load', error);
+        editorShellError = error instanceof Error ? error.message : String(error);
+        // Retrying the import cannot help: the module map remembers a failed
+        // fetch and answers the next call with the same rejection without
+        // going back to the network. A fresh document can — it re-reads
+        // index.html and so picks up the new chunk names, which is the whole
+        // of the stale-deploy case. chunk-reload.ts owns the ceiling of one.
+        if (takeChunkReload()) {
+          window.location.reload();
+          return;
+        }
+        editorShellFailed = true;
       })
       .finally(() => {
         editorShellPending = false;
@@ -639,6 +667,38 @@
       });
     }}
   />
+{:else if editorMode && detail && editorShellFailed}
+  <!-- The editor's code never arrived (attn-ze60.1). The same surface as the
+       desk failure above, with the words the situation actually calls for: the
+       workspace is present and intact, it is the app that is incomplete, so the
+       recovery is a fresh document rather than a re-read of storage. -->
+  <div class="app-shell" data-app-view="error">
+    <AppHeader mode={health.mode} />
+    <main class="desk">
+      <div class="desk-title">
+        <div>
+          <div class="eyebrow">Something went wrong</div>
+          <h1>The editor didn’t finish loading</h1>
+        </div>
+      </div>
+      <p class="error-lede" role="alert">
+        {detail.name} is safe in this browser profile — nothing was lost. Part of attn itself
+        failed to download, which usually means the app was updated while this tab was open.
+      </p>
+      <div class="storage-actions">
+        <button class="button primary" type="button" onclick={() => window.location.reload()}>
+          Reload attn
+        </button>
+        <a class="button" href="/app">Go to your desk</a>
+      </div>
+      {#if editorShellError}
+        <details class="error-detail">
+          <summary>Technical detail</summary>
+          <p>{editorShellError}</p>
+        </details>
+      {/if}
+    </main>
+  </div>
 {:else if editorMode && detail}
   <!-- The editor chunk is in flight (attn-n01r.41). Without this branch the
        unloaded case would fall through to "That workspace isn't here", which
@@ -694,7 +754,6 @@
     {:else}
       <DeskHome
         bind:filterQuery={deskFilter}
-        {joinIntent}
         {health}
         {workspaces}
         {onCreate}

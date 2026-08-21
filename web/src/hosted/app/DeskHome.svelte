@@ -4,7 +4,7 @@
   import { expandPicked, prepareImport } from './import-files';
   import { filesToPicked, type DroppedFile } from './file-drop';
   import { autofocus } from '../../lib/hosted/autofocus';
-  import { appWorkspaceUrl } from '../../lib/hosted/routes';
+  import { appHashIntent, appWorkspaceUrl } from '../../lib/hosted/routes';
   import { deskEnterOpensSelection } from './desk-keys';
   import { parseInviteUrl } from '../../lib/hosted/invite-url';
   import type { ImportFileInput, SharingState, StorageHealth, WorkspaceSummary } from './types';
@@ -12,8 +12,6 @@
   interface Props {
     health: StorageHealth;
     workspaces: WorkspaceSummary[];
-    /** Open the Join panel on mount (/app#join, attn-ri1). */
-    joinIntent?: boolean;
     /** Owned by the shell so the query survives a trip into a workspace and
      *  back (attn-a9f7.3.1). */
     filterQuery?: string;
@@ -30,7 +28,6 @@
   let {
     health,
     workspaces,
-    joinIntent = false,
     filterQuery = $bindable(''),
     onCreate,
     onImport,
@@ -44,8 +41,14 @@
   // the desk quick link both promised a flow that didn't exist. The panel
   // accepts a pasted invite (hosted /review or /s link, or a native attn://
   // URL) and navigates with the fragment — where the room key lives — intact.
-  // svelte-ignore state_referenced_locally — open-time intent, deliberate.
-  let joinOpen = $state(joinIntent);
+  //
+  // The URL is asked at every mount, not handed down from boot (attn-ze60.3).
+  // The desk unmounts when a workspace opens and mounts again on the way back,
+  // so a boot-time `#join` outlived the URL it came from: cancel the panel —
+  // which strips the hash — open a workspace, press Back, and it reopened over
+  // an address bar that said plain /app. Both halves of the panel's own
+  // contract already write to the fragment, which makes it the honest record.
+  let joinOpen = $state(appHashIntent(window.location.hash) === 'join');
   let joinValue = $state('');
   let joinError = $state<string | null>(null);
   let joinInput = $state<HTMLInputElement | undefined>();

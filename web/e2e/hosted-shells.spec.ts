@@ -59,6 +59,52 @@ test('mobile Desk makes workspace facts and administration scannable', async ({ 
   await expectNoHorizontalScroll(page);
 });
 
+/* The Join panel's open state is a question for the URL, asked at every mount
+   (attn-ze60.3). It used to be answered once at boot and handed down, and the
+   desk mounts more than once per page load — it unmounts when a workspace opens
+   and mounts again on the way back. So the snapshot was wrong in both
+   directions: it reopened the panel over an address bar that had said plain
+   /app for two screens, and it left the panel shut on a Back to a history entry
+   that genuinely asked for #join. Both directions are pinned here, because a
+   fix for either one alone looks correct from the other side. */
+test('the Join panel follows the URL across desk↔workspace navigation', async ({ page }) => {
+  const panel = page.locator('[data-slot="join-panel"]');
+
+  // A workspace to travel into. (Creating one REPLACES the desk history entry,
+  // so the Back that matters is the one out of an already-existing workspace.)
+  await page.goto('/app');
+  await page.locator('[data-action="start-blank"]').click();
+  await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
+
+  // Arrive with the intent, then dismiss it: closing takes the hash with it.
+  await page.goto('/app#join');
+  await expect(panel).toBeVisible();
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await expect(panel).toHaveCount(0);
+  expect(new URL(page.url()).hash).toBe('');
+
+  // Into the workspace and back out. The desk remounts against a URL with no
+  // fragment, and must come back the way it was left.
+  await page.locator('.row-open').first().click();
+  await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
+  await page.goBack();
+  await expect(page.locator('[data-app-view="home"]')).toBeVisible();
+  expect(new URL(page.url()).hash).toBe('');
+  await expect(panel).toHaveCount(0);
+
+  // The other direction: opening the panel from the desk pushes #join, so that
+  // history entry really is asking for an open panel and Back must honour it.
+  await page.getByRole('link', { name: /Join a review/iu }).first().click();
+  await expect(panel).toBeVisible();
+  expect(new URL(page.url()).hash).toBe('#join');
+  await page.locator('.row-open').first().click();
+  await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
+  await page.goBack();
+  await expect(page.locator('[data-app-view="home"]')).toBeVisible();
+  expect(new URL(page.url()).hash).toBe('#join');
+  await expect(panel).toBeVisible();
+});
+
 test('landing one-click intent opens an untitled draft editor', async ({ page }) => {
   await page.goto('/app#new');
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
@@ -160,6 +206,52 @@ test('the invitation still paints while the editor chunk is stalled', async ({ p
   });
   await page.goto('/app#new', { waitUntil: 'domcontentloaded' });
   await expect(page.locator('[data-slot="canvas-invite"]')).toBeVisible({ timeout: 10_000 });
+});
+
+test.describe('a missing editor chunk', () => {
+  /* The service worker caches chunks — which is what makes the app work
+     offline, and what would hide a network abort from this test: a cached
+     copy is served without the request ever reaching the network. Blocking it
+     puts the fetch back where the failure being pinned actually happens. */
+  test.use({ serviceWorkers: 'block' });
+
+  test('an editor chunk that never arrives reloads once, then says so', async ({ page }) => {
+    /* attn-ze60.1: the loader had no rejection handler, so a chunk that failed to
+       arrive — an offline tab, or hashed chunks 404ing because the deployment the
+       document came from has been replaced — left the workspace under "Opening
+       ..." indefinitely, with an unhandled rejection as the only record.
+
+       Retrying the import cannot fix it (the module map answers with the same
+       rejection without re-fetching), so the recovery is one automatic reload,
+       and the ceiling of ONE is the load-bearing part: a page that reloads on
+       every failure and fails on every load is a loop nobody can click their way
+       out of. Matches the chunk in BOTH shapes, like the stall case above. */
+    const isEditorChunk = (url: string) =>
+      /\bEditorShell(\.svelte|-[A-Za-z0-9_-]+\.js)/u.test(url);
+
+    // A workspace to open, created while the chunk still loads normally.
+    await page.goto('/app');
+    await page.locator('[data-action="start-blank"]').click();
+    await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
+    const workspaceUrl = page.url();
+
+    let attempts = 0;
+    await page.route('**/*', async (route) => {
+      if (!isEditorChunk(route.request().url())) return route.continue();
+      attempts += 1;
+      return route.abort();
+    });
+
+    await page.goto(workspaceUrl);
+
+    await expect(page.getByText('The editor didn’t finish loading')).toBeVisible();
+    await expect(page.locator('[data-app-view="editor-loading"]')).toHaveCount(0);
+    // The two ways out are real: a reload, and a route back to the desk.
+    await expect(page.getByRole('button', { name: 'Reload attn' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Go to your desk' })).toBeVisible();
+    // The first load and exactly one retry — never a reload loop.
+    expect(attempts).toBe(2);
+  });
 });
 
 test('an explicitly blank workspace stays blank across a reload', async ({ page }) => {

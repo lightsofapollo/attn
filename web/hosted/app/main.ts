@@ -12,7 +12,7 @@ import '../../src/hosted/chrome.css';
 import '../../src/styles/bottom-sheet.css';
 import '../../src/hosted/app/app-shell.css';
 import { mount } from 'svelte';
-import { parseAppRoute } from '../../src/lib/hosted/routes';
+import { appHashIntent, parseAppRoute } from '../../src/lib/hosted/routes';
 import AppShell from '../../src/hosted/app/AppShell.svelte';
 import { MockWorkspaceService, shellScenarioFromSearch } from '../../src/hosted/app/mock-service';
 import type { WorkspaceAppService } from '../../src/hosted/app/types';
@@ -62,8 +62,12 @@ async function bootstrap(): Promise<void> {
     props: {
       service,
       route,
-      newIntent: route?.view === 'home' && window.location.hash === '#new',
-      joinIntent: route?.view === 'home' && window.location.hash === '#join',
+      /* `#new` is a boot intent and stays one: the shell consumes it once, in
+         its initial load, and the shell is mounted exactly once per document.
+         `#join` used to be passed the same way and was not the same kind of
+         thing — the desk that answers it mounts and unmounts as workspaces
+         open and close, so it reads the fragment itself (attn-ze60.3). */
+      newIntent: route?.view === 'home' && appHashIntent(window.location.hash) === 'new',
     },
   });
   document.body.dataset.hydrated = 'true';

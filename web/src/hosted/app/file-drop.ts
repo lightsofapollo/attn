@@ -76,18 +76,66 @@ export class DropLimitError extends Error {
   }
 }
 
-function entryFile(entry: FileSystemFileEntry): Promise<File | null> {
-  return new Promise((resolve) => {
-    entry.file((file) => resolve(file), () => resolve(null));
+/**
+ * A drop the walk could not read to the end (attn-ze60.2).
+ *
+ * The entries API reports failure through an error callback, and both readers
+ * below used to answer one by resolving empty — indistinguishable from "this
+ * directory has no more children" and from "that file is gone, skip it". A read
+ * that failed halfway therefore handed back the subset already collected and
+ * the import ran over it as a success: the same silent truncation
+ * `DropLimitError` exists to prevent, arriving through a different door.
+ */
+export class DropReadError extends Error {
+  /** Workspace-relative path of the entry that would not read. */
+  readonly path: string;
+
+  constructor(path: string, cause?: unknown) {
+    const where = path ? ` (${path})` : '';
+    super(
+      `That drop could not be read to the end${where}. Nothing was imported — try again, or use Import to choose the files.`,
+      { cause },
+    );
+    this.name = 'DropReadError';
+    this.path = path;
+  }
+}
+
+/**
+ * `fullPath` is rooted at the drop ("/notes/plan.md"); the import pipeline
+ * wants it workspace-relative, like `webkitRelativePath`.
+ */
+function relativePathOf(entry: FileSystemEntry): string {
+  return entry.fullPath.replace(/^\/+/u, '');
+}
+
+function entryFile(entry: FileSystemFileEntry): Promise<File> {
+  return new Promise((resolve, reject) => {
+    entry.file(
+      (file) => resolve(file),
+      // A file that will not open — moved or deleted between the drag and the
+      // drop, or on a volume that went away — is a hole in the tree, not a file
+      // worth skipping quietly.
+      (error) => reject(new DropReadError(relativePathOf(entry), error)),
+    );
   });
 }
 
 /** One `readEntries` call returns at most ~100 children; drain it. */
-async function readAllEntries(reader: FileSystemDirectoryReader): Promise<FileSystemEntry[]> {
+async function readAllEntries(
+  directory: FileSystemDirectoryEntry,
+): Promise<FileSystemEntry[]> {
+  const reader = directory.createReader();
   const all: FileSystemEntry[] = [];
   for (;;) {
-    const batch = await new Promise<FileSystemEntry[]>((resolve) => {
-      reader.readEntries((entries) => resolve(entries), () => resolve([]));
+    const batch = await new Promise<FileSystemEntry[]>((resolve, reject) => {
+      reader.readEntries(
+        (entries) => resolve(entries),
+        // Never `resolve([])`: an empty batch is this loop's end-of-directory
+        // signal, so answering a failure with one stops the walk mid-directory
+        // and calls the truncated result a finished read.
+        (error) => reject(new DropReadError(relativePathOf(directory), error)),
+      );
     });
     if (batch.length === 0) return all;
     all.push(...batch);
@@ -105,13 +153,11 @@ async function walkEntry(
   if (out.length >= MAX_DROP_FILES) throw new DropLimitError('files');
   if (entry.isFile) {
     const file = await entryFile(entry as FileSystemFileEntry);
-    // fullPath is rooted at the drop ("/notes/plan.md"); the import pipeline
-    // wants it workspace-relative, like webkitRelativePath.
-    if (file) out.push({ file, relativePath: entry.fullPath.replace(/^\/+/u, '') });
+    out.push({ file, relativePath: relativePathOf(entry) });
     return;
   }
   if (!entry.isDirectory) return;
-  const children = await readAllEntries((entry as FileSystemDirectoryEntry).createReader());
+  const children = await readAllEntries(entry as FileSystemDirectoryEntry);
   for (const child of children) await walkEntry(child, out, depth + 1);
 }
 
@@ -126,8 +172,9 @@ async function walkEntry(
  * are collected first and walked afterwards.
  *
  * Throws `DropLimitError` when the tree exceeds `MAX_DROP_FILES` or
- * `MAX_DROP_DEPTH`. Callers must treat that as "imported nothing", never as a
- * short list.
+ * `MAX_DROP_DEPTH`, and `DropReadError` when the entries API fails partway
+ * through. Callers must treat either as "imported nothing", never as a short
+ * list.
  */
 export async function readDroppedFiles(
   dataTransfer: DataTransfer | null,
@@ -155,7 +202,8 @@ export interface FileDropOptions {
   onFiles: (files: DroppedFile[]) => void;
   /**
    * Called instead of `onFiles` when the drop could not be read whole — a
-   * folder over the traversal ceilings, or an entries API that failed. Not
+   * folder over the traversal ceilings, or an entries API that failed partway
+   * (`DropLimitError` and `DropReadError` respectively). Not
    * optional: a swallowed read error is exactly the silent-truncation failure
    * this pair of callbacks exists to prevent, so every drop surface has to say
    * where the message goes.

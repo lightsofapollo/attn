@@ -221,13 +221,9 @@ export class HtmlAnnotationBridge {
       this.#port.postMessage({ type: 'inspect', v: DOC_PROTOCOL_VERSION, enabled: true });
     }
 
-    if (this.#rendered) {
-      this.#port.postMessage({
-        type: 'renderAnchors',
-        v: DOC_PROTOCOL_VERSION,
-        anchors: this.#rendered,
-      });
-    }
+    // A reloaded frame is a fresh document: it knows nothing of the pins the
+    // shell is still showing, hover included.
+    this.#sendRendered();
   }
 
   #receive(raw: unknown): void {
@@ -329,14 +325,41 @@ export class HtmlAnnotationBridge {
     // reload, so storing the live proxies would just move the DataCloneError
     // to the next handshake.
     this.#rendered = anchors.map(plainAnchor);
-    if (!this.#port) {
-      return;
+    // An anchor that left the document cannot be the hovered one any longer,
+    // and leaving the id set would make the next `setHoveredAnchor` for it
+    // return early against a frame that has never been told.
+    if (
+      this.#hoveredAnchorId !== null &&
+      !this.#rendered.some((anchor) => anchor.anchorId === this.#hoveredAnchorId)
+    ) {
+      this.#hoveredAnchorId = null;
     }
+    this.#sendRendered();
+  }
+
+  /**
+   * Push the retained batch, then re-assert the hover it painted over
+   * (attn-ze60.4).
+   *
+   * `renderAnchors` is a full repaint in BASE states, so it necessarily
+   * overwrites the `hovered` state of whichever anchor the pointer is on — and
+   * anchors re-render for reasons that have nothing to do with the pointer: a
+   * comment arrives, a card resolves, an edit remaps. Nothing downstream would
+   * put the highlight back: the shells' hover effects depend on the hovered
+   * card, not on the anchor list, and `setHoveredAnchor` returns early for an
+   * id it already holds. The card therefore stayed lit while the document went
+   * dark, until the pointer left and came back.
+   */
+  #sendRendered(): void {
+    if (!this.#port || !this.#rendered) return;
     this.#port.postMessage({
       type: 'renderAnchors',
       v: DOC_PROTOCOL_VERSION,
       anchors: this.#rendered,
     });
+    if (this.#hoveredAnchorId !== null) {
+      this.setAnchorState(this.#hoveredAnchorId, 'hovered');
+    }
   }
 
   /**
@@ -417,6 +440,7 @@ export class HtmlAnnotationBridge {
     this.#port?.close();
     this.#port = null;
     this.#rendered = null;
+    this.#hoveredAnchorId = null;
     this.#inspect = false;
   }
 }

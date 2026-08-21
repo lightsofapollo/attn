@@ -1,4 +1,5 @@
 import {
+  appHashIntent,
   appWorkspaceUrl,
   entryHtmlPath,
   entryRequestPath,
@@ -155,5 +156,21 @@ assertEq(parseAppRoute('/app/w/ws1/%E0%A4%A'), undefined, 'malformed percent esc
 assertEq(parseAppRoute('/app/w/%ZZ/notes.md'), undefined, 'malformed workspace id is not a route');
 // An encoded separator would make two different URLs mean the same document.
 assertEq(parseAppRoute('/app/w/ws1/docs%2Fnotes.md'), undefined, 'encoded separator is rejected');
+
+// Hash intents (attn-ze60.3). The desk asks the URL what to open, every time
+// it mounts, because it mounts more than once per page load.
+assertEq(appHashIntent('#new'), 'new', 'the new-workspace intent');
+assertEq(appHashIntent('#join'), 'join', 'the join-a-review intent');
+assertEq(appHashIntent(''), undefined, 'no fragment, no intent');
+assertEq(appHashIntent('#'), undefined, 'a bare hash is not an intent');
+assertEq(appHashIntent('#JOIN'), undefined, 'the fragment is not case-folded');
+assertEq(appHashIntent('#join-review'), undefined, 'a prefix is not the intent');
+assertEq(appHashIntent('#key=abcdef'), undefined, 'a room key is not an intent');
+
+/* The sequence that used to reopen a closed panel: /app#join, Cancel — which
+   replaces the URL with /app — then into a workspace, then Back. The desk
+   remounts on that last step, and what it reads there is a fragment-less URL. */
+assertEq(appHashIntent('#join'), 'join', 'on arrival the panel opens');
+assertEq(appHashIntent(''), undefined, 'and after Back it stays closed');
 
 console.log('hosted routes: all cases passed');

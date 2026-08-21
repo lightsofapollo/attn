@@ -1809,6 +1809,13 @@
   line-height: 1.35;
 }
 
+/* The same line standing alone on the mobile canvas, where it is the only
+   report of a failed import and has to read as prose, not as rail chrome. */
+.editor-canvas-error {
+  margin: 0 0 0.75rem;
+  font-size: 0.85rem;
+}
+
 /* ————— mobile editor: reader + dock + sheets ————— */
 
 .thumb-dock {

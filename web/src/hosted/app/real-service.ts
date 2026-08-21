@@ -353,6 +353,10 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
     await this.service.yieldOwnerRuntime(workspaceId);
   }
 
+  async closeEditingRuntime(workspaceId: string): Promise<void> {
+    await this.service.closeOwnerRuntime(workspaceId);
+  }
+
   async requestWriterHandoff(
     workspaceId: string,
     intent: 'interaction' | 'focus' = 'interaction',

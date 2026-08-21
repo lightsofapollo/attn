@@ -24,7 +24,9 @@
   import { AutosaveController } from './autosave';
   import type { reviewStore as ReviewStoreInstance } from '../../lib/review/store.svelte';
   import { buildManifest, buildWorkspaceZip, triggerDownload, zipFileName } from './export-zip';
-  import { expandPicked, toImportFiles, type PickedFile } from './import-files';
+  import { expandPicked } from './import-files';
+  import { importIntoWorkspace } from './import-into-workspace';
+  import { createOwnerSessionGate } from './owner-session-gate';
   import { fileDrop, filesToPicked, watchFileDrag, type DroppedFile } from './file-drop';
   import { readWorkspaceOrigin } from './workspace-origin';
   import { autofocus } from '../../lib/hosted/autofocus';
@@ -224,7 +226,21 @@
   let collabClientId = $state<string | null>(null);
   let collabEpoch = $state(0);
   let readyCollabEpoch = $state(-1);
-  let ownerSessionOpening: Promise<EditingSession | null> | null = null;
+  /* One acquisition at a time, tagged with the workspace that asked for it
+     (attn-e9r2.2). Desktop switches workspaces in place, so an untagged
+     pending promise handed the new workspace the old workspace's session —
+     see owner-session-gate.ts for the whole failure. */
+  const ownerSessionGate = createOwnerSessionGate<EditingSession>({
+    current: () => workspace.id,
+    begin: (workspaceId) => service.beginEditing(workspaceId),
+    discard: async (workspaceId, granted) => {
+      // Nothing installed it, so nothing else will close it: hand back the
+      // lease, the heartbeat and the review transport rather than leave an
+      // orphan runtime holding this workspace (attn-e9r2.3).
+      await granted.release().catch(() => undefined);
+      await service.closeEditingRuntime(workspaceId).catch(() => undefined);
+    },
+  });
   let unsubscribeOwner: (() => void) | null = null;
   let collabSeedRequest = 0;
   let loadedCollabGenerationKey: string | null = null;
@@ -853,58 +869,41 @@
     return only.path;
   }
 
+  /**
+   * Import into THIS workspace, whatever the user does next (attn-e9r2.1).
+   *
+   * The pipeline itself lives in `import-into-workspace.ts`, where the
+   * workspace id is a parameter rather than a live lookup — see that module's
+   * header for the switch-mid-import failure it exists to prevent. This end
+   * supplies the live reads (the editor's own text, the current name, the
+   * route follow-up) and owns the rail's error line.
+   */
   async function importFiles(files: Iterable<File | DroppedFile>): Promise<void> {
+    const wsId = workspace.id;
+    const onScreen = (): boolean => workspace.id === wsId;
     railError = null;
     try {
-      const picked = await expandPicked(await filesToPicked(files));
-      const importedFiles = toImportFiles(picked);
-      // Drain first: a keystroke inside the autosave debounce is content, and
-      // the placeholder check has to see it before deciding the file is empty.
-      await flushPendingEdits();
-      const placeholder = supersededPlaceholder(importedFiles.map((file) => file.path));
-      await service.addAssetFiles(workspace.id, importedFiles);
-      // After the add, never before: a failed import must leave the workspace
-      // exactly as it was, placeholder included.
-      if (placeholder !== null) {
-        try {
-          await service.deleteEntry(workspace.id, placeholder);
-        } catch {
-          // A stray untitled.md is untidy; a half-imported workspace is not
-          // recoverable. Keep the import and leave the placeholder.
-        }
-        await adoptImportedName(picked);
-      }
-      const openPath = importedFiles.find((file) => file.kind === 'markdown' || file.kind === 'html')?.path
-        ?? importedFiles[0]?.path;
-      if (onWorkspaceChanged) await onWorkspaceChanged(openPath);
-      else window.location.reload();
+      await importIntoWorkspace({
+        workspaceId: wsId,
+        read: async () => expandPicked(await filesToPicked(files)),
+        port: service,
+        scope: {
+          isOnScreen: onScreen,
+          flushPendingEdits,
+          supersededPlaceholder,
+          currentName: () => workspace.name,
+          follow: async (openPath) => {
+            if (onWorkspaceChanged) await onWorkspaceChanged(openPath);
+            else window.location.reload();
+          },
+        },
+      });
     } catch (error) {
-      railError = error instanceof Error ? error.message : String(error);
+      // The rail belongs to whatever is on screen now; an error about a
+      // workspace the user has left would read as a failure of this one.
+      if (onScreen()) railError = error instanceof Error ? error.message : String(error);
     } finally {
       if (assetInput) assetInput.value = '';
-    }
-  }
-
-  /**
-   * A workspace still called "Untitled" takes the import's name.
-   *
-   * Same call the desk's import route makes (prepareImport → importName), so a
-   * document that arrives by the desk and the same document that arrives by the
-   * canvas end up on a desk row with the same title. Only for the auto-name: a
-   * workspace someone has named is theirs.
-   */
-  async function adoptImportedName(picked: PickedFile[]): Promise<void> {
-    if (workspace.name !== 'Untitled') return;
-    try {
-      const { importName, dedupeWorkspaceName } = await import('./import-files');
-      const proposed = importName(picked);
-      if (!proposed || proposed === workspace.name) return;
-      const taken = (await service.listWorkspaces())
-        .filter((candidate) => candidate.id !== workspace.id)
-        .map((candidate) => candidate.name);
-      await service.renameWorkspace(workspace.id, dedupeWorkspaceName(proposed, taken));
-    } catch {
-      // The auto-name is a courtesy; the import already succeeded.
     }
   }
 
@@ -1577,12 +1576,11 @@
       unsubscribeOwner = null;
       void stale.release().catch(() => undefined);
     }
-    if (ownerSessionOpening) return ownerSessionOpening;
-    ownerSessionOpening = service.beginEditing(workspace.id).then(async (granted) => {
+    return ownerSessionGate.acquire(async (granted) => {
       if (!granted) {
         editDenied = true;
         ownerState = null;
-        return null;
+        return;
       }
       // Takeover while live co-editing: this editor holds the converged doc
       // (possibly ahead of the dead owner's last commit). Commit it BEFORE
@@ -1602,11 +1600,7 @@
       }
       closeLocalJoin();
       installOwnerSession(granted);
-      return granted;
-    }).finally(() => {
-      ownerSessionOpening = null;
     });
-    return ownerSessionOpening;
   }
 
   // Seamless handoff (user feedback: the "Another tab is editing" wall must
@@ -2037,7 +2031,7 @@
   // share room silently lost its host (attn-707).
   const sessionWorkspaceId = $derived(workspace.id);
   $effect(() => {
-    void sessionWorkspaceId;
+    const departing = sessionWorkspaceId;
     return () => {
       unsubscribeOwner?.();
       unsubscribeOwner = null;
@@ -2047,6 +2041,17 @@
       void session?.release();
       session = null;
       ownerState = null;
+      // Invalidate any acquisition still in flight for the workspace being
+      // left (attn-e9r2.2): whatever it grants is nobody's, and the gate
+      // hands it straight back.
+      ownerSessionGate.invalidate();
+      // Hand back the ROUTE authority too (attn-e9r2.3). `release()` leaves
+      // the editor surface and deliberately keeps the route runtime alive
+      // across an edit/read toggle; leaving the workspace is the other case —
+      // its lease, heartbeat, local-collab hub and review transport have no
+      // reader left, and keeping them made every other tab force a takeover
+      // and every switch back and forth accumulate another runtime.
+      void service.closeEditingRuntime(departing).catch(() => undefined);
     };
   });
 
@@ -3586,7 +3591,7 @@
     data-app-view="workspace"
     data-workspace-id={workspace.id}
     data-drop-label="Drop files to add to this workspace"
-    use:fileDrop={{ onFiles: (files) => void importFiles(files) }}
+    use:fileDrop={{ onFiles: (files) => void importFiles(files), onError: (message) => (railError = message) }}
   >
     {#if HostedDesktopWorkspaceFrame}
       <HostedDesktopWorkspaceFrame
@@ -3717,7 +3722,7 @@
     tabindex="0"
     aria-label="Document"
     data-drop-label="Drop files to add to this workspace"
-    use:fileDrop={{ onFiles: (files) => void importFiles(files) }}
+    use:fileDrop={{ onFiles: (files) => void importFiles(files), onError: (message) => (railError = message) }}
   >
     {#if editingUnavailable}
       <aside class="viewing-safely" role="status">
@@ -3736,6 +3741,13 @@
           Editing is unavailable in this browser mode. You can still read, navigate files, review, export, or open native attn.
         </div>
       </aside>
+    {/if}
+    <!-- The rail's error line has no rail here (attn-e9r2.5). A failed import
+         — a folder over the drop ceilings, a write that could not land — has
+         to be sayable on the surface the drop happened on, or the reader is
+         left with a document that quietly did not change. -->
+    {#if railError}
+      <p class="editor-canvas-error hosted-sidebar-error" role="alert">{railError}</p>
     {/if}
     {@render documentSurface()}
   </main>

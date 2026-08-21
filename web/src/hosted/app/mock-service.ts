@@ -347,6 +347,9 @@ export class MockWorkspaceService implements WorkspaceAppService {
 
   async yieldEditing(): Promise<void> {}
 
+  /** The mock holds no lease, heartbeat or transport to hand back. */
+  async closeEditingRuntime(): Promise<void> {}
+
   async acknowledgeWriterHandoff(): Promise<void> {}
 
   async forceWriterLease(): Promise<void> {}

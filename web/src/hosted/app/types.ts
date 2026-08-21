@@ -289,6 +289,21 @@ export interface WorkspaceAppService {
   /** Null when another tab holds the writer lease — stay read-only. */
   beginEditing(workspaceId: string): Promise<EditingSession | null>;
   /**
+   * Give up this tab's ROUTE authority for a workspace it is leaving
+   * (attn-e9r2.3).
+   *
+   * `EditingSession.release()` only leaves the editor surface — it keeps the
+   * runtime so an edit/read toggle does not thrash the lease. Leaving the
+   * workspace entirely is the other case: the lease, its heartbeat, the
+   * local-collab hub and the review transport have no reader left, so they
+   * are closed and the runtime is evicted. Without this, switching workspaces
+   * in place left every departed workspace held against the user's other tabs,
+   * and repeated switches accumulated live runtimes.
+   *
+   * Idempotent, and safe on a workspace that never had a runtime.
+   */
+  closeEditingRuntime(workspaceId: string): Promise<void>;
+  /**
    * Join local multi-tab co-editing as a follower (attn-47r). Returns a
    * reconnecting handle, or null when the environment can't support it —
    * the caller then falls back to the read-only follow mode.

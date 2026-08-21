@@ -43,7 +43,13 @@
     <p>Everything imports to this device only</p>
   </div>
 
-  <div class="drop-zone" use:fileDrop={{ onFiles: (files) => void importFiles(files) }}>
+  <div
+    class="drop-zone"
+    use:fileDrop={{
+      onFiles: (files) => void importFiles(files),
+      onError: (message) => (importError = message),
+    }}
+  >
     <h2>Drop files to import</h2>
     <!-- The measure is the paragraph's own, not the drop zone's
          (attn-a9f7.1.6): this ran ~141 characters a line at 1280. -->

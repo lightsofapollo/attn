@@ -18,6 +18,7 @@
 // local-only rows cost nothing, and a desk typically has very few shared ones.
 
 import type { FileId, ReviewEvent, ReviewSnapshot, RoomId, SnapshotId } from '../types';
+import { compareEventKeys } from './selectors';
 
 /** What the desk row needs to say "3 suggestions waiting". */
 export interface WorkspaceReviewCounts {
@@ -39,6 +40,13 @@ export const EMPTY_REVIEW_COUNTS: WorkspaceReviewCounts = {
   lastAuthorId: null,
   lastActivityAt: null,
 };
+
+/** One lifecycle event, kept small: the fold outlives the events it reads. */
+interface Mark {
+  type: ReviewEvent['body']['type'];
+  createdAt: number;
+  eventId: string;
+}
 
 /**
  * A tallying stand-in for the runes review store.
@@ -62,14 +70,43 @@ export function createReviewCountingSink(): {
   leaveRoom(roomId: RoomId): void;
 } {
   const seen = new Set<string>();
-  const openThreads = new Set<string>();
-  const pending = new Set<string>();
-  // Ids rooted by a suggestion. Kept for the life of the fold (identity, not
-  // state) so a `comment_reopened` can never count a decided suggestion as an
-  // open comment — accept and reject are terminal.
+  // Thread ids by what ROOTED them. Both are collected as they arrive rather
+  // than pre-passed: a fold that only sees a stream still classifies every id
+  // correctly at the end, whichever order the roots and their lifecycle
+  // events turned up in.
+  const commentThreads = new Set<string>();
   const suggestionThreads = new Set<string>();
+  // The winning lifecycle event per thread, by the same comparator that orders
+  // the log for `reconstructThreads`. Folding in ARRIVAL order was the bug
+  // (attn-e9r2.4): replay and live delivery interleave peers, so a newer
+  // reopen applied before a delayed older resolve ended with the thread
+  // closed here and open in the rail — the Desk badge disagreeing with the
+  // surface it links to.
+  //
+  // Two winners, because the rail drops a `comment_reopened` naming a
+  // SUGGESTION (accept and reject are terminal, attn-1l2f.1). `latest` decides
+  // comment threads; `latestClosing` — the winner among everything except
+  // reopens — decides suggestions, so a stray reopen cannot resurrect one.
+  const lifecycle = new Map<string, { latest: Mark; latestClosing: Mark | null }>();
   let lastAuthorId: string | null = null;
   let lastActivityAt: number | null = null;
+
+  function noteLifecycle(threadId: string, event: ReviewEvent, reopen: boolean): void {
+    const mark: Mark = {
+      type: event.body.type,
+      createdAt: event.meta.createdAt,
+      eventId: event.meta.eventId,
+    };
+    const fold = lifecycle.get(threadId);
+    if (fold === undefined) {
+      lifecycle.set(threadId, { latest: mark, latestClosing: reopen ? null : mark });
+      return;
+    }
+    if (compareEventKeys(fold.latest, mark) < 0) fold.latest = mark;
+    if (!reopen && (fold.latestClosing === null || compareEventKeys(fold.latestClosing, mark) < 0)) {
+      fold.latestClosing = mark;
+    }
+  }
 
   return {
     currentRoomId: null,
@@ -77,12 +114,21 @@ export function createReviewCountingSink(): {
     currentSnapshotId: null,
 
     counts(): WorkspaceReviewCounts {
-      return {
-        openComments: openThreads.size,
-        pendingSuggestions: pending.size,
-        lastAuthorId,
-        lastActivityAt,
-      };
+      let openComments = 0;
+      for (const threadId of commentThreads) {
+        // Closed unless the winning lifecycle event was a reopen — the exact
+        // rule `reconstructThreads` reads, so `resolved === false` there and
+        // "open" here are the same threads.
+        const fold = lifecycle.get(threadId);
+        if (fold === undefined || fold.latest.type === 'comment_reopened') openComments += 1;
+      }
+      let pendingSuggestions = 0;
+      for (const suggestionId of suggestionThreads) {
+        // Any terminal event closes it; reopens are not terminal and never
+        // reach `latestClosing`.
+        if (lifecycle.get(suggestionId)?.latestClosing == null) pendingSuggestions += 1;
+      }
+      return { openComments, pendingSuggestions, lastAuthorId, lastActivityAt };
     },
 
     applyEvent(event: ReviewEvent): void {
@@ -95,29 +141,20 @@ export function createReviewCountingSink(): {
       const body = event.body;
       switch (body.type) {
         case 'comment_created':
-          openThreads.add(body.threadId);
+          commentThreads.add(body.threadId);
           break;
         case 'comment_resolved':
-          openThreads.delete(body.threadId);
+          noteLifecycle(body.threadId, event, false);
           break;
-        // Reopening puts the thread back in the open count (attn-bb6t.4).
-        // The log always carries the comment_created that opened it, and the
-        // set is keyed by threadId — but only a comment thread can reopen, so
-        // a suggestion id here is ignored rather than counted.
         case 'comment_reopened':
-          if (!suggestionThreads.has(body.threadId)) openThreads.add(body.threadId);
+          noteLifecycle(body.threadId, event, true);
           break;
         case 'suggestion_created':
-          pending.add(body.suggestionId);
-          // Events can arrive out of order: a reopen read before its
-          // suggestion would have already leaked the id into the comment
-          // count. A suggestion id is never an open comment thread.
           suggestionThreads.add(body.suggestionId);
-          openThreads.delete(body.suggestionId);
           break;
         case 'suggestion_accepted':
         case 'suggestion_rejected':
-          pending.delete(body.suggestionId);
+          noteLifecycle(body.suggestionId, event, false);
           break;
         default:
           // Room lifecycle, presence, snapshots: not review work, and counting

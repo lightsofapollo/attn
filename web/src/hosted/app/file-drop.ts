@@ -49,8 +49,32 @@ export async function filesToPicked(files: Iterable<PickableFile>): Promise<Pick
    would otherwise recurse until the tab dies. Both are far above any real
    document folder, so hitting one means something is wrong, not that someone
    has an unusually large project. */
-const MAX_DROP_DEPTH = 24;
-const MAX_DROP_FILES = 5000;
+export const MAX_DROP_DEPTH = 24;
+export const MAX_DROP_FILES = 5000;
+
+/**
+ * A drop the walk refused to finish (attn-e9r2.5).
+ *
+ * Hitting a ceiling used to STOP the walk and return what it had, so the
+ * import pipeline ran to completion and reported success over a silently
+ * truncated tree — the worst outcome available, because the workspace then
+ * looks imported and is missing files nobody can name. A partial walk is not
+ * a result; it is a failure with a number attached, and the drop surfaces say
+ * so instead of importing anything.
+ */
+export class DropLimitError extends Error {
+  readonly limit: 'files' | 'depth';
+
+  constructor(limit: 'files' | 'depth') {
+    super(
+      limit === 'files'
+        ? `That folder holds more than ${MAX_DROP_FILES.toLocaleString('en-US')} files. Nothing was imported — import it in smaller pieces.`
+        : `That folder is nested more than ${MAX_DROP_DEPTH} levels deep. Nothing was imported — import a folder from further inside it.`,
+    );
+    this.name = 'DropLimitError';
+    this.limit = limit;
+  }
+}
 
 function entryFile(entry: FileSystemFileEntry): Promise<File | null> {
   return new Promise((resolve) => {
@@ -75,7 +99,10 @@ async function walkEntry(
   out: DroppedFile[],
   depth: number,
 ): Promise<void> {
-  if (out.length >= MAX_DROP_FILES || depth > MAX_DROP_DEPTH) return;
+  // Throwing, not returning: a ceiling reached mid-walk means the caller
+  // cannot be handed `out` as if it were the whole drop.
+  if (depth > MAX_DROP_DEPTH) throw new DropLimitError('depth');
+  if (out.length >= MAX_DROP_FILES) throw new DropLimitError('files');
   if (entry.isFile) {
     const file = await entryFile(entry as FileSystemFileEntry);
     // fullPath is rooted at the drop ("/notes/plan.md"); the import pipeline
@@ -97,6 +124,10 @@ async function walkEntry(
  * one, and it must be called synchronously against the live items list — the
  * DataTransfer is neutered as soon as the drop handler yields — so the entries
  * are collected first and walked afterwards.
+ *
+ * Throws `DropLimitError` when the tree exceeds `MAX_DROP_FILES` or
+ * `MAX_DROP_DEPTH`. Callers must treat that as "imported nothing", never as a
+ * short list.
  */
 export async function readDroppedFiles(
   dataTransfer: DataTransfer | null,
@@ -122,6 +153,14 @@ export async function readDroppedFiles(
 export interface FileDropOptions {
   /** Called with the dropped files, folders expanded (never empty). */
   onFiles: (files: DroppedFile[]) => void;
+  /**
+   * Called instead of `onFiles` when the drop could not be read whole — a
+   * folder over the traversal ceilings, or an entries API that failed. Not
+   * optional: a swallowed read error is exactly the silent-truncation failure
+   * this pair of callbacks exists to prevent, so every drop surface has to say
+   * where the message goes.
+   */
+  onError: (message: string) => void;
   /** When false, the node ignores drops (e.g. read-only view). Default true. */
   enabled?: boolean;
 }
@@ -231,9 +270,14 @@ export function fileDrop(node: HTMLElement, options: FileDropOptions) {
     // Read the entries synchronously inside the handler (readDroppedFiles does
     // this before its first await): the DataTransfer is neutered the moment
     // this returns, so an `await` before touching `items` loses the drop.
-    void readDroppedFiles(event.dataTransfer).then((files) => {
-      if (files.length > 0) opts.onFiles(files);
-    });
+    void readDroppedFiles(event.dataTransfer).then(
+      (files) => {
+        if (files.length > 0) opts.onFiles(files);
+      },
+      (error: unknown) => {
+        opts.onError(error instanceof Error ? error.message : String(error));
+      },
+    );
   };
 
   node.addEventListener('dragenter', onDragEnter);

@@ -13,7 +13,13 @@
 //
 //   cd web && npx tsx src/hosted/app/file-drop.test.ts
 
-import { filesToPicked, readDroppedFiles, type DroppedFile } from './file-drop';
+import {
+  DropLimitError,
+  MAX_DROP_DEPTH,
+  MAX_DROP_FILES,
+  filesToPicked,
+  readDroppedFiles,
+} from './file-drop';
 
 interface CaseResult {
   name: string;
@@ -143,10 +149,33 @@ defineCase('a null dataTransfer yields nothing rather than throwing', async () =
   assertEqual((await readDroppedFiles(null)).length, 0, 'empty');
 });
 
-defineCase('a cyclic tree is bounded instead of hanging the tab', async () => {
+/* ————— the ceilings (attn-e9r2.5) —————
+
+   Reaching one used to stop the walk and hand back the partial list, so the
+   import pipeline ran to completion and reported success over a tree with
+   files missing that nobody could name. A ceiling is a failure, and it has to
+   arrive as one. */
+
+async function expectLimit(
+  run: () => Promise<unknown>,
+  limit: 'files' | 'depth',
+): Promise<void> {
+  let thrown: unknown = null;
+  try {
+    await run();
+  } catch (error) {
+    thrown = error;
+  }
+  assert(thrown instanceof DropLimitError, `expected a DropLimitError, got ${String(thrown)}`);
+  assertEqual(thrown.limit, limit, 'names which ceiling');
+  assert(thrown.message.includes('Nothing was imported'), 'says nothing was imported');
+}
+
+defineCase('a cyclic tree fails loudly instead of hanging the tab', async () => {
   // A drop is an untrusted shape. This models the pathological case the depth
   // cap exists for — an entry whose reader keeps handing back a child directory
-  // — and asserts the walk terminates rather than recursing until the tab dies.
+  // — and asserts the walk terminates AND reports, rather than recursing until
+  // the tab dies or returning an empty list that reads as "nothing to import".
   const loop: DirEntryStub = new DirEntryStub('/loop', []);
   (loop as unknown as { createReader: () => unknown }).createReader = () => {
     let handed = false;
@@ -158,8 +187,35 @@ defineCase('a cyclic tree is bounded instead of hanging the tab', async () => {
       },
     };
   };
-  const dropped: DroppedFile[] = await readDroppedFiles(transfer([loop]));
-  assertEqual(dropped.length, 0, 'no files, and it returned at all');
+  await expectLimit(() => readDroppedFiles(transfer([loop])), 'depth');
+});
+
+defineCase('a folder deeper than the depth ceiling aborts', async () => {
+  // One chain, one file at the bottom, one level past the cap.
+  let node: Entry = new FileEntryStub('/deep/leaf.md', 'x');
+  for (let level = MAX_DROP_DEPTH + 1; level > 0; level -= 1) {
+    node = new DirEntryStub(`/deep-${level}`, [node]);
+  }
+  await expectLimit(() => readDroppedFiles(transfer([node])), 'depth');
+});
+
+defineCase('a folder over the file ceiling aborts rather than truncating', async () => {
+  const many = Array.from(
+    { length: MAX_DROP_FILES + 1 },
+    (_, i) => new FileEntryStub(`/huge/f${i}.md`, 'x'),
+  );
+  await expectLimit(() => readDroppedFiles(transfer([new DirEntryStub('/huge', many)])), 'files');
+});
+
+defineCase('a folder exactly at the file ceiling still imports', async () => {
+  // The ceiling is a limit, not a margin: the last allowed drop must work, or
+  // the error would be firing on shapes the app claims to support.
+  const many = Array.from(
+    { length: MAX_DROP_FILES },
+    (_, i) => new FileEntryStub(`/full/f${i}.md`, 'x'),
+  );
+  const dropped = await readDroppedFiles(transfer([new DirEntryStub('/full', many)]));
+  assertEqual(dropped.length, MAX_DROP_FILES, 'every file survives');
 });
 
 async function runAllCases(): Promise<void> {

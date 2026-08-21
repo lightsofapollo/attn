@@ -78,16 +78,30 @@ function rootEventAnchor(event: ReviewEvent): Anchor | null {
   return null;
 }
 
+/** The two fields log order is decided by: wall clock, then event id. */
+export interface EventOrderKey {
+  createdAt: number;
+  eventId: string;
+}
+
 /**
  * Stable ascending sort key. `createdAt` is the primary key; `eventId` is
  * the deterministic tie-breaker so two events stamped in the same
  * millisecond don't flip order between calls.
+ *
+ * Exported as a KEY comparator so other folds over the same log order by the
+ * same rule without holding whole events — the desk's review tally
+ * (review-counts.ts) keeps one compact mark per thread and has to agree with
+ * `reconstructThreads` exactly, or the rail shows a thread the badge does not
+ * count.
  */
+export function compareEventKeys(a: EventOrderKey, b: EventOrderKey): number {
+  if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+  return a.eventId < b.eventId ? -1 : a.eventId > b.eventId ? 1 : 0;
+}
+
 function compareEvents(a: ReviewEvent, b: ReviewEvent): number {
-  if (a.meta.createdAt !== b.meta.createdAt) {
-    return a.meta.createdAt - b.meta.createdAt;
-  }
-  return a.meta.eventId < b.meta.eventId ? -1 : a.meta.eventId > b.meta.eventId ? 1 : 0;
+  return compareEventKeys(a.meta, b.meta);
 }
 
 // ---------------------------------------------------------------------------

@@ -1914,6 +1914,19 @@ impl ReviewManager {
             });
         };
 
+        // Only a comment thread reopens (attn-1l2f.1). The UI hides Unresolve
+        // on suggestion cards; this is the durable half of that rule, so a
+        // stale client or a scripted command can't mint the event either.
+        match self.store.is_suggestion_thread(room_id, thread_id) {
+            Ok(true) => {
+                return emit_err(format!(
+                    "thread {thread_id} is a suggestion: accept and reject are terminal"
+                ));
+            }
+            Ok(false) => {}
+            Err(e) => return emit_err(format!("read room events: {e}")),
+        }
+
         let reopened_by = match bootstrapper
             .config()
             .identity_dir()

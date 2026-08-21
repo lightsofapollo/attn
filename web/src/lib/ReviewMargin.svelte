@@ -60,6 +60,7 @@
     RESOLVED_CHIP_HEIGHT,
   } from './review/rail-mode';
   import { reviewStore } from './review/store.svelte';
+  import { canReopenThread, threadKind } from './review/selectors';
   import { createFrameInvalidator } from './review/frame-invalidator';
   import { nearestScrollableAncestor } from './scroll-viewport';
   import {
@@ -553,7 +554,12 @@
    * the `CommentReopened` echo, and leave the resolved card in place on
    * failure so the user can retry.
    */
-  async function unresolveThread(threadId: string): Promise<void> {
+  async function unresolveThread(t: Thread): Promise<void> {
+    // Only a comment thread reopens (attn-1l2f.1). Accepted and rejected
+    // suggestions read as `resolved` too, and reopening one would resurrect
+    // an already-applied edit with its Accept/Reject actions intact.
+    if (!canUnresolve(t)) return;
+    const threadId = t.id;
     const roomId = reviewStore.currentRoomId;
     if (!roomId) return;
     try {
@@ -896,7 +902,16 @@
   }
 
   function kindFor(t: Thread): 'comment' | 'suggestion' {
-    return t.rootEvent.body.type === 'suggestion_created' ? 'suggestion' : 'comment';
+    return threadKind(t);
+  }
+
+  /** Resolve is reversible; accept and reject are not. A suggestion reaches
+   *  the resolved presentation through its terminal verdict, so its card gets
+   *  no Unresolve — the protocol has no inverse to offer (attn-1l2f.1). The
+   *  rule lives in the pure layer so the projection and the affordance can
+   *  never disagree. */
+  function canUnresolve(t: Thread): boolean {
+    return canReopenThread(t);
   }
 
   /** The initiating author's participant kind — drives the per-user color
@@ -1130,7 +1145,7 @@
               authorId={t.rootEvent.meta.authorId}
               authorKind={authorKindFor(t)}
               onActivate={() => { void collapseResolved(t); }}
-              onUnresolve={() => { void unresolveThread(t.id); }}
+              onUnresolve={canUnresolve(t) ? () => { void unresolveThread(t); } : undefined}
             />
           {:else}
             <button
@@ -1215,7 +1230,7 @@
           authorId={t.rootEvent.meta.authorId}
           authorKind={authorKindFor(t)}
           onActivate={() => { void collapseResolved(t); }}
-          onUnresolve={() => { void unresolveThread(t.id); }}
+          onUnresolve={canUnresolve(t) ? () => { void unresolveThread(t); } : undefined}
         />
       </div>
     {:else if t}

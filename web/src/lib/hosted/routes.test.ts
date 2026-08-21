@@ -1,4 +1,5 @@
 import {
+  appWorkspaceUrl,
   entryHtmlPath,
   entryRequestPath,
   hostedEntryForPath,
@@ -101,5 +102,58 @@ assertEq(parseReviewRoute('/review/room/extra'), undefined, 'review has one id s
 assertEq(parseReviewRoute('/s/short'), undefined, 'share id has exact canonical length');
 assertEq(parseReviewRoute('/s/AAAAAAAAAAAAAAAAAAAAAB'), undefined, 'share id has canonical trailing bits');
 assertEq(parseReviewRoute('/s/AAAAAAAAAAAAAAAAAAAAAA/'), undefined, 'share trailing slash rejected');
+
+// attn-1l2f.3 — every /app/w URL the app writes goes through appWorkspaceUrl,
+// and parseAppRoute must read back exactly what was written. `normalizeEntryPath`
+// allows '#', '?', '%', spaces and unicode; written raw those take on URL
+// meaning and a reload opens the wrong document or none.
+const ROUND_TRIP_PATHS = [
+  'untitled.md',
+  'docs/nested/notes.md',
+  'draft#1.md',
+  'plan?.md',
+  '100%.md',
+  'my notes.md',
+  'a&b.md',
+  'notes+draft.md',
+  'réunion.md',
+  '日本語.md',
+  "it's a plan.md",
+  'docs/draft #2 (final)/notes?.md',
+];
+
+for (const filePath of ROUND_TRIP_PATHS) {
+  const url = appWorkspaceUrl('ws1', filePath);
+  assertEq(
+    url.includes('#') || url.includes('?'),
+    false,
+    `written URL must not carry fragment or query syntax: ${filePath}`,
+  );
+  assertEq(
+    parseAppRoute(url),
+    { view: 'workspace', workspaceId: 'ws1', filePath },
+    `round-trip ${filePath}`,
+  );
+}
+
+// Workspace ids get the same treatment, and the file-less form stays parseable.
+assertEq(
+  parseAppRoute(appWorkspaceUrl('ws 1#odd')),
+  { view: 'workspace', workspaceId: 'ws 1#odd', filePath: undefined },
+  'workspace-only round-trip encodes the id',
+);
+assertEq(
+  parseAppRoute(appWorkspaceUrl('ws1', undefined)),
+  { view: 'workspace', workspaceId: 'ws1', filePath: undefined },
+  'an undefined file path yields the workspace root',
+);
+assertEq(appWorkspaceUrl('ws1', ''), '/app/w/ws1', 'an empty file path yields the workspace root');
+assertEq(appWorkspaceUrl('ws1', 'a/b.md'), '/app/w/ws1/a/b.md', 'separators stay separators');
+
+// A malformed percent sequence must be a clean not-found, never a throw.
+assertEq(parseAppRoute('/app/w/ws1/%E0%A4%A'), undefined, 'malformed percent escape is not a route');
+assertEq(parseAppRoute('/app/w/%ZZ/notes.md'), undefined, 'malformed workspace id is not a route');
+// An encoded separator would make two different URLs mean the same document.
+assertEq(parseAppRoute('/app/w/ws1/docs%2Fnotes.md'), undefined, 'encoded separator is rejected');
 
 console.log('hosted routes: all cases passed');

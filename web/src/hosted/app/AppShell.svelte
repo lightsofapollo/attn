@@ -1,6 +1,11 @@
 <script lang="ts">
   import { tick } from 'svelte';
-  import { parseAppRoute, type AppRoute } from '../../lib/hosted/routes';
+  import { appWorkspaceUrl, parseAppRoute, type AppRoute } from '../../lib/hosted/routes';
+  import {
+    canApplyWorkspaceRead,
+    createNavigationGuard,
+    type PendingWorkspaceRead,
+  } from './navigation-guard';
   import AppHeader from './AppHeader.svelte';
   import DeskHome from './DeskHome.svelte';
   import LoadingLine from './LoadingLine.svelte';
@@ -69,16 +74,26 @@
 
   const editorMode = $derived(route?.view === 'workspace');
 
+  /* One transition token shared by every async path that mutates the state
+     above (attn-1l2f.2). Declared here, with that state, because the first
+     user of it is `load()` immediately below. */
+  const nav = createNavigationGuard();
+
   async function load(): Promise<void> {
+    // The first paint is a transition like any other: a popstate or a link
+    // click can land while the initial read is still out (attn-1l2f.2).
+    const generation = nav.begin();
     try {
       health = service.storageHealth();
       if (newIntent) {
         // The URL intent keeps its idempotency (attn-cjn).
-        await createAndOpen(true, 'import');
+        await createAndOpen(true, 'import', generation);
         return;
       }
       if (route?.view === 'workspace') {
-        detail = await service.getWorkspace(route.workspaceId);
+        const fresh = await service.getWorkspace(route.workspaceId);
+        if (!nav.isCurrent(generation)) return;
+        detail = fresh;
         if (detail) {
           /* A reload has no session intent, so recover it (attn-rjuo.1.2): an
              explicitly blank workspace must not be re-covered with an offer to
@@ -86,18 +101,27 @@
              leaves the import-first default in place. */
           createIntent = readWorkspaceOrigin(detail.id);
           activePath = route.filePath ?? detail.openPath;
-          bodyText = await service.readBodyText(detail.id, activePath);
+          const body = await service.readBodyText(detail.id, activePath);
+          if (!nav.isCurrent(generation)) return;
+          bodyText = body;
           // Sidebar project switcher: the editor needs the rest of the desk.
-          workspaces = await service.listWorkspaces();
+          const desk = await service.listWorkspaces();
+          if (!nav.isCurrent(generation)) return;
+          workspaces = desk;
         }
       } else {
-        workspaces = await service.listWorkspaces();
+        const desk = await service.listWorkspaces();
+        if (!nav.isCurrent(generation)) return;
+        workspaces = desk;
         if (route?.view === 'storage') {
-          rememberedRooms = await service.listRememberedRooms();
+          const rooms = await service.listRememberedRooms();
+          if (!nav.isCurrent(generation)) return;
+          rememberedRooms = rooms;
         }
       }
       phase = 'ready';
     } catch (error) {
+      if (!nav.isCurrent(generation)) return;
       errorMessage = error instanceof Error ? error.message : String(error);
       phase = 'error';
     }
@@ -114,7 +138,11 @@
    * @param reuseEmpty  Reuse an existing untouched workspace rather than
    *   minting one. True only for the `/app#new` URL intent (attn-n01r.50).
    */
-  async function createAndOpen(reuseEmpty: boolean, intent: 'blank' | 'import'): Promise<void> {
+  async function createAndOpen(
+    reuseEmpty: boolean,
+    intent: 'blank' | 'import',
+    generation = nav.begin(),
+  ): Promise<void> {
     createIntent = intent;
     // #new is idempotent (attn-cjn): reuse the most recent empty, untouched
     // Untitled workspace instead of minting another — a bookmarked /app#new
@@ -126,12 +154,14 @@
     // times returned the same id and left the desk count unchanged. A button
     // that names an action has to perform it.
     const existing = reuseEmpty ? await service.listWorkspaces() : [];
+    if (!nav.isCurrent(generation)) return;
     for (const candidate of existing) {
       if (candidate.name !== 'Untitled') continue;
       if (candidate.assetCount > 0 || candidate.htmlCount > 0 || candidate.markdownCount > 1) continue;
       const candidateDetail = await service.getWorkspace(candidate.id);
       if (!candidateDetail) continue;
       const body = await service.readBodyText(candidate.id, candidateDetail.openPath);
+      if (!nav.isCurrent(generation)) return;
       if (body !== null && body.trim().length > 0) continue;
       detail = candidateDetail;
       rememberWorkspaceOrigin(detail.id, intent);
@@ -139,20 +169,24 @@
       bodyText = body ?? '';
       isNewDraft = true;
       route = { view: 'workspace', workspaceId: detail.id, filePath: activePath };
-      history.replaceState(null, '', `/app/w/${detail.id}/${detail.openPath}`);
+      history.replaceState(null, '', appWorkspaceUrl(detail.id, detail.openPath));
       workspaces = existing;
       phase = 'ready';
       return;
     }
-    detail = await service.createWorkspace();
+    const created = await service.createWorkspace();
+    if (!nav.isCurrent(generation)) return;
+    detail = created;
     rememberWorkspaceOrigin(detail.id, intent);
     activePath = detail.openPath;
     bodyText = '';
     isNewDraft = true;
     route = { view: 'workspace', workspaceId: detail.id, filePath: activePath };
-    history.replaceState(null, '', `/app/w/${detail.id}/${detail.openPath}`);
+    history.replaceState(null, '', appWorkspaceUrl(detail.id, detail.openPath));
     // The project switcher lists the whole desk, including the new workspace.
-    workspaces = await service.listWorkspaces();
+    const desk = await service.listWorkspaces();
+    if (!nav.isCurrent(generation)) return;
+    workspaces = desk;
     phase = 'ready';
   }
 
@@ -204,25 +238,28 @@
   // state, and push the URL. The editor swaps in place (< 100 ms, no flash)
   // instead of re-bootstrapping the whole app. `push` is false when the change
   // comes from a back/forward navigation (the history entry already exists).
-  // The generation counter drops stale reads: rapid selections can resolve
-  // out of order, and an older read must never overwrite a newer selection.
-  let applyGeneration = 0;
+  //
+  // The read is tagged with both the transition that issued it and the
+  // workspace it was issued against (attn-1l2f.2). Rapid selections resolve
+  // out of order, so an older read must never overwrite a newer one — and a
+  // read from a workspace the user has since left must never land at all, or
+  // its body and path end up in the new workspace's editor, URL, and autosave.
   async function applyEntry(path: string, push: boolean): Promise<void> {
     if (!detail || path === activePath) return;
-    const generation = ++applyGeneration;
+    const pending: PendingWorkspaceRead = { token: nav.begin(), workspaceId: detail.id };
     try {
       // Read the new body BEFORE mutating any state, so a failed read leaves
       // the current file open rather than half-switching.
-      const body = await service.readBodyText(detail.id, path);
-      if (generation !== applyGeneration) return;
+      const body = await service.readBodyText(pending.workspaceId, path);
+      if (!canApplyWorkspaceRead(nav, pending, detail?.id)) return;
       activePath = path;
       bodyText = body;
       isNewDraft = false;
       createIntent = undefined;
-      route = { view: 'workspace', workspaceId: detail.id, filePath: path };
-      if (push) history.pushState(null, '', `/app/w/${detail.id}/${path}`);
+      route = { view: 'workspace', workspaceId: pending.workspaceId, filePath: path };
+      if (push) history.pushState(null, '', appWorkspaceUrl(pending.workspaceId, path));
     } catch (error) {
-      if (generation !== applyGeneration) return;
+      if (!canApplyWorkspaceRead(nav, pending, detail?.id)) return;
       errorMessage = error instanceof Error ? error.message : String(error);
       phase = 'error';
     }
@@ -235,16 +272,16 @@
   /* One navigation core for every in-app move (attn-a9f7.3.1). Everything —
      link clicks, the keyboard desk, the palette, back/forward — arrives here,
      so pending edits are drained exactly once per transition and no caller can
-     forget to. */
-  let navGeneration = 0;
-
+     forget to. Each takes a token from `nav`, so a move of any kind supersedes
+     whatever was in flight — a file switch cancels a workspace navigation and
+     vice versa. */
   async function navigate(next: AppRoute, push = true): Promise<void> {
-    const generation = ++navGeneration;
+    const generation = nav.begin();
     // Leaving the desk: remember where the reader was standing.
     if (route?.view === 'home') deskScroll = window.scrollY;
     // A pending debounced edit must land before the editor unmounts.
     await editorShell?.flushPendingEdits();
-    if (generation !== navGeneration) return;
+    if (!nav.isCurrent(generation)) return;
 
     try {
       if (next.view === 'workspace') {
@@ -253,11 +290,11 @@
       }
 
       const fresh = await service.listWorkspaces();
-      if (generation !== navGeneration) return;
+      if (!nav.isCurrent(generation)) return;
       workspaces = fresh;
       if (next.view === 'storage') {
         rememberedRooms = await service.listRememberedRooms();
-        if (generation !== navGeneration) return;
+        if (!nav.isCurrent(generation)) return;
       }
       detail = undefined;
       activePath = undefined;
@@ -270,7 +307,7 @@
       if (push) history.pushState(null, '', next.view === 'open' ? '/open' : pathForRoute(next));
       await restoreDeskScroll(next);
     } catch (error) {
-      if (generation !== navGeneration) return;
+      if (!nav.isCurrent(generation)) return;
       errorMessage = error instanceof Error ? error.message : String(error);
       phase = 'error';
     }
@@ -285,9 +322,7 @@
       case 'open':
         return '/open';
       case 'workspace':
-        return next.filePath
-          ? `/app/w/${next.workspaceId}/${next.filePath}`
-          : `/app/w/${next.workspaceId}`;
+        return appWorkspaceUrl(next.workspaceId, next.filePath);
     }
   }
 
@@ -304,10 +339,10 @@
     workspaceId: string,
     filePath: string | undefined,
     push: boolean,
-    generation = ++navGeneration,
+    generation = nav.begin(),
   ): Promise<void> {
     const fresh = await service.getWorkspace(workspaceId);
-    if (generation !== navGeneration) return;
+    if (!nav.isCurrent(generation)) return;
     if (!fresh) {
       // Renders the "not on this device" recovery rather than a blank editor.
       detail = undefined;
@@ -318,7 +353,7 @@
     }
     const path = filePath ?? fresh.openPath;
     const body = await service.readBodyText(fresh.id, path);
-    if (generation !== navGeneration) return;
+    if (!nav.isCurrent(generation)) return;
     detail = fresh;
     activePath = path;
     bodyText = body;
@@ -327,7 +362,7 @@
     if (workspaces.length === 0) workspaces = await service.listWorkspaces();
     route = { view: 'workspace', workspaceId: fresh.id, filePath: path };
     phase = 'ready';
-    const url = `/app/w/${fresh.id}/${path}`;
+    const url = appWorkspaceUrl(fresh.id, path);
     if (push) history.pushState(null, '', url);
     else history.replaceState(null, '', url);
     await tick();
@@ -389,24 +424,33 @@
   // case we fall back to the workspace's default entry.
   async function onWorkspaceChanged(openPath?: string): Promise<void> {
     if (!detail) return;
-    const fresh = await service.getWorkspace(detail.id);
+    // A background refresh: it must be dropped by a navigation, never cancel
+    // one, and never write another workspace's entries over the open document
+    // (attn-1l2f.2).
+    const pending: PendingWorkspaceRead = { token: nav.current(), workspaceId: detail.id };
+    const fresh = await service.getWorkspace(pending.workspaceId);
     if (!fresh) return;
+    if (!canApplyWorkspaceRead(nav, pending, detail?.id)) return;
     detail = fresh;
     // Keep the project switcher's labels current (workspace renames).
-    workspaces = await service.listWorkspaces();
+    const desk = await service.listWorkspaces();
+    if (!canApplyWorkspaceRead(nav, pending, detail?.id)) return;
+    workspaces = desk;
     const target =
       openPath ??
       (activePath && fresh.entries.some((entry) => entry.path === activePath)
         ? activePath
         : fresh.openPath);
     if (target !== activePath) {
-      bodyText = await service.readBodyText(fresh.id, target);
+      const body = await service.readBodyText(fresh.id, target);
+      if (!canApplyWorkspaceRead(nav, pending, detail?.id)) return;
+      bodyText = body;
       activePath = target;
     }
     isNewDraft = false;
     createIntent = undefined;
     route = { view: 'workspace', workspaceId: fresh.id, filePath: target };
-    history.replaceState(null, '', `/app/w/${fresh.id}/${target}`);
+    history.replaceState(null, '', appWorkspaceUrl(fresh.id, target));
   }
 
   // Follow cross-tab durable changes. Content/structure keep a read-only
@@ -435,9 +479,13 @@
   async function refreshActiveBody(workspaceId: string): Promise<void> {
     const path = activePath;
     if (!path) return;
+    const pending: PendingWorkspaceRead = { token: nav.current(), workspaceId };
     const body = await service.readBodyText(workspaceId, path).catch(() => null);
-    // Drop stale reads: the user may have switched files while we read.
-    if (body !== null && activePath === path) bodyText = body;
+    // Drop stale reads: the user may have switched files — or workspaces —
+    // while we read, and two workspaces routinely hold the same path name.
+    if (body === null || activePath !== path) return;
+    if (!canApplyWorkspaceRead(nav, pending, detail?.id)) return;
+    bodyText = body;
   }
 
   async function onImport(name: string, files: ImportFileInput[]): Promise<void> {

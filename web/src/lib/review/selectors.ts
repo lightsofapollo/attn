@@ -108,6 +108,9 @@ function compareEvents(a: ReviewEvent, b: ReviewEvent): number {
  *     `suggestionId`. Because resolve is reversible (attn-bb6t.4) these are
  *     folded as LAST-WRITER-WINS in event order, not "any close wins" — see
  *     `noteLifecycle` below.
+ *   * Only a comment thread reopens. A `CommentReopened` naming a thread
+ *     rooted by `suggestion_created` is dropped, so an accepted or rejected
+ *     suggestion stays decided (attn-1l2f.1).
  *   * `anchor` is the anchor authored on the root event; `null` only if
  *     the log was somehow built without a root comment.
  *   * `resolvedAnchor` is the latest verdict for the root event's id,
@@ -130,6 +133,16 @@ export function reconstructThreads(
   // same comparator that orders the log, and read its type at the end —
   // resolve → reopen → resolve lands on resolved from any arrival order.
   const lifecycleByThread = new Map<string, ReviewEvent>();
+
+  // Every id that a `suggestion_created` roots. Collected in a pre-pass because
+  // `events` is not sorted: a reopen can be read before the suggestion that
+  // gives the thread its kind.
+  const suggestionThreadIds = new Set<string>();
+  for (const event of events) {
+    if (event.body.type === 'suggestion_created') {
+      suggestionThreadIds.add(event.body.suggestionId);
+    }
+  }
 
   function noteLifecycle(threadId: string, event: ReviewEvent): void {
     const prev = lifecycleByThread.get(threadId);
@@ -167,6 +180,18 @@ export function reconstructThreads(
       event.body.type === 'comment_resolved'
       || event.body.type === 'comment_reopened'
     ) {
+      // Accept and reject are terminal — a suggestion has no reopen. A
+      // `comment_reopened` carrying a suggestion id (an older client, a
+      // mis-targeted chip, a replayed log) would otherwise win last-writer-
+      // wins and hand an already-decided suggestion its accept/reject
+      // actions back. Resolve still folds: it closes, which is the safe
+      // direction, and dropping it would reopen threads old logs closed.
+      if (
+        event.body.type === 'comment_reopened'
+        && suggestionThreadIds.has(event.body.threadId)
+      ) {
+        continue;
+      }
       noteLifecycle(event.body.threadId, event);
     } else if (
       event.body.type === 'suggestion_accepted'
@@ -200,6 +225,30 @@ export function reconstructThreads(
   // Stable order: by root createdAt so panel scroll order matches log order.
   threads.sort((a, b) => compareEvents(a.rootEvent, b.rootEvent));
   return threads;
+}
+
+// ---------------------------------------------------------------------------
+// Thread kind + lifecycle affordances
+// ---------------------------------------------------------------------------
+
+/**
+ * A thread's kind, read from its root event. A suggestion is a single-event
+ * thread keyed by `suggestionId`; everything else is rooted by a comment.
+ */
+export function threadKind(thread: Thread): 'comment' | 'suggestion' {
+  return thread.rootEvent.body.type === 'suggestion_created' ? 'suggestion' : 'comment';
+}
+
+/**
+ * Whether the Unresolve affordance belongs on this thread (attn-1l2f.1).
+ *
+ * Resolve is reversible (attn-bb6t.4); accept and reject are not. A suggestion
+ * reaches the resolved presentation through its terminal verdict, so offering
+ * Unresolve there would promise an inverse the protocol does not have — and
+ * `reconstructThreads` now drops the resulting event anyway.
+ */
+export function canReopenThread(thread: Thread): boolean {
+  return threadKind(thread) === 'comment';
 }
 
 // ---------------------------------------------------------------------------

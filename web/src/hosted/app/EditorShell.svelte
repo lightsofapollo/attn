@@ -6,6 +6,7 @@
     SAVE_STATE_SAVING,
     SAVE_STATE_STORAGE_ATTENTION,
   } from '../../lib/save-state-copy';
+  import { appWorkspaceUrl } from '../../lib/hosted/routes';
   import SaveChip from '../../lib/SaveChip.svelte';
   import BrandMark from '../../lib/BrandMark.svelte';
   import type { EditorView } from 'prosemirror-view';
@@ -810,7 +811,7 @@
         addingMarkdown = false;
         await onWorkspaceChanged(path);
       } else {
-        window.location.assign(`/app/w/${workspace.id}/${path}`);
+        window.location.assign(appWorkspaceUrl(workspace.id, path));
       }
     } catch (error) {
       railError = error instanceof Error ? error.message : String(error);
@@ -929,7 +930,7 @@
     try {
       await service.renameEntry(workspace.id, entry.path, target);
       if (onWorkspaceChanged) await onWorkspaceChanged(target);
-      else window.location.assign(`/app/w/${workspace.id}/${target}`);
+      else window.location.assign(appWorkspaceUrl(workspace.id, target));
     } catch (error) {
       railError = error instanceof Error ? error.message : String(error);
     }
@@ -944,7 +945,7 @@
     try {
       await service.deleteEntry(workspace.id, entry.path);
       if (onWorkspaceChanged) await onWorkspaceChanged();
-      else window.location.assign(`/app/w/${workspace.id}`);
+      else window.location.assign(appWorkspaceUrl(workspace.id));
     } catch (error) {
       railError = error instanceof Error ? error.message : String(error);
     }
@@ -2534,7 +2535,7 @@
   });
 
   function entryHref(entry: WorkspaceEntry): string {
-    return `/app/w/${workspace.id}/${entry.path}`;
+    return appWorkspaceUrl(workspace.id, entry.path);
   }
 
   /**
@@ -2552,7 +2553,7 @@
     if (!path || path === activeEntry?.path) return;
     await autosave?.flush();
     if (onSelectEntry) onSelectEntry(path);
-    else window.location.assign(`/app/w/${workspace.id}/${path}`);
+    else window.location.assign(appWorkspaceUrl(workspace.id, path));
   }
 
   function navigateDesktopTree(relativePath: string): void {

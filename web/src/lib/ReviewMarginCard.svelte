@@ -115,7 +115,9 @@
     onReject?: () => unknown | Promise<unknown>;
     /** Resolve handler — mints a CommentResolved event (attn-zhr). */
     onResolve?: () => void;
-    /** Unresolve handler — mints a CommentReopened event (attn-bb6t.5). */
+    /** Unresolve handler — mints a CommentReopened event (attn-bb6t.5).
+     *  Honored only on comment threads; a suggestion's accept/reject is
+     *  terminal and has no inverse (attn-1l2f.1). */
     onUnresolve?: () => void;
     /** Post a reply to this thread (attn-1rm). Parent wires it to
      *  reviewCreateComment with the root anchor + this thread id. */
@@ -345,6 +347,9 @@
   function handleUnresolve(e: MouseEvent): void {
     e.stopPropagation();
     if (readOnly && !reviewerAuthoring) return;
+    // A suggestion's resolved state is its verdict, and verdicts are terminal
+    // (attn-1l2f.1) — the button is absent for them, and so is the handler.
+    if (kind !== 'comment') return;
     if (onUnresolve) onUnresolve();
   }
 
@@ -613,7 +618,7 @@
            was one-way until `CommentReopened` existed, so "read-only" was
            a statement about the protocol, not a design choice. Clicking the
            card (or Escape) still shrinks it back to its chip. -->
-      {#if onUnresolve}
+      {#if onUnresolve && kind === 'comment'}
         <button
           type="button"
           class="rmc-btn"

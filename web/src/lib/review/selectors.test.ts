@@ -11,6 +11,8 @@
 
 import {
   ambiguousAnchors,
+  canReopenThread,
+  threadKind,
   partitionPeersBySnapshot,
   pickAmbiguousCandidate,
   reconstructThreads,
@@ -439,6 +441,105 @@ defineCase('suggestion terminals resolve only their matching suggestion thread',
     unresolvedThreadCount(threads) === 1,
     `one suggestion should remain unresolved, got ${unresolvedThreadCount(threads)}`,
   );
+});
+
+// attn-1l2f.1 — accept and reject are terminal. A `comment_reopened` naming a
+// suggestion id must not resurrect it, whatever order the log arrives in.
+defineCase('comment_reopened cannot resurrect an accepted suggestion', () => {
+  const suggestion = makeSuggestion('suggestion-accepted', 100);
+  const terminal = makeSuggestionTerminal('suggestion-accepted', 'accepted', 110);
+  const reopen = makeReopen('suggestion-accepted', 120);
+
+  const threads = reconstructThreads([suggestion, terminal, reopen], {});
+  const thread = threads.find((t) => t.id === 'suggestion-accepted');
+  assert(thread !== undefined, 'suggestion thread must still exist');
+  assert(
+    thread.resolved === true,
+    'an accepted suggestion must stay resolved after a stray reopen',
+  );
+  assert(
+    unresolvedThreadCount(threads) === 0,
+    `no thread should be unresolved, got ${unresolvedThreadCount(threads)}`,
+  );
+});
+
+defineCase('comment_reopened cannot resurrect a rejected suggestion', () => {
+  const suggestion = makeSuggestion('suggestion-rejected', 100);
+  const terminal = makeSuggestionTerminal('suggestion-rejected', 'rejected', 110);
+  const reopen = makeReopen('suggestion-rejected', 120);
+
+  const threads = reconstructThreads([suggestion, terminal, reopen], {});
+  assert(
+    threads.find((t) => t.id === 'suggestion-rejected')?.resolved === true,
+    'a rejected suggestion must stay resolved after a stray reopen',
+  );
+});
+
+defineCase('a reopen read BEFORE its suggestion is still dropped', () => {
+  // Replay and live delivery interleave: the reopen can be folded first.
+  const suggestion = makeSuggestion('suggestion-ooo', 100);
+  const terminal = makeSuggestionTerminal('suggestion-ooo', 'accepted', 110);
+  const reopen = makeReopen('suggestion-ooo', 120);
+
+  const threads = reconstructThreads([reopen, terminal, suggestion], {});
+  assert(
+    threads.find((t) => t.id === 'suggestion-ooo')?.resolved === true,
+    'out-of-order delivery must not change the verdict',
+  );
+});
+
+defineCase('dropping suggestion reopens does not affect comment threads', () => {
+  // The guard is keyed on the thread's root kind, not on the event: a comment
+  // and a suggestion sharing the log must still fold independently.
+  const comment = makeComment({
+    threadId: 'thread-comment',
+    createdAt: 100,
+    anchor: anchorOn(FILE_1, SNAP_A, 0, 4),
+  });
+  const resolved = makeResolve('thread-comment', 110);
+  const commentReopen = makeReopen('thread-comment', 120);
+  const suggestion = makeSuggestion('suggestion-terminal', 100);
+  const terminal = makeSuggestionTerminal('suggestion-terminal', 'accepted', 110);
+  const suggestionReopen = makeReopen('suggestion-terminal', 130);
+
+  const threads = reconstructThreads(
+    [comment, resolved, commentReopen, suggestion, terminal, suggestionReopen],
+    {},
+  );
+  assert(
+    threads.find((t) => t.id === 'thread-comment')?.resolved === false,
+    'the comment thread must still reopen',
+  );
+  assert(
+    threads.find((t) => t.id === 'suggestion-terminal')?.resolved === true,
+    'the suggestion must stay decided',
+  );
+});
+
+// The affordance rule and the projection rule are the same statement, so the
+// Unresolve button can never appear on a thread whose reopen would be dropped.
+defineCase('canReopenThread: comment yes, suggestion no', () => {
+  const threads = reconstructThreads(
+    [
+      makeComment({
+        threadId: 'thread-comment',
+        createdAt: 100,
+        anchor: anchorOn(FILE_1, SNAP_A, 0, 4),
+      }),
+      makeResolve('thread-comment', 110),
+      makeSuggestion('suggestion-decided', 100),
+      makeSuggestionTerminal('suggestion-decided', 'accepted', 110),
+    ],
+    {},
+  );
+  const comment = threads.find((t) => t.id === 'thread-comment');
+  const suggestion = threads.find((t) => t.id === 'suggestion-decided');
+  assert(comment !== undefined && suggestion !== undefined, 'both threads must exist');
+  assert(comment.resolved && suggestion.resolved, 'both must read as resolved');
+  assert(threadKind(comment) === 'comment', 'comment thread kind');
+  assert(threadKind(suggestion) === 'suggestion', 'suggestion thread kind');
+  assert(canReopenThread(comment), 'a resolved comment offers Unresolve');
+  assert(!canReopenThread(suggestion), 'a decided suggestion does not');
 });
 
 defineCase('ambiguousAnchors lists every ambiguous resolution by eventId', () => {

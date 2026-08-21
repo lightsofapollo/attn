@@ -64,6 +64,10 @@ export function createReviewCountingSink(): {
   const seen = new Set<string>();
   const openThreads = new Set<string>();
   const pending = new Set<string>();
+  // Ids rooted by a suggestion. Kept for the life of the fold (identity, not
+  // state) so a `comment_reopened` can never count a decided suggestion as an
+  // open comment — accept and reject are terminal.
+  const suggestionThreads = new Set<string>();
   let lastAuthorId: string | null = null;
   let lastActivityAt: number | null = null;
 
@@ -97,13 +101,19 @@ export function createReviewCountingSink(): {
           openThreads.delete(body.threadId);
           break;
         // Reopening puts the thread back in the open count (attn-bb6t.4).
-        // Safe to add unconditionally: the log always carries the
-        // comment_created that opened it, and the set is keyed by threadId.
+        // The log always carries the comment_created that opened it, and the
+        // set is keyed by threadId — but only a comment thread can reopen, so
+        // a suggestion id here is ignored rather than counted.
         case 'comment_reopened':
-          openThreads.add(body.threadId);
+          if (!suggestionThreads.has(body.threadId)) openThreads.add(body.threadId);
           break;
         case 'suggestion_created':
           pending.add(body.suggestionId);
+          // Events can arrive out of order: a reopen read before its
+          // suggestion would have already leaked the id into the comment
+          // count. A suggestion id is never an open comment thread.
+          suggestionThreads.add(body.suggestionId);
+          openThreads.delete(body.suggestionId);
           break;
         case 'suggestion_accepted':
         case 'suggestion_rejected':

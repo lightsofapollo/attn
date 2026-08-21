@@ -4,6 +4,8 @@
   import { expandPicked, prepareImport } from './import-files';
   import { filesToPicked, type DroppedFile } from './file-drop';
   import { autofocus } from '../../lib/hosted/autofocus';
+  import { appWorkspaceUrl } from '../../lib/hosted/routes';
+  import { deskEnterOpensSelection } from './desk-keys';
   import { parseInviteUrl } from '../../lib/hosted/invite-url';
   import type { ImportFileInput, SharingState, StorageHealth, WorkspaceSummary } from './types';
 
@@ -95,10 +97,15 @@
     /* Enter opens the selection from anywhere the arrows can move it
        (attn-a9f7.1.1). This used to require focus in the filter field, so the
        advertised path — press ↓, press Enter — did nothing on a cold desk, and
-       the keyboard model stopped one keystroke short of its own payoff. The
-       gate now matches the arrow gate exactly. */
+       the keyboard model stopped one keystroke short of its own payoff.
+
+       It cannot borrow the arrow gate wholesale, though (attn-1l2f.4): the
+       handler is on the window, and Enter is how every control on a row is
+       activated. Matching the arrow gate meant a focused Rename or Delete
+       button answered Enter by opening the selected workspace instead. So
+       Enter is the desk's only when no control is holding it. */
     if (event.key === 'Enter' && selectedIndex >= 0 && !confirmingDeleteId) {
-      if (!typingInField(event.target) || event.target === filterInput) {
+      if (deskEnterOpensSelection(event.target as HTMLElement | null, filterInput)) {
         const target = visibleWorkspaces[selectedIndex];
         if (!target) return;
         event.preventDefault();
@@ -469,7 +476,7 @@
             onblur={() => void commitRename()}
           />
         {:else}
-          <a class="row-open" href={`/app/w/${workspace.id}/${workspace.openPath}`}>
+          <a class="row-open" href={appWorkspaceUrl(workspace.id, workspace.openPath)}>
             <strong>{workspace.name}</strong>
           </a>
         {/if}

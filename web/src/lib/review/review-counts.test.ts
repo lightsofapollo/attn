@@ -66,6 +66,28 @@ const anchor = {} as never;
   check('reopening twice does not double-count', sink.counts().openComments, 1);
 }
 
+// Only a comment thread reopens (attn-1l2f.1). A `comment_reopened` carrying a
+// suggestion id must not inflate the open-comment badge with an edit the owner
+// already decided.
+{
+  const sink = createReviewCountingSink();
+  sink.applyEvent(event({ type: 'suggestion_created', suggestionId: 's1', anchor, operation: anchor } as ReviewEventBody));
+  sink.applyEvent(event({ type: 'suggestion_accepted', suggestionId: 's1', appliedRevisionId: 'r1' } as ReviewEventBody));
+  sink.applyEvent(event({ type: 'comment_reopened', threadId: 's1' } as ReviewEventBody));
+  check('a reopen naming a suggestion is not an open comment', sink.counts().openComments, 0);
+  check('and does not put the suggestion back in pending', sink.counts().pendingSuggestions, 0);
+}
+
+// Events arrive out of order across replay and live delivery, so the guard
+// cannot depend on having seen the suggestion first.
+{
+  const sink = createReviewCountingSink();
+  sink.applyEvent(event({ type: 'comment_reopened', threadId: 's1' } as ReviewEventBody));
+  sink.applyEvent(event({ type: 'suggestion_created', suggestionId: 's1', anchor, operation: anchor } as ReviewEventBody));
+  check('a suggestion id leaked by an early reopen is reclaimed', sink.counts().openComments, 0);
+  check('the suggestion still counts as pending', sink.counts().pendingSuggestions, 1);
+}
+
 // Pending suggestions are created minus accepted OR rejected — a rejected
 // suggestion is no longer waiting on the owner, which is what the row means.
 {

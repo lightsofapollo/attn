@@ -63,6 +63,24 @@ export type AppRoute =
   | { view: 'workspace'; workspaceId: string; filePath: string | undefined };
 
 /**
+ * Build the canonical URL for a workspace route (attn-1l2f.3).
+ *
+ * Every `/app/w/…` URL the app writes must come through here. Entry paths are
+ * only constrained by `normalizeEntryPath`, which allows `#`, `?`, `%`, spaces
+ * and unicode — all legal in a filename and all meaningful in a URL. Written
+ * raw, `draft#1.md` becomes a fragment and `plan?.md` a query string, so a
+ * reload or a copied link reopens the wrong document or none at all.
+ *
+ * `parseAppRoute` already decodes per segment, so this is the encoding half of
+ * a round-trip that was previously only half-implemented.
+ */
+export function appWorkspaceUrl(workspaceId: string, filePath?: string): string {
+  const base = `/app/w/${encodeURIComponent(workspaceId)}`;
+  if (filePath === undefined || filePath.length === 0) return base;
+  return `${base}/${filePath.split('/').map(encodeURIComponent).join('/')}`;
+}
+
+/**
  * Parse a deep path owned by the app entry. Workspaces are folder-shaped, so
  * everything after the workspace id is a normalized relative file path that
  * may contain nested segments (`/app/w/:workspaceId/docs/notes.md`).

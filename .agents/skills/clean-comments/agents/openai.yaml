@@ -1,0 +1,7 @@
+interface:
+  display_name: "Clean Comments"
+  short_description: "Delete agent commentary, keep the comments that earn their place"
+  default_prompt: "Use /clean-comments to clean comments in this diff, check without editing, or install the comment rules."
+
+policy:
+  allow_implicit_invocation: true

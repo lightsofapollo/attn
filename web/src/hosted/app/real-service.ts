@@ -353,6 +353,10 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
     await this.service.yieldOwnerRuntime(workspaceId);
   }
 
+  async closeEditingRuntime(workspaceId: string): Promise<void> {
+    await this.service.closeOwnerRuntime(workspaceId);
+  }
+
   async requestWriterHandoff(
     workspaceId: string,
     intent: 'interaction' | 'focus' = 'interaction',
@@ -458,6 +462,7 @@ export class RealWorkspaceAppService implements WorkspaceAppService {
       announceProfile: () => runtime.announceProfile(),
       replyToComment: (anchor, body, threadId) => runtime.replyToComment(anchor, body, threadId),
       resolveComment: (threadId) => runtime.resolveComment(threadId),
+      reopenComment: (threadId) => runtime.reopenComment(threadId),
       retryReviewOutbox: () => runtime.retryOutbox(),
       recoverReview: () => runtime.recoverReview(),
       inspectShare: () => runtime.inspectShare(browserReviewBase()),

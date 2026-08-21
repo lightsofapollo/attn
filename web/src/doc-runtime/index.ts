@@ -42,6 +42,7 @@ import { RUNTIME_STYLES } from './styles';
 
 const HIGHLIGHT_BUCKET = 'attn-text';
 const HIGHLIGHT_ACTIVE_BUCKET = 'attn-text-active';
+const HIGHLIGHT_HOVER_BUCKET = 'attn-text-hover';
 /** Context captured either side of a selection, for later disambiguation. */
 const CONTEXT_CHARS = 64;
 
@@ -391,7 +392,81 @@ function scheduleHide(): void {
   }, HOVER_GRACE_MS) as unknown as number;
 }
 
+// ---------------------------------------------------------------------------
+// Anchor hover → shell (attn-bb6t.3)
+// ---------------------------------------------------------------------------
+
+/** Last anchor reported to the shell, so we only send on transitions. */
+let lastHoverAnchorId: string | null = null;
+
+/**
+ * Which committed anchor, if any, is under the pointer.
+ *
+ * Text ranges are checked before elements because a range is always the more
+ * specific target: commenting on a phrase inside an already-commented block is
+ * exactly the nesting the annotation model supports, and reporting the block
+ * there would light up the wrong card.
+ *
+ * A CSS Custom Highlight is not a DOM node and receives no events, so a text
+ * range can only be hit-tested geometrically — hence `getClientRects()` rather
+ * than a listener. Both coordinate spaces are the frame's viewport.
+ */
+function anchorAtPoint(event: MouseEvent, target: Element | null): string | null {
+  // The pin hangs outside the element it belongs to, so hit-test chrome first.
+  const chrome = target?.closest<HTMLElement>('[data-anchor-id]');
+  if (chrome?.dataset.anchorId) return chrome.dataset.anchorId;
+
+  const x = event.clientX;
+  const y = event.clientY;
+  for (const anchor of anchors.values()) {
+    if (anchor.spec.html.target !== 'text_range' || !anchor.range) continue;
+    for (const rect of anchor.range.getClientRects()) {
+      if (x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom) {
+        return anchor.spec.anchorId;
+      }
+    }
+  }
+
+  if (target) {
+    // Innermost wins when element anchors nest.
+    let best: { id: string; depth: number } | null = null;
+    for (const anchor of anchors.values()) {
+      if (anchor.spec.html.target !== 'element' || !anchor.element) continue;
+      if (!anchor.element.contains(target)) continue;
+      let depth = 0;
+      for (let node: Element | null = anchor.element; node; node = node.parentElement) depth += 1;
+      if (!best || depth > best.depth) best = { id: anchor.spec.anchorId, depth };
+    }
+    if (best) return best.id;
+  }
+  return null;
+}
+
+/**
+ * Report anchor hover to the shell. Runs before the inspect gate in
+ * `onPointerMove` on purpose: lighting up the card for the segment you are
+ * pointing at is reading affordance, not authoring, so it must work on a
+ * document whose click-to-comment mode is off.
+ */
+function reportAnchorHover(event: MouseEvent): void {
+  if (anchors.size === 0 && lastHoverAnchorId === null) return;
+  const target = event.target instanceof Element ? event.target : null;
+  const anchorId = anchorAtPoint(event, target);
+  if (anchorId === lastHoverAnchorId) return;
+  lastHoverAnchorId = anchorId;
+  send({ type: 'anchorHover', v: DOC_PROTOCOL_VERSION, anchorId });
+}
+
+/** Pointer left the document — nothing is hovered any more. */
+function clearAnchorHover(): void {
+  if (lastHoverAnchorId === null) return;
+  lastHoverAnchorId = null;
+  send({ type: 'anchorHover', v: DOC_PROTOCOL_VERSION, anchorId: null });
+}
+
 function onPointerMove(event: MouseEvent): void {
+  reportAnchorHover(event);
+
   // A document that cannot take a comment gets no hover chrome at all. The
   // chip is opaque and clickable and is painted OVER the page, so showing it on
   // a document that is merely being read would occlude — and swallow clicks on
@@ -653,12 +728,16 @@ function repaintHighlights(): void {
   if (!highlights || typeof Highlight === 'undefined') return;
   const base: Range[] = [];
   const active: Range[] = [];
+  const hovered: Range[] = [];
   for (const anchor of anchors.values()) {
     if (anchor.spec.html.target !== 'text_range' || !anchor.range) continue;
-    (anchor.spec.state === 'active' ? active : base).push(anchor.range);
+    if (anchor.spec.state === 'active') active.push(anchor.range);
+    else if (anchor.spec.state === 'hovered') hovered.push(anchor.range);
+    else base.push(anchor.range);
   }
   highlights.set(HIGHLIGHT_BUCKET, new Highlight(...base));
   highlights.set(HIGHLIGHT_ACTIVE_BUCKET, new Highlight(...active));
+  highlights.set(HIGHLIGHT_HOVER_BUCKET, new Highlight(...hovered));
 }
 
 /**
@@ -680,6 +759,7 @@ function paintElementAnchor(anchor: LiveAnchor): void {
   const overlay = document.createElement('div');
   overlay.className = 'attn-overlay';
   overlay.dataset.state = anchor.spec.state;
+  overlay.dataset.anchorId = anchor.spec.anchorId;
   overlay.style.cssText = `top:${top}px;left:${left}px;width:${rect.width}px;height:${rect.height}px`;
   layer.appendChild(overlay);
   anchor.overlay = overlay;
@@ -690,6 +770,7 @@ function paintElementAnchor(anchor: LiveAnchor): void {
   pin.type = 'button';
   pin.className = 'attn-pin';
   pin.dataset.state = anchor.spec.state;
+  pin.dataset.anchorId = anchor.spec.anchorId;
   pin.textContent = anchor.spec.label ?? '1';
   pin.style.cssText = `top:${top - 10}px;left:${left - 14}px`;
   pin.addEventListener('click', (event) => {
@@ -960,6 +1041,9 @@ function boot(): void {
   document.addEventListener('click', onDocumentClick, true);
   // Leaving the document entirely is unambiguous; no grace period needed.
   document.documentElement.addEventListener('mouseleave', hideHover);
+  // The same exit must clear anchor hover, or the shell's card stays lit after
+  // the cursor has left the frame (attn-bb6t.3).
+  document.documentElement.addEventListener('mouseleave', clearAnchorHover);
   window.addEventListener('scroll', scheduleReflow, { passive: true });
   window.addEventListener('resize', scheduleReflow, { passive: true });
   new ResizeObserver(scheduleReflow).observe(document.body);

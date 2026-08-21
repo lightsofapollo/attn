@@ -60,6 +60,7 @@
     RESOLVED_CHIP_HEIGHT,
   } from './review/rail-mode';
   import { reviewStore } from './review/store.svelte';
+  import { canReopenThread, threadKind } from './review/selectors';
   import { createFrameInvalidator } from './review/frame-invalidator';
   import { nearestScrollableAncestor } from './scroll-viewport';
   import {
@@ -67,11 +68,14 @@
     shouldDismissSuggestionAfterAction,
     type SuggestionActionPort,
   } from './review/suggestion-action-port';
+  import CheckIcon from '@lucide/svelte/icons/check';
+
   import { isThreadActive } from './review/thread-visibility';
   import {
     reviewAcceptSuggestion,
     reviewCreateComment,
     reviewRejectSuggestion,
+    reviewReopenComment,
     reviewResolveComment,
   } from './ipc';
   import type {
@@ -118,6 +122,8 @@
      */
     suggestionActions?: SuggestionActionPort<Thread>;
     onResolveComment?: (threadId: string) => Promise<void> | void;
+    /** Hosted reopen authority (attn-bb6t.5). Same shape/gating as resolve. */
+    onReopenComment?: (threadId: string) => Promise<void> | void;
     onReplyComment?: (anchor: Anchor, body: string, threadId: string) => Promise<void> | void;
   }
 
@@ -131,6 +137,7 @@
     reviewerAuthoring = false,
     suggestionActions,
     onResolveComment,
+    onReopenComment,
     onReplyComment,
   }: Props = $props();
 
@@ -541,6 +548,32 @@
     }
   }
 
+  /**
+   * Reopen a resolved thread (attn-bb6t.5) — the mirror of `resolveThread`,
+   * down to the optimism: restore the card locally so the click lands before
+   * the `CommentReopened` echo, and leave the resolved card in place on
+   * failure so the user can retry.
+   */
+  async function unresolveThread(t: Thread): Promise<void> {
+    // Only a comment thread reopens (attn-1l2f.1). Accepted and rejected
+    // suggestions read as `resolved` too, and reopening one would resurrect
+    // an already-applied edit with its Accept/Reject actions intact.
+    if (!canUnresolve(t)) return;
+    const threadId = t.id;
+    const roomId = reviewStore.currentRoomId;
+    if (!roomId) return;
+    try {
+      if (onReopenComment) await onReopenComment(threadId);
+      else await reviewReopenComment(roomId, threadId);
+      reviewStore.restoreThreadLocally(threadId);
+      // The thread is open again, so its expanded-resolved presentation is
+      // over; leaving it latched would keep the card in read-only mode.
+      reviewStore.collapseResolvedThread();
+    } catch {
+      // Same as resolve: the transport surfaces its own error, the card stays.
+    }
+  }
+
   const nativeSuggestionActions: SuggestionActionPort<Thread> = {
     accept: async (thread) => {
       const root = thread.rootEvent.body;
@@ -869,7 +902,16 @@
   }
 
   function kindFor(t: Thread): 'comment' | 'suggestion' {
-    return t.rootEvent.body.type === 'suggestion_created' ? 'suggestion' : 'comment';
+    return threadKind(t);
+  }
+
+  /** Resolve is reversible; accept and reject are not. A suggestion reaches
+   *  the resolved presentation through its terminal verdict, so its card gets
+   *  no Unresolve — the protocol has no inverse to offer (attn-1l2f.1). The
+   *  rule lives in the pure layer so the projection and the affordance can
+   *  never disagree. */
+  function canUnresolve(t: Thread): boolean {
+    return canReopenThread(t);
   }
 
   /** The initiating author's participant kind — drives the per-user color
@@ -908,10 +950,6 @@
       return 'remapped_moved';
     }
     return 'open';
-  }
-
-  function quotePreviewFor(t: Thread): string {
-    return t.anchor?.quote?.exact ?? '';
   }
 
   function activateThread(t: Thread): void {
@@ -1019,7 +1057,7 @@
           aria-expanded="false"
           onclick={() => { void expandResolved(t); }}
         >
-          ✓
+          <CheckIcon size={14} strokeWidth={2.5} aria-hidden="true" />
         </button>
       {/if}
     {/each}
@@ -1049,7 +1087,6 @@
               authorName={authorNameFor(t)}
               authorId={t.rootEvent.meta.authorId}
               authorKind={authorKindFor(t)}
-              quotePreview={quotePreviewFor(t)}
               onActivate={() => activateThread(t)}
               onAccept={suggestionActionPort.accept ? () => acceptSuggestion(t) : undefined}
               onReject={suggestionActionPort.reject ? () => rejectSuggestion(t) : undefined}
@@ -1087,7 +1124,6 @@
               authorName={authorNameFor(t)}
               authorId={t.rootEvent.meta.authorId}
               authorKind={authorKindFor(t)}
-              quotePreview={quotePreviewFor(t)}
               onActivate={() => activateThread(t)}
               onAccept={suggestionActionPort.accept ? () => acceptSuggestion(t) : undefined}
               onReject={suggestionActionPort.reject ? () => rejectSuggestion(t) : undefined}
@@ -1108,8 +1144,8 @@
               authorName={authorNameFor(t)}
               authorId={t.rootEvent.meta.authorId}
               authorKind={authorKindFor(t)}
-              quotePreview={quotePreviewFor(t)}
               onActivate={() => { void collapseResolved(t); }}
+              onUnresolve={canUnresolve(t) ? () => { void unresolveThread(t); } : undefined}
             />
           {:else}
             <button
@@ -1131,8 +1167,8 @@
               <!-- Tick only, no "resolved" word (attn-bw2h.3) — the word
                    restated the glyph. The button's aria-label already
                    says "Resolved …", so AT is not relying on the tick. -->
-              <span class="rmrc-tick" aria-hidden="true">✓</span>
-              {authorNameFor(t)}
+              <CheckIcon class="rmrc-tick" size={13} strokeWidth={2.5} aria-hidden="true" />
+              <span class="rmrc-name">{authorNameFor(t)}</span>
             </button>
           {/if}
         </li>
@@ -1165,9 +1201,8 @@
           hovered={hoveredEventId === t.rootEvent.meta.eventId}
           offset={p.offset}
           authorName={authorNameFor(t)}
-              authorId={t.rootEvent.meta.authorId}
+          authorId={t.rootEvent.meta.authorId}
           authorKind={authorKindFor(t)}
-          quotePreview={quotePreviewFor(t)}
           onActivate={() => activateThread(t)}
           onAccept={suggestionActionPort.accept ? () => acceptSuggestion(t) : undefined}
           onReject={suggestionActionPort.reject ? () => rejectSuggestion(t) : undefined}
@@ -1177,10 +1212,10 @@
         />
       </div>
     {:else if t && t.id === expandedResolvedId}
-      <!-- Expanded resolved thread: full read-only card. No action row
-           (attn-42y removed the Collapse button — the rail itself
-           collapses now); clicking the card or pressing Escape shrinks
-           it back to its chip. -->
+      <!-- Expanded resolved thread: full card carrying a single action,
+           Unresolve (attn-bb6t.5). attn-42y removed the Collapse button —
+           the rail itself collapses — so clicking the card or pressing
+           Escape still shrinks it back to its chip. -->
       <div class="review-margin-slot" style="top: {p.top}px;">
         <ReviewMarginCard
           {readOnly}
@@ -1192,10 +1227,10 @@
           hovered={hoveredEventId === t.rootEvent.meta.eventId}
           offset={p.offset}
           authorName={authorNameFor(t)}
-              authorId={t.rootEvent.meta.authorId}
+          authorId={t.rootEvent.meta.authorId}
           authorKind={authorKindFor(t)}
-          quotePreview={quotePreviewFor(t)}
           onActivate={() => { void collapseResolved(t); }}
+          onUnresolve={canUnresolve(t) ? () => { void unresolveThread(t); } : undefined}
         />
       </div>
     {:else if t}
@@ -1221,8 +1256,8 @@
         >{avatarGlyphFor(t)}</span>
         <!-- Tick only, no "resolved" word (attn-bw2h.3) — see the stacked
              chip above; the aria-label carries the state for AT. -->
-        <span class="rmrc-tick" aria-hidden="true">✓</span>
-        {authorNameFor(t)}
+        <CheckIcon class="rmrc-tick" size={13} strokeWidth={2.5} aria-hidden="true" />
+        <span class="rmrc-name">{authorNameFor(t)}</span>
       </button>
     {/if}
   {/each}
@@ -1368,10 +1403,13 @@
     gap: 10px;
   }
 
+  /* Stacked (mobile) rail: static flow, so the absolute insets above do
+     nothing — `stretch` is what makes it span the column here, matching the
+     docked rail (attn-bb6t.5). */
   .review-margin-resolved-chip.stacked {
     position: static;
     max-width: 100%;
-    align-self: flex-start;
+    align-self: stretch;
   }
 
   .review-margin-resolved-pill.stacked {
@@ -1383,16 +1421,23 @@
 
   /* Resolved chip (attn-d7y). Labeled pill at its anchor in the expanded
      rail; icon-only square centered in the collapsed gutter. */
+  /* The labeled chip spans the rail (attn-bb6t.5). It used to hug its
+     content, which left a resolved thread reading as a small tag floating
+     in an empty column — visually unrelated to the full-width cards it sits
+     among. Stretching it to the same 12px insets as a card makes the rail
+     one consistent column whether a thread is open or resolved. The icon
+     variant below opts back out; it lives in the 48px gutter, where there
+     is no width to span. */
   .review-margin-resolved-chip {
     position: absolute;
     left: 12px;
+    right: 12px;
     z-index: 1;
-    display: inline-flex;
+    display: flex;
     align-items: center;
-    gap: 4px;
+    gap: 6px;
     box-sizing: border-box;
     height: 28px;
-    max-width: calc(100% - 24px);
     padding: 0 10px;
     /* Backdrop-aware, not `--muted`: the docked rail paints `--panel-surface`,
        which in ink sits 0.003 off `--muted` and erased this chip's fill. */
@@ -1428,13 +1473,20 @@
     line-height: 1;
   }
 
-  /* Resolution tick in the labeled chip. Slightly larger than the label
-     text so it reads as a mark rather than a character, and never
-     shrinks when the author name ellipsises. */
-  .rmrc-tick {
+  /* Resolution tick in the labeled chip — a Lucide check (attn-bb6t.5),
+     matching the card's meta tick. Never shrinks when the author name
+     ellipsises. */
+  :global(.rmrc-tick) {
     flex-shrink: 0;
-    font-size: 0.78rem;
-    line-height: 1;
+    display: block;
+  }
+
+  /* The author name is the only part allowed to ellipsis, so it absorbs
+     the squeeze now that the chip is full-width. */
+  .rmrc-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   /* Icon variant takes the author's presence color via a custom property
@@ -1442,6 +1494,7 @@
      :hover foreground flip below can still win (attn-2aj). */
   .review-margin-resolved-chip[data-variant='icon'] {
     left: 50%;
+    right: auto;
     transform: translateX(-50%);
     width: 28px;
     max-width: none;

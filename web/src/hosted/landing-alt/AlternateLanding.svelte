@@ -1,6 +1,6 @@
 <script lang="ts">
   import BrandMark from '../../lib/BrandMark.svelte';
-  import { getTheme, toggleTheme } from '../theme.svelte';
+  import { cycleTheme, getTheme } from '../theme.svelte';
   import ReviewDemo from './ReviewDemo.svelte';
   import './alternate-landing.css';
 </script>
@@ -28,14 +28,15 @@
       <a href="#how">How it works</a>
       <a href="#private">Privacy</a>
       <a href="https://github.com/lightsofapollo/attn">GitHub</a>
-      <button class="alt-theme" type="button" onclick={toggleTheme} aria-label="Toggle theme">
+      <button class="alt-theme" type="button" onclick={cycleTheme} aria-label="Change appearance">
         {#if getTheme() === 'dark'}
           <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4.5" /><path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" /></svg>
         {:else}
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20.5 15.2A9 9 0 0 1 8.8 3.5 9 9 0 1 0 20.5 15.2Z" /></svg>
         {/if}
       </button>
-      <a class="alt-nav-cta" href="/app#new">Open attn <span aria-hidden="true">→</span></a>
+      <!-- "Open attn" opens attn; it does not mint a blank file (user ruling). -->
+      <a class="alt-nav-cta" href="/app">Open attn <span aria-hidden="true">→</span></a>
     </div>
   </nav>
 
@@ -80,7 +81,9 @@
       <ReviewDemo />
       <div class="try-after">
         <p>That was the product. No tour required.</p>
-        <a href="/app#new">Start with a real document <span aria-hidden="true">→</span></a>
+        <!-- This one was an outright false promise: `#new` gives you an EMPTY
+             document, which is the opposite of what the link says. -->
+        <a href="/open">Start with a real document <span aria-hidden="true">→</span></a>
       </div>
     </section>
 

@@ -114,7 +114,7 @@
       {/each}
     </ul>
     <div class="cmdk-foot">
-      <span><kbd>↑↓</kbd> navigate</span><span><kbd>↵</kbd> run</span><span><kbd>esc</kbd> close</span>
+      <span><kbd class="kbd-chip">↑↓</kbd> navigate</span><span><kbd class="kbd-chip">↵</kbd> run</span><span><kbd class="kbd-chip">esc</kbd> close</span>
     </div>
   </div>
 {/if}
@@ -182,13 +182,5 @@
     border-top: 1px solid var(--rule);
     font: 500 0.75rem var(--sans);
     color: var(--hosted-muted);
-  }
-  kbd {
-    font: 600 0.75rem var(--sans);
-    padding: 1px 5px;
-    border: 1px solid var(--rule);
-    border-bottom-width: 2px;
-    border-radius: 6px;
-    background: var(--paper);
   }
 </style>

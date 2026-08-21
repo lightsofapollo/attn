@@ -1,4 +1,5 @@
 import { createReviewCountingSink, EMPTY_REVIEW_COUNTS } from './review-counts';
+import { reconstructThreads } from './selectors';
 import type { ReviewEvent, ReviewEventBody } from '../types';
 
 let failures = 0;
@@ -54,6 +55,40 @@ const anchor = {} as never;
   check('resolving the same thread twice does not go negative', sink.counts().openComments, 1);
 }
 
+// Reopening puts the thread back in the open count (attn-bb6t.4).
+{
+  const sink = createReviewCountingSink();
+  sink.applyEvent(event({ type: 'comment_created', threadId: 't1', anchor, body: 'a' } as ReviewEventBody));
+  sink.applyEvent(event({ type: 'comment_resolved', threadId: 't1' } as ReviewEventBody));
+  check('resolved thread leaves the open count', sink.counts().openComments, 0);
+  sink.applyEvent(event({ type: 'comment_reopened', threadId: 't1' } as ReviewEventBody));
+  check('reopening restores the open count', sink.counts().openComments, 1);
+  sink.applyEvent(event({ type: 'comment_reopened', threadId: 't1' } as ReviewEventBody));
+  check('reopening twice does not double-count', sink.counts().openComments, 1);
+}
+
+// Only a comment thread reopens (attn-1l2f.1). A `comment_reopened` carrying a
+// suggestion id must not inflate the open-comment badge with an edit the owner
+// already decided.
+{
+  const sink = createReviewCountingSink();
+  sink.applyEvent(event({ type: 'suggestion_created', suggestionId: 's1', anchor, operation: anchor } as ReviewEventBody));
+  sink.applyEvent(event({ type: 'suggestion_accepted', suggestionId: 's1', appliedRevisionId: 'r1' } as ReviewEventBody));
+  sink.applyEvent(event({ type: 'comment_reopened', threadId: 's1' } as ReviewEventBody));
+  check('a reopen naming a suggestion is not an open comment', sink.counts().openComments, 0);
+  check('and does not put the suggestion back in pending', sink.counts().pendingSuggestions, 0);
+}
+
+// Events arrive out of order across replay and live delivery, so the guard
+// cannot depend on having seen the suggestion first.
+{
+  const sink = createReviewCountingSink();
+  sink.applyEvent(event({ type: 'comment_reopened', threadId: 's1' } as ReviewEventBody));
+  sink.applyEvent(event({ type: 'suggestion_created', suggestionId: 's1', anchor, operation: anchor } as ReviewEventBody));
+  check('a suggestion id leaked by an early reopen is reclaimed', sink.counts().openComments, 0);
+  check('the suggestion still counts as pending', sink.counts().pendingSuggestions, 1);
+}
+
 // Pending suggestions are created minus accepted OR rejected — a rejected
 // suggestion is no longer waiting on the owner, which is what the row means.
 {
@@ -104,6 +139,80 @@ const anchor = {} as never;
   sink.applyEvent(event({ type: 'comment_created', threadId: 't1', anchor, body: 'a' } as ReviewEventBody, { at: 400 }));
   sink.applyEvent(event({ type: 'comment_created', threadId: 't2', anchor, body: 'b' } as ReviewEventBody, { at: 200 }));
   check('older event does not rewind lastActivityAt', sink.counts().lastActivityAt, 400);
+}
+
+// Delivery order is not log order (attn-e9r2.4). Replay and live delivery
+// interleave peers, so a NEWER reopen can arrive before the OLDER resolve it
+// supersedes. Folding in arrival order left the thread closed here while the
+// rail — which folds last-writer-wins — showed it open, so the desk badge
+// disagreed with the surface it links to. The rail is the reference: every
+// case below asserts the count equals what `reconstructThreads` reconstructs
+// from the same events.
+function openCommentsPerRail(events: ReviewEvent[]): number {
+  return reconstructThreads(events, {}).filter((thread) => !thread.resolved).length;
+}
+
+function feed(events: ReviewEvent[]): ReturnType<typeof createReviewCountingSink> {
+  const sink = createReviewCountingSink();
+  for (const item of events) sink.applyEvent(item);
+  return sink;
+}
+
+{
+  // The reopen is newer (t=3) but lands first; the resolve it supersedes
+  // arrives late.
+  const events = [
+    event({ type: 'comment_created', threadId: 't1', anchor, body: 'a' } as ReviewEventBody, { id: 'a', at: 1 }),
+    event({ type: 'comment_reopened', threadId: 't1' } as ReviewEventBody, { id: 'c', at: 3 }),
+    event({ type: 'comment_resolved', threadId: 't1' } as ReviewEventBody, { id: 'b', at: 2 }),
+  ];
+  check('a late older resolve does not close a reopened thread', feed(events).counts().openComments, 1);
+  check('and the rail agrees', openCommentsPerRail(events), 1);
+}
+
+{
+  // Same three events in log order: the resolve is newest and wins.
+  const events = [
+    event({ type: 'comment_created', threadId: 't1', anchor, body: 'a' } as ReviewEventBody, { id: 'a', at: 1 }),
+    event({ type: 'comment_reopened', threadId: 't1' } as ReviewEventBody, { id: 'b', at: 2 }),
+    event({ type: 'comment_resolved', threadId: 't1' } as ReviewEventBody, { id: 'c', at: 3 }),
+  ];
+  check('a newer resolve closes a reopened thread', feed(events).counts().openComments, 0);
+  check('and the rail agrees', openCommentsPerRail(events), 0);
+}
+
+{
+  // Same wall clock on both sides of the decision: event id is the tiebreak,
+  // and it has to be the SAME tiebreak the rail uses or the two disagree on
+  // exactly the events a fast reviewer generates.
+  const events = [
+    event({ type: 'comment_created', threadId: 't1', anchor, body: 'a' } as ReviewEventBody, { id: 'a', at: 1 }),
+    event({ type: 'comment_reopened', threadId: 't1' } as ReviewEventBody, { id: 'z-reopen', at: 9 }),
+    event({ type: 'comment_resolved', threadId: 't1' } as ReviewEventBody, { id: 'a-resolve', at: 9 }),
+  ];
+  check('same-timestamp lifecycle breaks the tie by event id', feed(events).counts().openComments, 1);
+  check('and the rail agrees', openCommentsPerRail(events), 1);
+}
+
+{
+  // A thread nobody ever opened is not an open comment. The count is rooted in
+  // `comment_created`, exactly like the rail's thread list — a stray reopen
+  // (an older client, a replayed log) cannot invent a thread out of nothing.
+  const events = [
+    event({ type: 'comment_reopened', threadId: 'ghost' } as ReviewEventBody, { id: 'a', at: 1 }),
+  ];
+  check('a reopen with no thread behind it counts nothing', feed(events).counts().openComments, 0);
+  check('and the rail agrees', openCommentsPerRail(events), 0);
+}
+
+{
+  // A suggestion decided out of order: the accept is newer than the create it
+  // answers, but arrives first. Arrival-order folding put it back in pending.
+  const sink = feed([
+    event({ type: 'suggestion_accepted', suggestionId: 's1', appliedRevisionId: 'r1' } as ReviewEventBody, { id: 'b', at: 2 }),
+    event({ type: 'suggestion_created', suggestionId: 's1', anchor, operation: anchor } as ReviewEventBody, { id: 'a', at: 1 }),
+  ]);
+  check('a late suggestion_created does not un-decide the suggestion', sink.counts().pendingSuggestions, 0);
 }
 
 console.log(`review-counts: ${failures === 0 ? 'all cases passed' : `${failures} failed`}`);

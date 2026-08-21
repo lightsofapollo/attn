@@ -39,22 +39,34 @@ export const SHARE_TTL_OPTIONS: ReadonlyArray<{
 export const SHARE_MODE_OPTIONS: ReadonlyArray<{
   value: WorkspaceShareMode;
   label: string;
+  /** One line inside Advanced, where the label has room to be explained. */
   detail: string;
+  /**
+   * What the COLLAPSED summary says. "Hybrid" is our word for a transport
+   * choice, and the collapsed row is the one place it appeared with nothing
+   * around it to explain it — "Hybrid delivery" told the reader nothing they
+   * could act on (attn-08fa.8). The label stays inside Advanced, next to its
+   * detail line, which is where a configuration word belongs.
+   */
+  summary: string;
 }> = [
   {
     value: 'hybrid',
     label: 'Hybrid',
     detail: 'Connect directly when possible, with the encrypted relay as a fallback.',
+    summary: 'Live + resumable',
   },
   {
     value: 'async',
     label: 'Async',
     detail: 'Keep review available through the encrypted relay while the owner is offline.',
+    summary: 'Resumable',
   },
   {
     value: 'live',
     label: 'Live',
     detail: 'Use a direct live session; review availability depends on the owner connection.',
+    summary: 'Live only',
   },
 ];
 

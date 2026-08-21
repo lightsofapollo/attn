@@ -31,20 +31,17 @@ export interface WorkspaceEntry {
 }
 
 /** Literal status language from planning/web-authoring/00-web-presence.md.
- *  Share status ("Shared · …") is no longer a save state — it lives in the
+ *  Share status ("Shared · …") is not a save state — it lives in the
  *  ShareChip / masthead share control.
  *
- *  'Changes autosaved' replaced 'Saved on this device' in attn-yzsa.2. The old
- *  string was carrying two jobs at once — the save state AND the local-first,
- *  nothing-leaves-your-machine claim — which is why it could not simply be
- *  renamed: the claim had to be re-homed first. It keeps its dedicated homes
- *  (the desk header's persistence badge, the landing Hero's "Saved on this
- *  device" source line) and this union now says only what it is for. The same
- *  sentence is on the native save chip as of the same issue, which is only
- *  honest because attn-yzsa.1 brought autosave to desktop — the copy change
- *  followed the behaviour, not the other way round.
+ *  This union says only what a save state is for. The local-first,
+ *  nothing-leaves-your-machine claim has its own homes (the desk header's
+ *  persistence badge, the landing Hero's "Saved on this device" source line)
+ *  and must not be folded back in here (attn-yzsa.2). 'Changes autosaved' is
+ *  honest on the native chip only because attn-yzsa.1 brought autosave to
+ *  desktop — the copy follows the behaviour, never the other way round.
  *
- *  DERIVED from lib/save-state-copy.ts, not restated (issue 9, 2026-08-08):
+ *  DERIVED from lib/save-state-copy.ts, not restated (issue 9):
  *  the native chip reads the same constants, so the two surfaces cannot say
  *  different sentences again without a type error. `typeof` keeps this a
  *  type-only relationship — the imports erase unless a value is used. The
@@ -217,6 +214,8 @@ export interface EditingSession {
   announceProfile(): Promise<void>;
   replyToComment(anchor: Anchor, body: string, threadId: string): Promise<ReviewEvent>;
   resolveComment(threadId: string): Promise<ReviewEvent>;
+  /** Reopen a resolved thread (attn-bb6t.4). */
+  reopenComment(threadId: string): Promise<ReviewEvent>;
   retryReviewOutbox(): Promise<void>;
   /** Recreate a definitively expired live room under the stable share. */
   recoverReview(): Promise<void>;
@@ -289,6 +288,21 @@ export interface WorkspaceAppService {
   deleteWorkspace(workspaceId: string): Promise<void>;
   /** Null when another tab holds the writer lease — stay read-only. */
   beginEditing(workspaceId: string): Promise<EditingSession | null>;
+  /**
+   * Give up this tab's ROUTE authority for a workspace it is leaving
+   * (attn-e9r2.3).
+   *
+   * `EditingSession.release()` only leaves the editor surface — it keeps the
+   * runtime so an edit/read toggle does not thrash the lease. Leaving the
+   * workspace entirely is the other case: the lease, its heartbeat, the
+   * local-collab hub and the review transport have no reader left, so they
+   * are closed and the runtime is evicted. Without this, switching workspaces
+   * in place left every departed workspace held against the user's other tabs,
+   * and repeated switches accumulated live runtimes.
+   *
+   * Idempotent, and safe on a workspace that never had a runtime.
+   */
+  closeEditingRuntime(workspaceId: string): Promise<void>;
   /**
    * Join local multi-tab co-editing as a follower (attn-47r). Returns a
    * reconnecting handle, or null when the environment can't support it —

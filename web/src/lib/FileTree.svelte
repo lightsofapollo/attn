@@ -1,4 +1,5 @@
 <script lang="ts">
+  import type { Snippet } from 'svelte';
   import type { TreeNode } from './types';
   import FileTree from './FileTree.svelte';
   import { openExternal } from './ipc';
@@ -44,6 +45,18 @@
     /** Supplied by the native or hosted shell so this shared tree never owns
      *  an icon asset registry. */
     iconResolver?: FileIconResolver;
+    /**
+     * The row being renamed, and the field that takes its label's place.
+     *
+     * Renaming happens ON the row (user ruling, 2026-08-20). The hosted shell
+     * used to render this field in the rail's FOOTER — pinned to the bottom of
+     * a column whose top held the row it was renaming, so the input appeared
+     * hundreds of pixels away from the name it edited, with nothing joining
+     * them. The shell still owns the value and the commit; the tree only says
+     * where the field goes.
+     */
+    renamingPath?: string;
+    renameField?: Snippet;
   }
 
   let {
@@ -60,6 +73,8 @@
     unreadByPath = {},
     collaboratorLocations = [],
     iconResolver,
+    renamingPath,
+    renameField,
   }: Props = $props();
 
   let expanded: Record<string, boolean> = $state({});
@@ -321,7 +336,7 @@
         <CollapsibleContent>
           {#if node.children}
             <SidebarMenu class="sidebar-tree-sub" style={`--tree-depth: ${depth};`}>
-              <FileTree nodes={node.children} {activePath} depth={depth + 1} {rootPath} {onNavigate} {onExpand} {onShare} {onRename} {onDelete} {sharedPaths} {unreadByPath} {collaboratorLocations} {iconResolver} />
+              <FileTree nodes={node.children} {activePath} depth={depth + 1} {rootPath} {onNavigate} {onExpand} {onShare} {onRename} {onDelete} {sharedPaths} {unreadByPath} {collaboratorLocations} {iconResolver} {renamingPath} {renameField} />
             </SidebarMenu>
           {/if}
         </CollapsibleContent>
@@ -333,6 +348,33 @@
     {@const fileShared = isPathShared(node)}
     {@const fileUnread = unreadForPath(node.path)}
     <SidebarMenuItem>
+      {#if renameField && node.path === renamingPath}
+        <!-- A row, not a button, for exactly as long as it is being renamed.
+             An <input> inside a <button> is invalid and unusable — the button
+             swallows the clicks and keystrokes the field needs — so the row
+             drops its button and its context menu while the field is up, and
+             gets both back the moment the rename settles. The class list is the
+             button's own, so the geometry it sits in does not change: same
+             height, same indent, same icon in the same place. -->
+        <div
+          class={`sidebar-tree-row sidebar-tree-row--file sidebar-tree-row--renaming${icon ? '' : ' sidebar-tree-row--file-no-icon'}`}
+          data-slot="tree-row-renaming"
+          data-path={node.path}
+          style={`--tree-depth: ${depth};`}
+        >
+          {#if icon}
+            <img
+              src={icon}
+              alt=""
+              aria-hidden="true"
+              class={`sidebar-tree-icon-image size-3.5 shrink-0${node.name.toLowerCase() === 'agents.md' ? ' sidebar-tree-icon-image--invert-paper' : ''}`}
+            />
+          {:else}
+            <span aria-hidden="true" class="sidebar-tree-markdown-marker">·</span>
+          {/if}
+          {@render renameField()}
+        </div>
+      {:else}
       <ContextMenu>
         <ContextMenuTrigger>
           {#snippet child({ props: triggerProps })}
@@ -423,6 +465,7 @@
           {/if}
         </ContextMenuContent>
       </ContextMenu>
+      {/if}
     </SidebarMenuItem>
   {/if}
 {/each}

@@ -173,6 +173,7 @@ function copyEntry(entry: PersistedShareOutboxEntry): PersistedShareOutboxEntry 
 function fakeLive(calls: string[], start?: () => void | Promise<void>): DurableLiveSession {
   return { start: start ?? (() => { calls.push('start'); }), close: () => { calls.push('close'); },
     createComment: async () => EVENT, replyToComment: async () => EVENT, resolveComment: async () => EVENT,
+    reopenComment: async () => EVENT,
     createSuggestion: async (_draft: SuggestionDraft) => EVENT, retryOutbox: async () => { calls.push('retry'); } };
 }
 

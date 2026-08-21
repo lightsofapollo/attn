@@ -225,7 +225,8 @@ export const envelopeSchema = z.object({
   createdAt: unixMs,
   expiresAt: unixMs,
   nonce: b64url.min(1, "nonce required").max(XCHACHA20_NONCE_MAX_CHARS),
-  ciphertext: b64url, // empty ciphertext is allowed at the schema layer; per-kind cap is enforced in handler
+  // Empty ciphertext passes the schema; the per-kind cap is enforced in the handler.
+  ciphertext: b64url,
   ciphertextBytes: z.number().int().positive(),
   /** V3 signal-only monotonic negotiation/collaboration generation. */
   signalGeneration: z.number().int().nonnegative().optional(),

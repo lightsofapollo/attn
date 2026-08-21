@@ -2,9 +2,17 @@
   ReviewMarginCard — single Google-Docs-style margin card.
 
   Per `planning/collab/ui/review-panel-design.md` §1.2 "Card anatomy" the
-  card has a header (author chip + meta badge + state badge), an
-  anchor-quote preview, the body, and an action row whose buttons depend
-  on the kind (`comment` vs `suggestion`).
+  card has a header (author chip + meta badge + state badge), the body, and
+  an action row whose buttons depend on the kind (`comment` vs
+  `suggestion`).
+
+  There is no anchor-quote preview on an anchored card (attn-bb6t.2): the
+  quote duplicated text the reader can already see, and hover linking now
+  points at the real thing — hovering the card lights up its segment in the
+  document, hovering the segment lights up the card. STALE cards are the
+  exception and keep their quote, because a stale anchor renders no inline
+  mark at all, so the quote is the only surviving trace of what was said
+  about what.
 
   The meta badge is the single right-hand chip (attn-bw2h.2/.3): it
   carries the relative age, the `suggest` word for suggestions, and a
@@ -61,6 +69,8 @@
 </script>
 
 <script lang="ts">
+  import CheckIcon from '@lucide/svelte/icons/check';
+
   import AmbiguousAnchorPicker from './AmbiguousAnchorPicker.svelte';
   import { AGENT_GLYPH, monogramFor } from './peer-strip-format';
   import { shouldSubmitOnEnter } from './review/composer-keys';
@@ -95,10 +105,8 @@
     /** Author display name (fallback to participantId). */
     authorName: string;
     /** Author participant id — resolves the personal identity color
-     *  (attn-3gdd) so the card accent matches the author's chip + caret. */
+     *  (attn-3gdd) so the card border matches the author's chip + caret. */
     authorId: string;
-    /** Anchor-quote preview text (single line, ellipsis). */
-    quotePreview: string;
     /** Click target: editor focuses this card's anchor. */
     onActivate: () => void;
     /** Accept a suggestion through the parent-owned action port. */
@@ -107,6 +115,10 @@
     onReject?: () => unknown | Promise<unknown>;
     /** Resolve handler — mints a CommentResolved event (attn-zhr). */
     onResolve?: () => void;
+    /** Unresolve handler — mints a CommentReopened event (attn-bb6t.5).
+     *  Honored only on comment threads; a suggestion's accept/reject is
+     *  terminal and has no inverse (attn-1l2f.1). */
+    onUnresolve?: () => void;
     /** Post a reply to this thread (attn-1rm). Parent wires it to
      *  reviewCreateComment with the root anchor + this thread id. */
     onReply?: (body: string) => Promise<void> | void;
@@ -114,7 +126,7 @@
      *  the IPC is not yet acknowledged (or doesn't exist yet). */
     pendingDismiss?: boolean;
     /** The initiating author's participant kind (attn-42y). Drives the
-     *  card's left-border color and the header avatar via the
+     *  card's border color and the header avatar via the
      *  `--peer-avatar-bg-*` tokens, matching carets and peer chips. */
     authorKind?: 'owner' | 'reviewer' | 'agent';
     /** Fires when the embedded AmbiguousAnchorPicker has dispatched a
@@ -150,11 +162,11 @@
     offset,
     authorName,
     authorId,
-    quotePreview,
     onActivate,
     onAccept,
     onReject,
     onResolve,
+    onUnresolve,
     onReply,
     pendingDismiss = false,
     authorKind = 'reviewer',
@@ -330,6 +342,15 @@
     e.stopPropagation();
     if (readOnly && !reviewerAuthoring) return;
     if (onResolve) onResolve();
+  }
+
+  function handleUnresolve(e: MouseEvent): void {
+    e.stopPropagation();
+    if (readOnly && !reviewerAuthoring) return;
+    // A suggestion's resolved state is its verdict, and verdicts are terminal
+    // (attn-1l2f.1) — the button is absent for them, and so is the handler.
+    if (kind !== 'comment') return;
+    if (onUnresolve) onUnresolve();
   }
 
   // --- Replies (attn-1rm) -----------------------------------------------------
@@ -523,7 +544,7 @@
           <span class="rmc-meta-age">{ageLabel}</span>
         {/if}
         {#if cardState === 'resolved'}
-          <span class="rmc-meta-tick" aria-hidden="true">✓</span>
+          <CheckIcon class="rmc-meta-tick" size={12} strokeWidth={2.5} aria-hidden="true" />
           <span class="rmc-sr-only">resolved</span>
         {/if}
       </span>
@@ -555,9 +576,6 @@
       <p class="rmc-replies">{thread.replies.length} reply{thread.replies.length === 1 ? '' : 's'}</p>
     {/if}
   {:else}
-    {#if quotePreview}
-      <p class="rmc-quote" title={quotePreview}>{quotePreview}</p>
-    {/if}
     <p class="rmc-body">{body}</p>
     {#if thread.replies.length > 0}
       <ul class="rmc-reply-list" data-slot="review-replies">
@@ -595,9 +613,23 @@
   {#if !readOnly || reviewerAuthoring}
   <footer class="rmc-actions">
     {#if cardState === 'resolved'}
-      <!-- Read-only resolved card (attn-42y): no action row at all. The
-           rail collapses as a whole; clicking the card (or Escape)
-           shrinks it back to its chip. -->
+      <!-- A resolved card used to carry no action row at all (attn-42y).
+           It carries exactly one now: Unresolve (attn-bb6t.5). Resolving
+           was one-way until `CommentReopened` existed, so "read-only" was
+           a statement about the protocol, not a design choice. Clicking the
+           card (or Escape) still shrinks it back to its chip. -->
+      {#if onUnresolve && kind === 'comment'}
+        <button
+          type="button"
+          class="rmc-btn"
+          data-action="unresolve"
+          data-testid="review-margin-card-unresolve"
+          onclick={handleUnresolve}
+          disabled={pendingDismiss}
+        >
+          Unresolve
+        </button>
+      {/if}
     {:else if cardState === 'stale' && !readOnly}
       {#if awaitingReanchor}
         <button
@@ -728,40 +760,38 @@
 </div>
 
 <style>
-  /* The accent strip is an absolutely positioned `::before`, not an inset
-     shadow and not a border-left. It has been all three:
-       - `border-left: 3px` mitres into the 6px corner radius and wedges a
-         pointy diagonal of color past the card outline (user-reported);
-       - `inset 3px 0 0 0` is clipped to the rounded padding box, so the
-         strip tapers into a curved sliver at both ends (also
-         user-reported: "do not make the colored edge curved").
-     A positioned pseudo-element is the only one of the three that is
-     immune to the radius: it is a plain rectangle painted over the card
-     background, so it stays a straight full-height edge, square at both
-     ends, while the CARD keeps its rounded corners. The card must NOT
-     gain `overflow: hidden`/`clip` — that would re-clip the strip to the
-     radius and bring the curve straight back.
-     `--rmc-accent` is set inline (author color) or by the kind/state
-     rules below; the pseudo reads the same custom property, so all of
-     those overrides keep working unchanged. */
+  /* The accent runs the whole way around the card as a 2px border
+     (attn-bb6t.1). It was previously a 3px left-hand strip, drawn as an
+     absolutely positioned `::before` because neither of the other two ways
+     to paint ONE edge survived the corner radius: `border-left: 3px` mitres
+     into the 6px curve and wedges a pointy diagonal of color past the card
+     outline, and `inset 3px 0 0 0` is clipped to the rounded padding box,
+     tapering into a curved sliver at both ends ("do not make the colored
+     edge curved"). Both failure modes are specific to a single edge meeting
+     a radius it doesn't span. A uniform border has no mitre and no taper —
+     every corner is the same 6px arc in the same color — so the
+     pseudo-element, its `z-index: -1` stacking context, and the −1px
+     offsets that kept it as tall as the card are all gone with it.
+     (History: attn-bw2h.1 "the left hand border isn't as tall as the right
+     hand side"; attn-11g4.4 signed off the 3px strip it replaced.)
+
+     `--rmc-accent` still carries the color: set inline to the author's
+     personal identity color, or by the kind/state rules below. */
   .review-margin-card {
     display: block;
-    /* Containing block + stacking context for the ::before accent strip.
-       (`backdrop-filter`/`opacity` below establish both as a side effect;
-       stating them keeps the strip's `z-index: -1` from ever escaping the
-       card if either of those changes.) */
     position: relative;
-    isolation: isolate;
     /* Fluid: the margin slot (or orphan-tray list item) defines the
        width, inset 12px from the rail edges (attn-42y). */
     width: 100%;
     box-sizing: border-box;
-    /* 13px left ≈ the old 3px border + 10px padding, so content lands at
-       the same x while the strip overlays the first 3px of padding. */
-    padding: 10px 12px 10px 13px;
+    /* Symmetric now that no strip overlays the left padding. Border +
+       padding keeps content at the same 13px inset it had before. */
+    padding: 9px 11px;
     background: var(--review-card-surface, var(--popover, var(--background)));
     color: var(--popover-foreground, inherit);
-    border: 1px solid var(--review-card-border, var(--border));
+    /* 2px exactly — thick enough to read as the card's identity, thin
+       enough that a rail of cards doesn't become a stack of frames. */
+    border: 2px solid var(--rmc-accent, var(--review-card-border, var(--border)));
     border-radius: 6px;
     font-size: 0.85rem;
     line-height: 1.4;
@@ -776,58 +806,27 @@
       border-color 120ms ease-out;
   }
 
-  /* The straight accent edge. `z-index: -1` paints it above the card's own
-     background but below every in-flow child, and `border-radius: 0` is
-     stated to make the squareness deliberate rather than incidental.
-
-     THE OFFSETS ARE NOT ZERO ON PURPOSE (attn-bw2h.1). Absolute offsets
-     resolve against the containing block's PADDING box, and this card has
-     `border: 1px solid`. With `top/bottom: 0` the strip spanned
-     (card height − 2px), sitting 1px inside the top and bottom edges while
-     the card's own right border ran the full height — reported as "the
-     left hand border isn't as tall as the right hand side". `-1px` pushes
-     the strip back out over the horizontal borders so its height equals
-     the card's BORDER box. Do not "tidy" these to 0; that reopens the bug.
-     (An inset box-shadow hid the asymmetry because it reaches the border's
-     inner edge on all four sides at once — but it also tapered into the
-     radius, which is why it was replaced.)
-
-     THE ASYMMETRY (−1px vertically, 0 horizontally) IS ALSO DELIBERATE.
-     The bug was about HEIGHT only, so the vertical offsets change and the
-     horizontal one does not: the rendered edge stays 1px of card border,
-     then 3px of accent, now running the full height. `left: -1px` would
-     eat that border line into a 4px slab of colour — a different, larger
-     visual than attn-11g4.4 signed off — and it would move the square
-     ends to x=0, where the 6px corner curve is at its steepest (a 6px
-     overhang at the outermost column, versus 2.7px where they sit now).
-     Content x and the strip's x are therefore untouched. */
-  .review-margin-card::before {
-    content: '';
-    position: absolute;
-    top: -1px;
-    bottom: -1px;
-    left: 0;
-    width: 3px;
-    border-radius: 0;
-    background: var(--rmc-accent, transparent);
-    pointer-events: none;
-    z-index: -1;
-    /* Matches the card's own 120ms box-shadow transition, which is what
-       used to ease the accent color when a card changed state. */
-    transition: background-color 120ms ease-out;
-  }
-
+  /* Hover — the card half of hover linking (attn-bb6t.2). `data-hovered`
+     is also set when the pointer is over this thread's segment in the
+     document, so both gestures land on one treatment: a soft halo in the
+     card's own accent color. It sits OUTSIDE the border rather than
+     recoloring it, because the border is identity and must not change
+     meaning on hover. */
   .review-margin-card:hover,
   .review-margin-card[data-hovered='true'] {
     opacity: 1;
+    box-shadow:
+      var(--review-card-shadow, 0 10px 28px rgba(0, 0, 0, 0.14)),
+      0 0 0 3px color-mix(in oklch, var(--rmc-accent, var(--primary)) 24%, transparent);
   }
 
+  /* Active/selected — a harder ring, again outside the identity border.
+     Declared after hover so it wins when a card is both. */
   .review-margin-card[data-active='true'] {
     opacity: 1;
     box-shadow:
       var(--review-card-shadow, 0 10px 28px rgba(0, 0, 0, 0.14)),
-      0 0 0 1px color-mix(in oklch, var(--primary) 46%, transparent);
-    border-color: var(--accent-foreground, var(--primary));
+      0 0 0 2px color-mix(in oklch, var(--primary) 62%, transparent);
   }
 
   .review-margin-card[data-pending-dismiss='true'] {
@@ -915,7 +914,11 @@
     align-items: center;
     gap: 4px;
     background: var(--muted);
-    color: var(--muted-foreground);
+    /* muted-foreground sits AT the 4.5:1 floor on the page ground; on the
+       darker --muted chip fill this 10.85px text dropped just under it
+       (axe, 2026-08-18). One step toward the foreground restores AA in
+       both themes without un-quieting the chip. */
+    color: color-mix(in oklch, var(--muted-foreground) 80%, var(--foreground));
     font-variant-numeric: tabular-nums;
     white-space: nowrap;
   }
@@ -925,7 +928,11 @@
      never the sole signal (PRODUCT.md). */
   .rmc-meta[data-kind='suggestion'] {
     background: color-mix(in oklch, var(--review-card-suggestion-accent) 20%, transparent);
-    color: color-mix(in oklch, var(--review-card-suggestion-accent) 78%, var(--foreground, currentColor));
+    /* 78% accent read as pure hue but landed ~L0.48 on a tinted chip —
+       under 4.5:1 for 10.85px text (axe, 2026-08-18). Leaning further into
+       the foreground keeps the ledger-green cast while clearing AA in both
+       themes (dark's light foreground lightens it symmetrically). */
+    color: color-mix(in oklch, var(--review-card-suggestion-accent) 52%, var(--foreground, currentColor));
     border-color: color-mix(in oklch, var(--review-card-suggestion-accent) 34%, transparent);
   }
 
@@ -946,9 +953,13 @@
     opacity: 0.4;
   }
 
-  .rmc-meta-tick {
-    font-size: 0.78rem;
-    line-height: 1;
+  /* Lucide check (attn-bb6t.5) — an icon now, not a `✓` glyph, so it
+     matches the checkmarks on the resolved chips and scales with the icon
+     set rather than the font. `size` is set on the component; this only
+     keeps it on the text baseline inside the meta chip. */
+  :global(.rmc-meta-tick) {
+    display: block;
+    flex-shrink: 0;
   }
 
   /* Visually hidden, still announced — the tick must not be the only
@@ -978,19 +989,10 @@
     color: var(--destructive-foreground);
   }
 
-  .rmc-quote {
-    margin: 0 0 6px;
-    padding: 0;
-    color: color-mix(in oklch, var(--foreground, currentColor) 70%, var(--muted-foreground, currentColor));
-    font-size: 0.7rem;
-    font-style: italic;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-
-  /* Stale quote is rendered more prominently than `.rmc-quote` (multi-line
-     clamp, accented border) so the user can scan for it in the editor. */
+  /* The stale card's quote — the only quote left on any card (attn-bb6t.2).
+     Rendered prominently (multi-line clamp, accented border) because a
+     stale anchor has no inline mark to hover, so this is the user's only
+     handle on what the comment was about. */
   .rmc-stale-quote {
     margin: 0 0 6px;
     padding: 4px 8px;

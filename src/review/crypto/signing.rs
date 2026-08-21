@@ -734,12 +734,32 @@ mod tests {
             resulting_hash: id::<ContentHash>("hash-after-apply-5"),
         };
 
+        // Vector 6: CommentReopened — the resolve inverse (attn-bb6t.4).
+        // Pinned alongside vector 3 so both halves of the resolve/reopen pair
+        // have a locked canonical shape for the TS implementation.
+        let seed6: [u8; 32] = [0x66u8; 32];
+        let meta6 = EventMeta {
+            v: 2,
+            event_id: id::<EventId>("placeholder-event-id-6"),
+            room_id: id::<RoomId>("room-vec-6"),
+            author_id: id::<ParticipantId>("p-vec-6"),
+            device_id: id::<DeviceId>("d-vec-6"),
+            created_at: 1_700_000_005_000,
+            parent_event_ids: vec![id::<EventId>("evt-parent-6")],
+            snapshot_id: None,
+        };
+        let body6 = ReviewEventBody::CommentReopened {
+            thread_id: "thr-vec-6".to_string(),
+            reopened_by: id::<ParticipantId>("p-reopener-6"),
+        };
+
         for (label, seed, meta, body) in [
             ("vec1", seed1, &meta1, &body1),
             ("vec2", seed2, &meta2, &body2),
             ("vec3", seed3, &meta3, &body3),
             ("vec4", seed4, &meta4, &body4),
             ("vec5", seed5, &meta5, &body5),
+            ("vec6", seed6, &meta6, &body6),
         ] {
             let sk = DeviceSigningKey::from_bytes(&seed).unwrap();
             let vk = sk.verifying_key();

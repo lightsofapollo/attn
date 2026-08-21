@@ -2,7 +2,6 @@
   import type { Snippet } from 'svelte';
   import BrandMark from '../../lib/BrandMark.svelte';
   import type { PersistenceMode } from './types';
-  import { SAVE_STATE_STORAGE_ATTENTION } from '../../lib/save-state-copy';
 
   interface Props {
     mode: PersistenceMode;
@@ -10,52 +9,31 @@
   }
 
   const { mode, actions }: Props = $props();
-
-  /* Literal desk-header states from planning/web-authoring/ios-ux.md §8.
-     Three tones, not two (attn-n01r.31). `best-effort` used to return
-     warn: false, so "Backup recommended" rendered in the same green as
-     "On this device" — green-on-green is the universal "you're fine" signal,
-     attached to a message meaning the user's work is one storage eviction from
-     gone. It is a caution, not a success, and it is also not the destructive
-     red the genuine failures use.
-
-     Green is additionally quarantined to the collaboration layer by DESIGN.md,
-     so a storage state was never entitled to it in the first place. */
-  const badge = $derived.by((): { label: string; tone: 'ok' | 'caution' | 'warn' } => {
-    switch (mode) {
-      case 'persistent':
-        return { label: 'On this device', tone: 'ok' };
-      case 'best-effort':
-        return { label: 'Backup recommended', tone: 'caution' };
-      case 'session-only':
-        return { label: 'This session only', tone: 'warn' };
-      case 'unavailable':
-        return { label: 'View-only', tone: 'warn' };
-      case 'quota-pressure':
-        return { label: SAVE_STATE_STORAGE_ATTENTION, tone: 'warn' };
-    }
-  });
-
-  /* Anything but "all good" links to the remedy. The desk previously stated the
-     problem and left the fix behind an unrelated "Storage" button that the copy
-     never connected to. */
-  const needsAttention = $derived(badge.tone !== 'ok');
 </script>
 
-<header class="app-header">
+<!-- The storage badge is gone (user ruling, 2026-08-20): icon-only, it read as
+     decoration rather than a control, and a header ornament nobody believes is
+     clickable is worse than no header ornament.
+
+     Where each state is still said: `session-only`, `unavailable` and
+     `quota-pressure` raise a full DegradedBanner on the desk, the open page and
+     the editor — a title, the consequence, and a real button to the remedy —
+     which is a louder and more useful surface than the badge ever was.
+     `best-effort` ("Backup recommended") deliberately raises no banner, so it
+     is now unstated in the chrome; `/app/storage` still reports it in full.
+
+     `data-storage-mode` moves to the header itself so the shell keeps reporting
+     which state it is in for tests and automation, without spending a control
+     on it. -->
+<!-- data-slot opts this header into the ACCENT PLANE token re-pointing in
+     app.css, the same block the native, owner and review headers use. The desk,
+     open and storage routes wore a paper header while the editor and review
+     surfaces wore the plane, so crossing into a document flipped the top of the
+     window — in Ink, a steel band appearing and vanishing dozens of times a
+     session. One grammar, one plane (attn-08fa.2). -->
+<header class="app-header" data-slot="app-shell-header" data-storage-mode={mode}>
   <a class="brand" href="/"><BrandMark class="mark" />attn</a>
   <div class="right">
-    {#if needsAttention}
-      <a class="local-badge" data-tone={badge.tone} data-storage-mode={mode} href="/app/storage">
-        <span class="dot" aria-hidden="true"></span>
-        {badge.label}
-      </a>
-    {:else}
-      <span class="local-badge" data-tone={badge.tone} data-storage-mode={mode}>
-        <span class="dot" aria-hidden="true"></span>
-        {badge.label}
-      </span>
-    {/if}
     {@render actions?.()}
   </div>
 </header>

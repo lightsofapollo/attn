@@ -434,7 +434,7 @@
         </section>
 
         <details class="share-advanced" bind:open={advancedOpen}>
-          <summary>Advanced settings <span>{SHARE_MODE_OPTIONS.find((option) => option.value === mode)?.label} delivery</span></summary>
+          <summary>Advanced settings <span>{SHARE_MODE_OPTIONS.find((option) => option.value === mode)?.summary}</span></summary>
           <div class="share-advanced-body">
             <fieldset>
               <legend>Delivery</legend>
@@ -534,7 +534,7 @@
               aria-pressed={revealLink}
               title={revealLink ? 'Hide the key' : 'Show the full link'}
               onclick={() => revealLink = !revealLink}
-            ><code aria-label={revealLink ? `Full ${tierLabel(selectedTier)} invite link` : `${tierLabel(selectedTier)} invite link with the key hidden`}>{revealLink ? selectedInvite.browserUrl : maskedBrowserUrl.replace(/^https:\/\//u, '')}</code></button>
+            ><code aria-label={revealLink ? `Full ${tierLabel(selectedTier)} review link` : `${tierLabel(selectedTier)} review link with the key hidden`}>{revealLink ? selectedInvite.browserUrl : maskedBrowserUrl.replace(/^https:\/\//u, '')}</code></button>
           </div>
         {/if}
         {#if statusMessage !== 'Encrypted review link ready.'}

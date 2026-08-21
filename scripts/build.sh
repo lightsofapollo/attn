@@ -25,17 +25,14 @@ case "$MODE" in
         ;;
 esac
 
-# Install npm deps if missing
 if [ ! -d "web/node_modules" ]; then
     echo "==> Installing npm dependencies..."
     (cd web && npm ci)
 fi
 
-# Build Svelte frontend
 echo "==> Building Svelte frontend..."
 (cd web && npm run build)
 
-# Build Rust binary
 case "$MODE" in
     debug)
         echo "==> Building Rust (debug, staging services)..."

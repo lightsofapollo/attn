@@ -4,6 +4,17 @@
    surfaces and the app share one identity — including INK dark, which is
    the cool blue-black study, not the old warm brown. Dark mode is the
    `.dark` class (theme.svelte.ts stamps it alongside data-theme). */
+
+/* The canonical layer order, restated here because layers are ordered by first
+   appearance and app.css — which declares the same list — is loaded LAZILY by
+   the hosted editor chunk. Without this line the hosted app entry established
+   `chrome` first, so when a workspace pulled in app.css/base.css the real order
+   became `chrome, theme, base, …` and every hosted anchor inherited base.css's
+   prose-link treatment: the masthead wordmark turned rust and underlined on
+   hover, but only for someone who had opened a document first. Same list, same
+   order, in the file the hosted entries load first. */
+@layer theme, base, chrome, doc, components, utilities;
+
 @import '../tokens.css';
 
 :root {
@@ -26,25 +37,43 @@
   --rust-deep: var(--primary-hover);
   --rust-contrast: var(--primary-foreground);
   /* Radii the hosted routes consume but never received (attn-n01r.42).
-     --radius-md/--radius-lg are declared in src/app.css inside a Tailwind
-     `@theme inline` block, which the hosted entries do not import — so
-     .file-row, .file-add-row, .viewing-safely and .arrival-toast were
-     rendering square against a design that specifies 8px/10px. Undefined
-     custom properties fail silently: no error, no lint, no visual alarm.
-     Derived from the same --radius as app.css so the two cannot drift. */
+     --radius-* are declared in src/app.css inside a Tailwind `@theme inline`
+     block, which the hosted entries do not import — so .file-row, .file-add-row,
+     .viewing-safely and .arrival-toast were rendering square against a design
+     that specifies 8px/10px. Undefined custom properties fail silently: no
+     error, no lint, no visual alarm. Derived from the same --radius as app.css
+     so the two cannot drift.
+
+     All four steps now, not just md/lg (2026-08-19): --radius is shadcn's own
+     default (0.625rem), the four derivations are shadcn's own ladder, and
+     DESIGN.md's `rounded` scale is the same ladder written out — 6 / 8 / 10 /
+     14. Declaring the full set is what lets hosted CSS name a step instead of
+     writing the pixel, which is how the square-cornered panels below got
+     missed in the first place. */
+  --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
   /* Hover wash for selection controls. Consumed by .share-selection-actions
      and defined nowhere, so that hover had no background at all. */
   --wash: var(--accent);
   /* Text-safe ledger green + danger ink: the accent-tier hues fail AA at
-     small sizes (11px badges measured 3.0-3.3:1). */
-  --green: oklch(0.40 0.12 150);
+     small sizes (11px badges measured 3.0-3.3:1). --green aliases the canonical
+     token like every other hue here; it held its own literal until attn-08fa.5,
+     which made it the one hosted colour tokens.css could not check. It is a
+     COLLABORATION hue under the Quarantine Rule — suggestion counts and review
+     marks only, never a chrome state. */
+  --green: var(--suggestion-ink);
   --danger-ink: oklch(0.45 0.18 27);
   --nav-veil: color-mix(in oklch, var(--background) 88%, transparent);
 
   /* Hosted-only presentation tokens (no canonical equivalent). */
   --overlay-veil: oklch(0.14 0.008 55 / 38%);
+  /* The lightbox scrim is deeper than the dialog veil — it has to put a photo
+     on a dark ground rather than dim a page — and it stays near-black in both
+     themes for that reason. A token, not a literal, so the one place that
+     needs this depth cannot fork the palette (attn-a9f7.2.2). */
+  --lightbox-veil: oklch(0.14 0.008 55 / 92%);
   --window-frame: color-mix(in oklch, var(--background) 90%, var(--foreground) 10%);
   --window-chrome-top: color-mix(in oklch, var(--surface-raised) 70%, var(--background) 30%);
   --window-chrome-bottom: color-mix(in oklch, var(--background) 96%, var(--foreground) 4%);
@@ -59,7 +88,6 @@
 }
 
 .dark {
-  --green: oklch(0.74 0.13 150);
   --danger-ink: oklch(0.70 0.16 25);
   --overlay-veil: oklch(0 0 0 / 55%);
   --shadow-strong: 0 30px 90px oklch(0 0 0 / 50%);
@@ -95,11 +123,11 @@ body::after {
 }
 
 /* Bare-tag chrome resets — `@layer chrome` (cascade model, see app.css).
-   These style the hosted shell's OWN anchors and controls; the layer exists
-   so they can never erase document grammar again. The `a` reset used to be
-   unlayered, which beat `.attn-doc a` in every layer and forced the prose-link
-   rule in base.css to hide outside the layers to survive; now `doc` beats
-   `chrome` by declared order and both rules say what they mean. */
+   These style the hosted shell's OWN anchors and controls; the layer is what
+   stops them erasing document grammar. Unlayered, the `a` reset beats
+   `.attn-doc a` in every layer and forces the prose-link rule in base.css to
+   hide outside the layers to survive. Layered, `doc` beats `chrome` by
+   declared order and both rules say what they mean. */
 @layer chrome {
   button,
   a,

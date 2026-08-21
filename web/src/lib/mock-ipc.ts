@@ -401,11 +401,9 @@ function mockEventMeta(eventId: EventId, snapshotId?: SnapshotId): EventMeta {
     deviceId: MOCK_DEVICE_ID,
     createdAt: Date.now(),
     parentEventIds: [],
-    // The snapshot the event was authored against. This used to be the fixed
-    // `MOCK_SNAPSHOT_ID` unconditionally, which was harmless only while no real
-    // snapshot existed; now that shares publish per-file snapshots
-    // (attn-64iy.1), naming an id that was never published would leave every
-    // event pointing at a snapshot nothing can look up. Callers pass the id
+    // The snapshot the event was authored against. Shares publish per-file
+    // snapshots (attn-64iy.1), so hardcoding `MOCK_SNAPSHOT_ID` here would
+    // point every event at an id nothing can look up. Callers pass the id
     // their anchor actually targets; the constant is the last resort for
     // synthetic events with no anchor of their own.
     snapshotId: snapshotId ?? MOCK_SNAPSHOT_ID,
@@ -462,13 +460,12 @@ function handleReviewShare(msg: Extract<IpcMessage, { type: 'review_share' }>): 
   // Real flow: Rust ReviewManager (attn-nnj.2.8) mints a room, derives keys,
   // and reports back live/direct connection status.
   //
-  // ShareReady is the half that used to be missing (attn-bw2h.6). Emitting the
-  // status alone left the sheet with no invite URL to render, so it pended for
-  // its full 15s deadline and then reported a failure — on every share, in
-  // every browser tab, with no way to reach the ready state at all. ShareReady
-  // goes FIRST because it is what carries the room: the daemon's own ordering,
-  // and it means the ReviewBar and the dialog agree on the room id before any
-  // connection state arrives.
+  // ShareReady is required, not optional (attn-bw2h.6). Emitting the status
+  // alone leaves the sheet with no invite URL to render, so it pends for its
+  // full 15s deadline and then reports a failure on every share, in every
+  // browser tab, with no way to reach the ready state. ShareReady goes FIRST
+  // because it carries the room — the daemon's own ordering — so the ReviewBar
+  // and the dialog agree on the room id before any connection state arrives.
   const newlyCreated = !mockRoomMinted;
   mockRoomMinted = true;
   const shareReady: ReviewShareReady = {
@@ -804,13 +801,12 @@ export function __mockEmitReview(kind: MockReviewEmitKind, payload: unknown): vo
 // authoring mistakes are obvious.
 // ---------------------------------------------------------------------------
 
-// Static scenario imports. We previously used `import.meta.glob` here, but
-// `vite-plugin-singlefile` does not inline glob-imported JSON in the
-// production bundle (the JSON files end up as dynamic chunks that singlefile
-// drops). Static `import` statements are inlined deterministically by Vite,
-// so the daemon webview always sees the same scenario list as the dev
-// browser. Add a new entry here whenever you add a JSON under
-// `./mock-ipc-scenarios/`.
+// Static scenario imports — never `import.meta.glob`, which
+// `vite-plugin-singlefile` cannot inline: glob-imported JSON becomes dynamic
+// chunks that singlefile drops from the production bundle. Vite inlines static
+// `import` statements deterministically, so the daemon webview sees the same
+// scenario list as the dev browser. Add an entry here whenever you add a JSON
+// under `./mock-ipc-scenarios/`.
 import scenarioAmbiguousAnchor from './mock-ipc-scenarios/ambiguous-anchor.json';
 import scenarioCommentSurvivesEdit from './mock-ipc-scenarios/comment-survives-edit.json';
 import scenarioStaleSuggestion from './mock-ipc-scenarios/stale-suggestion.json';

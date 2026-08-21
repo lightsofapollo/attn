@@ -62,6 +62,7 @@
   import { reviewerStatusPresentation } from './lib/review/reviewer-status-model';
   import { reviewStore } from './lib/review/store.svelte';
   import {
+    applyReviewHoverHighlight,
     clearPendingAnchorRange,
     pendingAnchorHighlightPlugin,
     reviewDecorationsPlugin,
@@ -524,6 +525,18 @@
       focusEventId: focusEventId?.slice(0, 8) ?? null,
     }));
     requestReviewDecorationsRebuild(pmViewForReview);
+  });
+
+  // Card → segment hover linking (attn-bb6t.2). Deliberately not folded into
+  // the rebuild effect above: this fires on every mouseenter and only toggles
+  // a class on one thread's marks. The resolution/event reads keep it correct
+  // across ProseMirror redraws, which discard the class.
+  $effect(() => {
+    const hovered = reviewStore.hoveredEventId;
+    void reviewStore.anchorResolutions;
+    void reviewStore.events;
+    if (!pmViewForReview) return;
+    applyReviewHoverHighlight(pmViewForReview, hovered);
   });
 
   // ---------------------------------------------------------------------------
@@ -1066,6 +1079,18 @@
     bridge.renderAnchors(anchors);
   });
 
+  // Card → document hover for HTML docs (attn-bb6t.3). The rail stores the
+  // hovered thread by ROOT EVENT id; the frame knows anchors by thread id.
+  $effect(() => {
+    const bridge = htmlBridge;
+    const hovered = reviewStore.hoveredEventId;
+    if (!bridge) return;
+    const thread = hovered === null
+      ? undefined
+      : reviewStore.threadsForCurrentFile.find((t) => t.rootEvent.meta.eventId === hovered);
+    bridge.setHoveredAnchor(thread?.id ?? null);
+  });
+
   // Hover chrome is always live in an annotating frame; taking the CLICK — so
   // the page's own links stop firing — waits until the document is genuinely
   // reviewable.
@@ -1124,6 +1149,14 @@
     onAnchorActivated: (anchorId) => {
       const thread = reviewStore.threadsForCurrentFile.find((t) => t.id === anchorId);
       if (thread) reviewStore.setFocusEventId(thread.rootEvent.meta.eventId);
+    },
+    onAnchorHover: (anchorId) => {
+      // Document → card (attn-bb6t.3). An unknown id means "nothing", which
+      // is also what the frame sends on exit.
+      const thread = anchorId === null
+        ? undefined
+        : reviewStore.threadsForCurrentFile.find((t) => t.id === anchorId);
+      reviewStore.setHoveredEventId(thread?.rootEvent.meta.eventId ?? null);
     },
   };
 
@@ -1273,6 +1306,10 @@
 
   async function resolveBrowserComment(threadId: string): Promise<void> {
     await session.resolveComment(threadId);
+  }
+
+  async function reopenBrowserComment(threadId: string): Promise<void> {
+    await session.reopenComment(threadId);
   }
 
   async function rememberBrowserRoom(): Promise<void> {
@@ -1503,7 +1540,7 @@
           </div>
         {/if}
         <nav class="mt-8 flex flex-wrap gap-x-5 gap-y-3 font-sans text-sm" aria-label="Review recovery">
-          <a class="inline-flex min-h-[44px] items-center text-primary underline underline-offset-4" href="/app">Your Desk</a>
+          <a class="inline-flex min-h-[44px] items-center text-primary underline underline-offset-4" href="/app">Your desk</a>
           <a class="inline-flex min-h-[44px] items-center text-primary underline underline-offset-4" href="/">attn home</a>
         </nav>
       </section>
@@ -1698,6 +1735,7 @@
                     readOnly={true}
                     reviewerAuthoring={reviewerAvailability.reviewAuthoring}
                     onResolveComment={resolveBrowserComment}
+                    onReopenComment={reopenBrowserComment}
                     onReplyComment={replyBrowserComment}
                   />
                 </div>
@@ -1737,6 +1775,7 @@
               readOnly={true}
               reviewerAuthoring={reviewerAvailability.reviewAuthoring}
               onResolveComment={resolveBrowserComment}
+              onReopenComment={reopenBrowserComment}
               onReplyComment={replyBrowserComment}
             />
           </div>

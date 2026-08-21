@@ -43,7 +43,6 @@ fn extract_structure(markdown: &str) -> PlanStructure {
     for (line_num, line) in markdown.lines().enumerate() {
         let trimmed = line.trim();
 
-        // Detect top-level headers as phases
         if trimmed.starts_with("## ") {
             phases.push(Phase {
                 title: trimmed.trim_start_matches('#').trim().to_string(),
@@ -51,7 +50,6 @@ fn extract_structure(markdown: &str) -> PlanStructure {
             });
         }
 
-        // Detect task list items
         if let Some(text) = trimmed
             .strip_prefix("- [x] ")
             .or_else(|| trimmed.strip_prefix("- [X] "))

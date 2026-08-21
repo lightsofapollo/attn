@@ -158,6 +158,7 @@
     shareTargetMatches,
   } from './lib/review/room-ui';
   import {
+    applyReviewHoverHighlight,
     clearPendingAnchorRange,
     pendingAnchorHighlightPlugin,
     requestReviewDecorationsRebuild,
@@ -567,6 +568,18 @@
     bridge.renderAnchors(anchors);
   });
 
+  // Card → document hover for HTML docs (attn-bb6t.3). The rail stores the
+  // hovered thread by ROOT EVENT id; the frame knows anchors by thread id.
+  $effect(() => {
+    const bridge = htmlBridge;
+    const hovered = reviewStore.hoveredEventId;
+    if (!bridge) return;
+    const thread = hovered === null
+      ? undefined
+      : reviewStore.threadsForCurrentFile.find((t) => t.rootEvent.meta.eventId === hovered);
+    bridge.setHoveredAnchor(thread?.id ?? null);
+  });
+
   // Debug/E2E mirror of the shell's own annotation wiring, in the same spirit
   // as `__attn_collab_debug__`. It exists because the daemon automation bridge
   // evaluates in the SHELL's context and cannot reach into the opaque-origin
@@ -674,6 +687,14 @@
     onAnchorActivated: (anchorId) => {
       const thread = reviewStore.threadsForCurrentFile.find((t) => t.id === anchorId);
       if (thread) reviewStore.setFocusEventId(thread.rootEvent.meta.eventId);
+    },
+    onAnchorHover: (anchorId) => {
+      // Document → card (attn-bb6t.3). An unknown id means "nothing", which
+      // is also what the frame sends on exit.
+      const thread = anchorId === null
+        ? undefined
+        : reviewStore.threadsForCurrentFile.find((t) => t.id === anchorId);
+      reviewStore.setHoveredEventId(thread?.rootEvent.meta.eventId ?? null);
     },
   };
 
@@ -859,11 +880,9 @@
   let commandPaletteSearchQuery = $state('');
   let commandPaletteSearchResults: SearchResultItem[] = $state([]);
 
-  // Right-rail (Phase 2 ReviewPanel mount point). Default collapsed; no review
-  // session is active yet, so the slot renders a neutral placeholder. Toggling
-  // shortcut (Cmd+J) is wired here as a placeholder until 12.9 owns it.
-  // State lives on `reviewStore.panelOpen` so the future keyboard hook /
-  // ReviewPanel can drive it via `reviewStore.togglePanel()`.
+  // Right-rail open/closed state lives on `reviewStore.panelOpen`, not here, so
+  // the keyboard hook and the ReviewPanel drive it through
+  // `reviewStore.togglePanel()`.
 
   // Review-decoration plugin host (attn-nnj.4.6). One plugin instance per
   // editor mount; the `onReady` callback hands us the EditorView so the
@@ -1366,15 +1385,12 @@
   // ---------------------------------------------------------------------------
   // Autosave (attn-yzsa.1)
   //
-  // ONE timer writes this window's file. It used to be a 1.5s debounce living
-  // inside `handleCollabDocChange` and guarded by `collabActive && collabRole
-  // === 'owner'`, which meant a person editing a local file with no review room
-  // open had no autosave at all — the "Changes autosaved" the chip now claims
-  // was true on hosted /app and false here. Bringing autosave to plain edit
-  // mode is the whole point of the epic; keeping the old collab timer beside
-  // the new one would have been the easy version and the wrong one, because two
-  // debounces racing to write the same path interleave and a late one can land
-  // a staler buffer on top of a newer save.
+  // ONE timer writes this window's file, and plain edit mode gets it too — a
+  // debounce guarded by `collabActive && collabRole === 'owner'` leaves anyone
+  // editing a local file with no review room open with no autosave at all,
+  // while the chip claims "Changes autosaved". A second timer must never sit
+  // beside this one: two debounces racing the same path interleave, and a late
+  // one lands a staler buffer on top of a newer save.
   //
   // The policy — when it is safe to write at all, and how long it waits — lives
   // in lib/native-autosave.ts so it can be unit-tested against a virtual clock.
@@ -1611,9 +1627,9 @@
     const roomId = reviewStore.currentRoomId;
     if (!roomId) return;
     if (suggestAvailability.status !== 'ready') {
-      // Includes the grant-tier refusal that used to be the very first bare
-      // `return` in this function — a reviewer holding a comment-only invite
-      // pressed ⌘⇧. and got nothing, with no way to learn why.
+      // Covers the grant-tier refusal too. A bare `return` here leaves a
+      // reviewer on a comment-only invite pressing ⌘⇧. with nothing on screen
+      // and no way to learn why.
       refreshSelectionToolbar();
       return;
     }
@@ -1854,6 +1870,19 @@
     void reviewStore.focusEventId;
     if (!pmViewForReview) return;
     requestReviewDecorationsRebuild(pmViewForReview);
+  });
+
+  // Card → segment hover linking (attn-bb6t.2). Separate from the rebuild
+  // effect on purpose: this one runs on every mouseenter, and all it does is
+  // toggle a class on the marks for one thread. It also depends on the same
+  // inputs as the rebuild above so the class is re-applied after ProseMirror
+  // redraws the marks out from under it.
+  $effect(() => {
+    const hovered = reviewStore.hoveredEventId;
+    void reviewStore.anchorResolutions;
+    void reviewStore.events;
+    if (!pmViewForReview) return;
+    applyReviewHoverHighlight(pmViewForReview, hovered);
   });
 
   function emptyPlanStructure(): PlanStructure {
@@ -3152,9 +3181,8 @@
   /**
    * Write the buffer to disk now.
    *
-   * WHAT ⌘S MEANS NOW THAT AUTOSAVE EXISTS (attn-yzsa.1). It is no longer the
-   * only thing standing between the user and lost work — autosave covers that.
-   * It keeps two jobs, and both are real:
+   * Autosave, not ⌘S, is what stands between the user and lost work
+   * (attn-yzsa.1). ⌘S keeps two jobs of its own, and both are real:
    *
    *   1. An immediate flush. "Write it, I'm about to do something else" is a
    *      reasonable thing to want, and a 1.2s wait you cannot skip is not.

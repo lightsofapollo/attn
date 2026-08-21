@@ -52,7 +52,8 @@
   import UnreadBadge from './UnreadBadge.svelte';
 
   interface Props {
-    sidebar: Snippet;
+    /** Optional: a surface with nothing to navigate mounts no file rail. */
+    sidebar?: Snippet;
     content: Snippet;
     rail: Snippet;
     banner?: Snippet;
@@ -84,17 +85,14 @@
 
   // The rail is a DOCKED panel, not a floating margin.
   //
-  // It used to be a transparent stretch of paper that "hugged" the prose
-  // (Theme v2, attn-ll9): an IntersectionObserver watched for wide blocks and
-  // slid the whole aside left via translateX so cards sat nearer their
-  // anchors. That only worked while the rail was invisible. Now that the panel
-  // carries its own surface, the hug and the surface are mutually exclusive —
-  // a translated panel either tears a strip of bare paper off the window edge,
-  // or (if the paint is extended to cover it) balloons to 500px+ on a wide
+  // Do not reinstate the "hug" (Theme v2, attn-ll9): an IntersectionObserver
+  // watching for wide blocks and sliding the aside left via translateX so
+  // cards sit nearer their anchors. That works only while the rail is
+  // invisible. The hug and a painted surface are mutually exclusive — a
+  // translated panel either tears a strip of bare paper off the window edge,
+  // or, if the paint is extended to cover it, balloons past 500px on a wide
   // display, because the shift distance grows with the viewport. A panel the
-  // user is meant to recognize as open has to hold one edge, so the hug and
-  // its three observers are gone rather than left running to compute a
-  // transform nothing applies.
+  // user is meant to recognize as open has to hold one edge.
   //
   // What the user gets instead is control of the width (attn-11g4.2). The rail
   // holds the right edge and the LEFT edge is draggable, which is the same
@@ -258,7 +256,7 @@
 </script>
 
 <SidebarProvider class={`h-svh overflow-hidden ${className}`}>
-  {@render sidebar()}
+  {@render sidebar?.()}
   <SidebarInset class="overflow-hidden">
     {@render chrome?.()}
     {@render banner?.()}
@@ -269,16 +267,15 @@
       <div class="flex min-w-0 flex-1 flex-col overflow-hidden">
         {@render content()}
       </div>
-      <!-- The margin is a surface, not an absence. It used to be painted
-           `bg-background` with no border, on the Docs rule that an empty
-           stretch beside the text is whitespace on the paper. In practice an
-           open rail was indistinguishable from a wide right gutter — nothing
-           told the user the panel was there, and toggling it read as the
-           document changing width for no reason. It now sits on
-           `--panel-surface` behind a hairline `--panel-border`, so "comments
-           are open" is legible before a single card is on screen and the
-           cards (a lighter `--review-card-surface`) read as floating on it.
-           The rail still never scrolls; wheel forwards to the doc. -->
+      <!-- The margin is a surface, not an absence. Painted `bg-background`
+           with no border — the Docs rule that an empty stretch beside the text
+           is whitespace on the paper — an open rail is indistinguishable from a
+           wide right gutter, and toggling it reads as the document changing
+           width for no reason. It sits on `--panel-surface` behind a hairline
+           `--panel-border`, so "comments are open" is legible before a single
+           card is on screen and the cards (a lighter `--review-card-surface`)
+           read as floating on it. The rail never scrolls; wheel forwards to the
+           doc. -->
       {#if railMode !== 'hidden'}
         <aside
           class="right-rail relative flex shrink-0 flex-col overflow-hidden"

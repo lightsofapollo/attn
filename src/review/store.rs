@@ -606,6 +606,27 @@ impl ReviewStore {
     /// Fold persisted suggestion events for one room. Creation authorship is
     /// recorded separately from owner-authored verdict events, then joined so
     /// identity scoping always uses `SuggestionCreated.meta.author_id`.
+    /// Whether `thread_id` names a suggestion rather than a comment thread.
+    ///
+    /// Reopen is the inverse of resolve, and only comments resolve — an
+    /// accepted or rejected suggestion is decided for good. Projections fold
+    /// lifecycle events last-writer-wins, so a `CommentReopened` minted for a
+    /// suggestion id would hand a already-applied edit its Accept/Reject
+    /// actions back on every peer. Undecodable lines are skipped: a corrupt
+    /// event elsewhere in the log must not block a legitimate reopen.
+    pub fn is_suggestion_thread(&self, room_id: &RoomId, thread_id: &str) -> Result<bool> {
+        for event in self.iter_events(room_id)?.flatten() {
+            if let crate::review::model::ReviewEventBody::SuggestionCreated {
+                suggestion_id, ..
+            } = &event.body
+                && suggestion_id == thread_id
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub fn verdicts_for_room(
         &self,
         room_id: &RoomId,
@@ -1456,6 +1477,46 @@ mod tests {
                 .unread_count,
             1,
             "ordinary restart replay must not re-badge accounted events"
+        );
+    }
+
+    // attn-1l2f.1 — reopen is comment-only, and the manager asks the store
+    // which kind a thread id names before minting a `CommentReopened`.
+    #[test]
+    fn is_suggestion_thread_distinguishes_suggestions_from_comment_threads() {
+        let (_tmp, store) = fresh_store();
+        let room_id: RoomId = id("room-thread-kind");
+        let created = suggestion_event(
+            "evt-kind-1",
+            "room-thread-kind",
+            "p-1",
+            suggestion_created("suggestion-1"),
+        );
+        store.append_event(&room_id, &created).expect("append");
+
+        assert!(
+            store
+                .is_suggestion_thread(&room_id, "suggestion-1")
+                .expect("scan"),
+            "a suggestion id must be recognized"
+        );
+        assert!(
+            !store
+                .is_suggestion_thread(&room_id, "thread-1")
+                .expect("scan"),
+            "a comment thread id must not be"
+        );
+    }
+
+    #[test]
+    fn is_suggestion_thread_on_a_room_with_no_events_is_false() {
+        let (_tmp, store) = fresh_store();
+        let room_id: RoomId = id("room-thread-kind-empty");
+        assert!(
+            !store
+                .is_suggestion_thread(&room_id, "anything")
+                .expect("missing events.jsonl reads as an empty log"),
+            "a room with no log must not block a legitimate reopen"
         );
     }
 

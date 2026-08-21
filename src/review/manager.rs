@@ -98,6 +98,10 @@ pub enum ReviewCommand {
     },
     /// Join a remote review room from an `attn://review/...` invite.
     Join { invite: String },
+    /// Join a remote review room announcing `kind: "agent"`, signing with
+    /// this home's own base identity (see `Bootstrapper::join_self_as_agent`).
+    /// Used by the headless `attn review agent` runtime.
+    JoinAsAgent { invite: String },
     /// Pull pending envelopes for a room, or for every active room when `None`.
     Pull { room_id: Option<RoomId> },
     /// Stop hosting/participating in a room (all rooms when `None`).
@@ -161,6 +165,10 @@ pub enum ReviewCommand {
     /// event so the resolution persists and propagates to every peer (a
     /// resolution is a shared fact, not a local view tweak).
     ResolveComment { room_id: RoomId, thread_id: String },
+    /// Reopen a resolved comment thread. Mints a durable `CommentReopened`
+    /// event; same reasoning as `ResolveComment` — reopening is a shared
+    /// fact, so it travels rather than living in one client's view state.
+    ReopenComment { room_id: RoomId, thread_id: String },
     /// Owner edited a shared file — republish a fresh snapshot so connected
     /// reviewers see the update. No-op when `path` isn't part of any share.
     PublishSnapshot { path: PathBuf },
@@ -982,6 +990,12 @@ impl ReviewManager {
                 self.emit_join_outcome(result);
                 return;
             }
+            (ReviewCommand::JoinAsAgent { invite }, Some(bootstrapper), Some(runtime)) => {
+                let cache = self.verifying_keys.clone();
+                let result = runtime.block_on(bootstrapper.join_self_as_agent(invite, cache));
+                self.emit_join_outcome(result);
+                return;
+            }
             (
                 ReviewCommand::CreateComment {
                     room_id,
@@ -1115,6 +1129,14 @@ impl ReviewManager {
                 Some(_runtime),
             ) => {
                 self.resolve_comment(bootstrapper, room_id, thread_id);
+                return;
+            }
+            (
+                ReviewCommand::ReopenComment { room_id, thread_id },
+                Some(bootstrapper),
+                Some(_runtime),
+            ) => {
+                self.reopen_comment(bootstrapper, room_id, thread_id);
                 return;
             }
             (
@@ -1843,8 +1865,8 @@ impl ReviewManager {
     /// normal outbox path, so the resolution persists locally and propagates
     /// to peers. The frontend's `reconstructThreads` flips the thread's
     /// `resolved` flag off the same event, so the card collapses to its
-    /// resolved strip when the `EventImported` round-trips. Reopening is a
-    /// future `CommentReopened` event (not yet modeled).
+    /// resolved strip when the `EventImported` round-trips. The inverse is
+    /// [`Self::reopen_comment`], which mints `CommentReopened`.
     fn resolve_comment(&self, bootstrapper: &Arc<Bootstrapper>, room_id: &RoomId, thread_id: &str) {
         let emit_err = |msg: String| {
             (self.update_tx)(ReviewUpdate::Error {
@@ -1872,6 +1894,57 @@ impl ReviewManager {
 
         tracing::info!(
             "resolved comment thread {} (room={})",
+            thread_id,
+            room_id.as_str()
+        );
+    }
+
+    /// Reopen a resolved comment thread — the inverse of
+    /// [`Self::resolve_comment`] (attn-bb6t.4). Mints a durable
+    /// `CommentReopened` event carrying the reopener's participant id, so the
+    /// thread comes back for every peer rather than only in the clicking
+    /// client's view. Projections fold resolve/reopen in log order, so a
+    /// reopen after a resolve wins and a later resolve closes it again.
+    fn reopen_comment(&self, bootstrapper: &Arc<Bootstrapper>, room_id: &RoomId, thread_id: &str) {
+        let emit_err = |msg: String| {
+            (self.update_tx)(ReviewUpdate::Error {
+                room_id: Some(room_id.clone()),
+                code: "ATTN_REOPEN_COMMENT".to_string(),
+                message: msg,
+            });
+        };
+
+        // Only a comment thread reopens (attn-1l2f.1). The UI hides Unresolve
+        // on suggestion cards; this is the durable half of that rule, so a
+        // stale client or a scripted command can't mint the event either.
+        match self.store.is_suggestion_thread(room_id, thread_id) {
+            Ok(true) => {
+                return emit_err(format!(
+                    "thread {thread_id} is a suggestion: accept and reject are terminal"
+                ));
+            }
+            Ok(false) => {}
+            Err(e) => return emit_err(format!("read room events: {e}")),
+        }
+
+        let reopened_by = match bootstrapper
+            .config()
+            .identity_dir()
+            .and_then(|dir| crate::review::bootstrap::load_or_create_identity_in(&dir))
+        {
+            Ok(identity) => identity.typed_participant_id(),
+            Err(e) => return emit_err(format!("load identity: {e}")),
+        };
+
+        let body = crate::review::model::ReviewEventBody::CommentReopened {
+            thread_id: thread_id.to_string(),
+            reopened_by,
+        };
+        let send = bootstrapper.send_event_sync(room_id, body, unix_now_ms_for_manager());
+        self.emit_event_outcome(room_id.clone(), send);
+
+        tracing::info!(
+            "reopened comment thread {} (room={})",
             thread_id,
             room_id.as_str()
         );
@@ -2172,21 +2245,15 @@ impl ReviewManager {
         // fallback would spend a request + fan-out on a sample that the next
         // cursor update immediately supersedes.
         //
-        // Document collaboration retains the hybrid routing below. The old
-        // logic was all-or-nothing — a
-        // COMPLETE mesh sent over channels only (skip relay), an INCOMPLETE mesh
-        // sent over the relay only (NO channels). That dropped data under a
-        // partial mesh: with no TURN, a peer-pair that can't form a direct
-        // DataChannel leaves the mesh incomplete, and a peer reachable ONLY via
-        // its DataChannel (relay used as signaling) then got nothing on the
-        // relay-only path. The robust rule: ALWAYS send over every *connected*
-        // channel, AND additionally relay whenever the mesh is incomplete so the
-        // un-meshable peer(s) still receive it. Connected peers may then see it
-        // twice (channel + relay broadcast); collab is idempotent on the
-        // receiver (steps dedup by version, cursor/presence is last-writer, and
-        // the `from` field drops self-echoes), so double-delivery is safe. A
-        // complete mesh still skips the relay to keep the high-frequency
-        // step/cursor traffic off it (the cost driver at scale).
+        // Document collaboration uses the hybrid routing below: ALWAYS send
+        // over every *connected* channel, AND relay as well whenever the mesh
+        // is incomplete. Choosing one or the other drops data under a partial
+        // mesh — without TURN, a peer reachable only via its DataChannel gets
+        // nothing on a relay-only path. Connected peers may then see the
+        // sample twice; the receiver is idempotent (steps dedup by version,
+        // cursor/presence is last-writer, `from` drops self-echoes). A
+        // complete mesh skips the relay to keep high-frequency step/cursor
+        // traffic off it, which is the cost driver at scale.
         let (channels, peer_count): (
             Vec<Arc<crate::review::transport::webrtc::WebRtcTransport>>,
             usize,
@@ -2452,14 +2519,13 @@ impl ReviewManager {
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
         // One cancel signal drives BOTH the outbox loop and the WS subscriber:
         // the outbox owns `cancel_rx`, the WS subscriber gets a `subscribe()`
-        // clone below. Retain the sender in the per-room `cancels` registry so
-        // it lives for the room's life — the same lifetime guarantee the old
-        // `Box::leak` provided, so the no-race behavior is preserved. (Without
-        // a live sender, `cancel.changed()` resolves Err, which the WS
-        // `select!` misreads as a cancel — aborting connect_async before it
-        // completes.) Holding it in the map ADDITIONALLY lets `Stop` flip it
-        // to wind the outbox + WS tasks down cooperatively. The matching
-        // outbox handle is retained too so `Pull` can force a one-shot drain.
+        // clone below. The sender must live for the room's life, so it goes in
+        // the per-room `cancels` registry — drop it and `cancel.changed()`
+        // resolves Err, which the WS `select!` misreads as a cancel and aborts
+        // connect_async before it completes. Keeping it in the map also lets
+        // `Stop` flip it to wind the outbox + WS tasks down cooperatively. The
+        // matching outbox handle is retained so `Pull` can force a one-shot
+        // drain.
         let ws_cancel_rx = cancel_tx.subscribe();
         if let Ok(mut cancels) = self.cancels.lock() {
             cancels.insert(room_id.clone(), cancel_tx);
@@ -3061,16 +3127,14 @@ impl ReviewManager {
             // only the local file tree even though the WS subscription
             // is already streaming inbound envelopes.
             //
-            // The lifecycle string is role-accurate: a room WE shared (a
+            // The lifecycle string must be role-accurate: a room WE shared (a
             // local share binding exists) resumes as the owner's "Live"; a
-            // room we joined resumes as "Joined". The frontend activates the
-            // room on both and derives the role from the string — the old
-            // neutral "Resumed" was passive (switcher-only) and left the
-            // role 'unknown', so a restarted reviewer could never flip back
-            // into the shared-doc view even with the snapshot replayed
-            // (attn-6dd). Owners don't flip either way (isReviewerView
-            // requires role 'reviewer'), so a resumed share never hijacks
-            // the owner's local file view (attn-0wa).
+            // room we joined resumes as "Joined". The frontend derives the
+            // role from that string, so a neutral value leaves the role
+            // 'unknown' and a restarted reviewer never flips back into the
+            // shared-doc view (attn-6dd). Owners never flip — isReviewerView
+            // requires role 'reviewer' — so a resumed share cannot hijack the
+            // owner's local file view (attn-0wa).
             let is_owner =
                 crate::review::bootstrap::find_path_for_room(self.store.root(), &room_id)
                     .ok()
@@ -3712,6 +3776,7 @@ fn review_command_name(cmd: &ReviewCommand) -> &'static str {
         ReviewCommand::RevokeDurableShare { .. } => "RevokeDurableShare",
         ReviewCommand::OpenDurableShare { .. } => "OpenDurableShare",
         ReviewCommand::Join { .. } => "Join",
+        ReviewCommand::JoinAsAgent { .. } => "JoinAsAgent",
         ReviewCommand::Pull { .. } => "Pull",
         ReviewCommand::Stop { .. } => "Stop",
         ReviewCommand::Inbox => "Inbox",
@@ -3722,6 +3787,7 @@ fn review_command_name(cmd: &ReviewCommand) -> &'static str {
         ReviewCommand::ResolveAnchor { .. } => "ResolveAnchor",
         ReviewCommand::ReportHtmlAnchorResolution { .. } => "ReportHtmlAnchorResolution",
         ReviewCommand::ResolveComment { .. } => "ResolveComment",
+        ReviewCommand::ReopenComment { .. } => "ReopenComment",
         ReviewCommand::SendCollab { .. } => "SendCollab",
         ReviewCommand::PublishSnapshot { .. } => "PublishSnapshot",
         ReviewCommand::ReannounceIdentity => "ReannounceIdentity",
@@ -3774,6 +3840,10 @@ fn stub_update_for(cmd: &ReviewCommand) -> ReviewUpdate {
         // TODO(attn-nnj.3b): parse invite, open transport, fetch snapshot, emit
         // RoomStatus + SnapshotCreated as data arrives.
         ReviewCommand::Join { invite: _ } => ReviewUpdate::RoomStatusChanged {
+            room_id: stub_room_id(),
+            status: "Pending join — invite accepted for processing".to_string(),
+        },
+        ReviewCommand::JoinAsAgent { invite: _ } => ReviewUpdate::RoomStatusChanged {
             room_id: stub_room_id(),
             status: "Pending join — invite accepted for processing".to_string(),
         },
@@ -3901,6 +3971,10 @@ fn stub_update_for(cmd: &ReviewCommand) -> ReviewUpdate {
         ReviewCommand::ResolveComment { room_id, .. } => ReviewUpdate::RoomStatusChanged {
             room_id: room_id.clone(),
             status: "Pending resolve-comment — no bootstrap attached".to_string(),
+        },
+        ReviewCommand::ReopenComment { room_id, .. } => ReviewUpdate::RoomStatusChanged {
+            room_id: room_id.clone(),
+            status: "Pending reopen-comment — no bootstrap attached".to_string(),
         },
         // PublishSnapshot goes through the real bootstrap path in `submit`
         // when one is attached. Without a bootstrapper (smoke tests) it's a
@@ -4569,6 +4643,7 @@ fn review_event_body_name(body: &crate::review::model::ReviewEventBody) -> &'sta
         ReviewEventBody::SnapshotSuperseded { .. } => "snapshot_superseded",
         ReviewEventBody::CommentCreated { .. } => "comment_created",
         ReviewEventBody::CommentResolved { .. } => "comment_resolved",
+        ReviewEventBody::CommentReopened { .. } => "comment_reopened",
         ReviewEventBody::SuggestionCreated { .. } => "suggestion_created",
         ReviewEventBody::SuggestionAccepted { .. } => "suggestion_accepted",
         ReviewEventBody::SuggestionRejected { .. } => "suggestion_rejected",

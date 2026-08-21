@@ -82,11 +82,11 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
-      # Dropped the old separate `cargo clippy --release`: it was a full second
-      # release-mode compile (~2.5 min) whose artifacts can't be reused by the
-      # size-gate build (clippy goes through RUSTC_WORKSPACE_WRAPPER, so its
-      # fingerprints differ from rustc's). Release-cfg code is still compile-
-      # checked by the actual release build in the size-gate job.
+      # No separate `cargo clippy --release`: it costs a full second
+      # release-mode compile (~2.5 min) whose artifacts the size-gate build
+      # cannot reuse, because clippy goes through RUSTC_WORKSPACE_WRAPPER and
+      # its fingerprints differ from rustc's. The size-gate job's release build
+      # still compile-checks release-cfg code.
       - name: Clippy
         run: cargo clippy --all-targets -- -D warnings
 
@@ -134,7 +134,7 @@ jobs:
         with:
           shared-key: size-gate-macos
 
-      # Binary-size gate — enforces the 30 MiB target from
+      # Binary-size gate — enforces the 40 MiB target from
       # planning/collab/amendments.md §Decision #1 (webrtc-rs is the main risk).
       # Emergency bypass via env: ATTN_SIZE_BUDGET_WAIVER=1 (also accepts
       # BINARY_SIZE_WAIVER=1). See CLAUDE.md §"Binary-size gate".
@@ -215,10 +215,9 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # The relay is the collab backbone (room auth, caps, PoW, abuse gates).
-      # Its vitest-pool-workers suite (~293 tests) previously ran only on the
-      # manual relay-deploy workflow — gate it on every PR/push so the collab
-      # path can't regress unnoticed.
+      # The relay is the collab backbone (room auth, caps, PoW, abuse gates),
+      # so its vitest-pool-workers suite gates every PR/push. Leaving it to the
+      # manual relay-deploy workflow lets the collab path regress unnoticed.
       - name: Typecheck
         run: npm run typecheck
 

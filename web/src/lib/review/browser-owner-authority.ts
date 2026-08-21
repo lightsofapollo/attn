@@ -95,6 +95,7 @@ export interface BrowserOwnerSession {
   announceProfile(): Promise<void>;
   replyToComment(anchor: Anchor, body: string, threadId: string): Promise<ReviewEvent>;
   resolveComment(threadId: string): Promise<ReviewEvent>;
+  reopenComment(threadId: string): Promise<ReviewEvent>;
   retryOutbox(): Promise<void>;
   enqueuePublicationBatch(envelopes: readonly MailboxEnvelope[]): Promise<number>;
   flushPublicationOutbox(): Promise<void>;
@@ -373,6 +374,11 @@ export class BrowserOwnerAuthorityService {
   async resolveComment(threadId: string): Promise<ReviewEvent> {
     const session = this.requireDurableReviewSession();
     return session.resolveComment(threadId);
+  }
+
+  async reopenComment(threadId: string): Promise<ReviewEvent> {
+    const session = this.requireDurableReviewSession();
+    return session.reopenComment(threadId);
   }
 
   async retryOutbox(): Promise<void> {

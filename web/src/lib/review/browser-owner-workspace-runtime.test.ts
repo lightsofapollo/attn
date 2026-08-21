@@ -374,6 +374,7 @@ class FakeAuthority implements BrowserOwnerWorkspaceAuthority {
     throw new Error('not used');
   }
   async resolveComment(_threadId: string): Promise<ReviewEvent> { throw new Error('not used'); }
+  async reopenComment(_threadId: string): Promise<ReviewEvent> { throw new Error('not used'); }
   async retryOutbox(): Promise<void> {}
 
   /** Loss-only egress seam — recorded for cursor forwarding assertions. */
@@ -485,6 +486,12 @@ function runtimeOptions(
     holderId: `holder-${workspaceId}`,
     collab: { selfClientId: 'self', selfLabel: 'You', selfColor: '#fff' },
     leaseOptions: { channel: null },
+    // No wall-clock pause between head-moved publication retries. In the real
+    // runtime that pause is load-bearing (it lets the autosave debounce settle
+    // so the retry reads a stable head — PUBLICATION_RETRY_BACKOFF_MS); here
+    // the "concurrent commit" is scripted, so waiting for it would only add
+    // seconds of dead time to the suite.
+    publicationRetryDelayMs: 0,
     ...extras,
   };
 }

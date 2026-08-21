@@ -52,12 +52,12 @@ test('axe: share sheet open', async ({ page }) => {
   await expectNoAxeViolations(page, 'share sheet');
 });
 
-test('axe: saved review docked beside the owner document', async ({ page }) => {
+test('axe: comments docked beside the owner document', async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto('/app/w/ws-product/direction.md?shell=demo');
-  await page.getByRole('button', { name: 'Saved review' }).click();
+  await page.locator('[data-slot="comments-toggle"]').click();
   await expect(page.locator('.review-history-placeholder')).toBeVisible();
-  await expectNoAxeViolations(page, 'saved review dock');
+  await expectNoAxeViolations(page, 'comments dock');
 });
 
 test('axe: mobile editor with files sheet', async ({ page }) => {
@@ -74,13 +74,13 @@ test('keyboard-only: landing reaches both CTAs', async ({ browserName, page }) =
   // enables full keyboard navigation. Exercise the platform's real shortcut.
   const tabKey = browserName === 'webkit' ? 'Alt+Tab' : 'Tab';
   // Tab from the top of the document into the nav and hero.
-  const newWorkspace = page.locator('.hero a[data-action="new-workspace"]');
+  const openDocument = page.locator('.hero a[data-action="open-document"]');
   const openDesk = page.locator('.hero a[data-action="open-desk"]');
   for (let presses = 0; presses < 25; presses += 1) {
     await page.keyboard.press(tabKey);
-    if (await newWorkspace.evaluate((el) => el === document.activeElement)) break;
+    if (await openDocument.evaluate((el) => el === document.activeElement)) break;
   }
-  await expect(newWorkspace).toBeFocused();
+  await expect(openDocument).toBeFocused();
   await page.keyboard.press(tabKey);
   await expect(openDesk).toBeFocused();
 });
@@ -165,29 +165,72 @@ test('keyboard-only: desk rows and storage clear confirm are operable', async ({
 
 test('authoring controls move focus into transient inputs and restore it on cancel', async ({ page }) => {
   await page.goto('/app#new');
+  // The per-file flows below drive the tree row's context menu, and a bare
+  // workspace mounts no rail to hold it (attn-mkmz.5) — give it a second file,
+  // then reopen untitled.md so the preconditions are otherwise unchanged.
+  // untitled.md needs content first, or the import supersedes it
+  // (attn-rjuo.3.1) and there is no row left to right-click.
+  await page.locator('[data-body-text] .ProseMirror').click();
+  await page.keyboard.type('Seed.');
+  const chooser = page.waitForEvent('filechooser');
+  await page.keyboard.press('ControlOrMeta+KeyK');
+  await page.getByRole('option', { name: /Add files to this workspace/u }).click();
+  await (await chooser).setFiles({
+    name: 'second.md',
+    mimeType: 'text/markdown',
+    buffer: Buffer.from('# Second\n'),
+  });
+  await expect(page.getByRole('textbox', { name: 'Filter files' })).toBeVisible();
+  await page.getByRole('button', { name: 'untitled.md', exact: true }).click();
+  await expect(page).toHaveURL(/\/untitled\.md$/u);
+
   const documentEditor = page.getByRole('textbox', { name: 'Document editor' });
   await expect(documentEditor).toHaveAttribute('aria-multiline', 'true');
   await expect(documentEditor).toHaveAttribute('aria-readonly', 'false');
 
   const projectPicker = page.getByRole('combobox', { name: 'Project picker' });
+  const triggerBox = await projectPicker.boundingBox();
   await projectPicker.click();
   await page.getByRole('menuitem', { name: 'Rename workspace' }).click();
   const workspaceInput = page.getByRole('textbox', { name: 'Workspace title' });
   await expect(workspaceInput).toBeFocused();
+  /* IN PLACE (attn-rjuo.2.1). The rename used to render in the header's ACTIONS
+     cluster, at the far right, editing a name that sat at the far left — an
+     unstyled field floating beside Share, which read as a rendering fault. It
+     now takes the name's own slot, so assert the geometry and not merely that
+     an input exists somewhere. */
+  const inputBox = await workspaceInput.boundingBox();
+  expect(triggerBox).not.toBeNull();
+  expect(inputBox).not.toBeNull();
+  expect(Math.abs(inputBox!.x - triggerBox!.x)).toBeLessThanOrEqual(8);
+  expect(Math.abs(inputBox!.y - triggerBox!.y)).toBeLessThanOrEqual(8);
   await page.keyboard.press('Escape');
   await expect(projectPicker).toBeFocused();
 
   const fileRow = page.getByRole('button', { name: 'untitled.md', exact: true });
+  const fileRowBox = await fileRow.boundingBox();
   await fileRow.click({ button: 'right' });
   const fileRename = page.getByRole('menuitem', { name: 'Rename…', exact: true });
   await fileRename.click();
   const pathInput = page.getByRole('textbox', { name: 'New path' });
   await expect(pathInput).toBeFocused();
+  /* ON THE ROW (user ruling, 2026-08-20), for the reason the workspace rename
+     above is pinned the same way. This field used to render in the rail's
+     FOOTER — bottom of a column whose top held the row it renamed, hundreds of
+     pixels apart with nothing joining them. Assert the geometry, not merely
+     that an input exists somewhere in the rail. */
+  const pathInputBox = await pathInput.boundingBox();
+  expect(fileRowBox).not.toBeNull();
+  expect(pathInputBox).not.toBeNull();
+  expect(pathInputBox!.y).toBeGreaterThanOrEqual(fileRowBox!.y - 2);
+  expect(pathInputBox!.y + pathInputBox!.height).toBeLessThanOrEqual(
+    fileRowBox!.y + fileRowBox!.height + 2,
+  );
   await page.keyboard.press('Escape');
   await expect(fileRow).toBeFocused();
 
   // New Markdown moved to the command palette; Escape from the transient
-  // path input returns focus to the sidebar's project picker anchor.
+  // path input returns focus to the project picker, which lives in the header.
   await page.keyboard.press('ControlOrMeta+KeyK');
   await page.getByRole('option', { name: /New Markdown file/u }).click();
   await expect(page.getByRole('textbox', { name: 'New Markdown file path' })).toBeFocused();

@@ -48,9 +48,9 @@
       <div class="actions">
         {#each state.actions as action (action)}
           <!-- Every action routes to the storage page, which owns the working
-               export / backup / persistence controls. These were previously
-               dead <button>s with no handler — silent no-ops on the exact
-               "back up before you lose data" prompt. -->
+               export / backup / persistence controls. A handler-less <button>
+               here is a silent no-op on the exact "back up before you lose
+               data" prompt. -->
           <a class="button" href="/app/storage">{action}</a>
         {/each}
       </div>

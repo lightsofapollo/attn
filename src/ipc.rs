@@ -157,6 +157,9 @@ pub enum IpcMessage {
     #[serde(rename = "review_resolve_comment", rename_all = "camelCase")]
     ReviewResolveComment { room_id: RoomId, thread_id: String },
 
+    #[serde(rename = "review_reopen_comment", rename_all = "camelCase")]
+    ReviewReopenComment { room_id: RoomId, thread_id: String },
+
     #[serde(rename = "review_stop", rename_all = "camelCase")]
     ReviewStop {
         #[serde(default)]
@@ -571,6 +574,9 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
             IpcMessage::ReviewResolveComment { room_id, thread_id } => {
                 submit_review_command(state, ReviewCommand::ResolveComment { room_id, thread_id });
             }
+            IpcMessage::ReviewReopenComment { room_id, thread_id } => {
+                submit_review_command(state, ReviewCommand::ReopenComment { room_id, thread_id });
+            }
             IpcMessage::ReviewStop { room_id } => {
                 submit_review_command(state, ReviewCommand::Stop { room_id });
             }
@@ -659,20 +665,16 @@ fn toggle_checkbox(state: &Arc<Mutex<AppState>>, line: usize, checked: bool) {
     }
 
     let current_line = lines[idx];
-    let new_line;
-    let replaced: String;
-
-    if checked {
+    let replaced = if checked {
         // Want to check: replace `- [ ]` with `- [x]`
-        replaced = current_line.replacen("- [ ]", "- [x]", 1);
-        new_line = replaced.as_str();
+        current_line.replacen("- [ ]", "- [x]", 1)
     } else {
         // Want to uncheck: replace `- [x]` or `- [X]` with `- [ ]`
-        replaced = current_line
+        current_line
             .replacen("- [x]", "- [ ]", 1)
-            .replacen("- [X]", "- [ ]", 1);
-        new_line = replaced.as_str();
-    }
+            .replacen("- [X]", "- [ ]", 1)
+    };
+    let new_line = replaced.as_str();
 
     if new_line == current_line {
         tracing::warn!("line {} does not contain a checkbox", line);

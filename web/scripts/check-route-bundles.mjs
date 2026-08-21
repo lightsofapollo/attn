@@ -84,12 +84,12 @@ if (failures > 0) {
   console.error(`route bundle boundaries violated (${failures} finding${failures === 1 ? '' : 's'})`);
   process.exit(1);
 }
-/* Say only what was actually checked (attn-n01r.41). This previously claimed
-   'route bundle boundaries hold', which read as a guarantee about what ships.
-   It is not: this walks chunk.imports, and Vite records a dynamic import's graph
+/* Say only what was actually checked (attn-n01r.41). Claiming 'route bundle
+   boundaries hold' would read as a guarantee about what ships, and this is not
+   that: it walks chunk.imports, while Vite records a dynamic import's graph
    under chunk.dynamicImports. An awaited import() in an entry pulls that graph
-   over the wire during bootstrap while this gate stays green — which is exactly
-   how ~600 KB of ProseMirror and crypto reached the desk under a passing build.
+   over the wire during bootstrap with this gate still green — which is how
+   ~600 KB of ProseMirror and crypto reached the desk under a passing build.
    The wire is verified by the per-route script budgets in
    e2e/hosted-routes.spec.ts; this checks the static graph only. */
 console.log('static route graphs clean: no editor or crypto chunks statically reachable');

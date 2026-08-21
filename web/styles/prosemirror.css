@@ -461,10 +461,6 @@
 /* Last row's rule would double the panel's own bottom border and cut across
    the rounded corners. `> :last-child` is the trailing row section — tbody,
    after the colgroup prosemirror-tables' TableView prepends. */
-/* (The last-row border trim and the `th` eyebrow used to be restated here as
-   twins of base.css — deleted with the rest of the surface when the doc layer
-   made the single copy authoritative. See the mechanics-only note above.) */
-
 /* Code block language label. Inside the .code-block frame it pins to the
    frame's top-left (matching the pinned copy button) so it can't slide away
    with horizontal scroll; the in-flow pre::before form remains for code

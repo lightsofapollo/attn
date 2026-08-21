@@ -289,6 +289,7 @@ export async function createProductionDurableShareSession(options: ProductionDur
         createComment: (anchor, body, threadId) => live.createComment(anchor, body, threadId),
         replyToComment: (anchor, body, threadId) => live.replyToComment(anchor, body, threadId),
         resolveComment: threadId => live.resolveComment(threadId),
+        reopenComment: threadId => live.reopenComment(threadId),
         createSuggestion: draft => live.createSuggestion(draft),
         retryOutbox: () => live.retryOutbox(),
         announceProfile: () => live.announceProfile(),
@@ -455,6 +456,7 @@ export class DurableShareBrowserSessionFacade {
   }
   async replyToComment(anchor: Anchor, body: string, threadId: string): Promise<ReviewEvent> { return this.createComment(anchor, body, threadId); }
   async resolveComment(threadId: string): Promise<ReviewEvent> { return this.requireSession().resolveComment(threadId); }
+  async reopenComment(threadId: string): Promise<ReviewEvent> { return this.requireSession().reopenComment(threadId); }
   async createSuggestion(draft: SuggestionDraft): Promise<ReviewEvent> { return this.requireSession().createSuggestion(draft); }
   async sendCollab(payload: string): Promise<void> { return this.requireSession().sendCollab(payload); }
   async retryOutbox(): Promise<void> { await this.requireSession().retryOutbox(); }
@@ -611,6 +613,7 @@ export class RememberedPushShareSessionFacade {
   async createComment(): Promise<ReviewEvent> { throw new Error('reopen the original share link to author'); }
   async replyToComment(): Promise<ReviewEvent> { throw new Error('reopen the original share link to author'); }
   async resolveComment(): Promise<ReviewEvent> { throw new Error('reopen the original share link to author'); }
+  async reopenComment(): Promise<ReviewEvent> { throw new Error('reopen the original share link to author'); }
   async createSuggestion(): Promise<ReviewEvent> { throw new Error('reopen the original share link to author'); }
   async retryOutbox(): Promise<void> {}
   async rememberRoom(): Promise<void> {}

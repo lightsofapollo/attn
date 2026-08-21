@@ -1083,6 +1083,11 @@ function eventAllowedForRole(
     case 'comment_resolved':
       return (registered.kind === 'owner' || registered.kind === 'reviewer')
         && body.resolvedBy === meta.authorId;
+    // Reopening carries exactly the resolve authority (attn-bb6t.4); mirrors
+    // the native guard in src/review/transport/inbound.rs.
+    case 'comment_reopened':
+      return (registered.kind === 'owner' || registered.kind === 'reviewer')
+        && body.reopenedBy === meta.authorId;
     case 'snapshot_created':
     case 'snapshot_superseded':
     case 'suggestion_accepted':

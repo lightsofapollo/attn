@@ -33,8 +33,15 @@ export interface DocRect {
   height: number;
 }
 
-/** Visual state of a rendered anchor. */
-export type AnchorRenderState = 'default' | 'active' | 'resolved';
+/**
+ * Visual state of a rendered anchor.
+ *
+ * `hovered` is a distinct tier from `active` on purpose (attn-bb6t.3): hover
+ * is transient pointer feedback while `active` means "this is the thread the
+ * shell is focused on", and collapsing them made a hovered anchor
+ * indistinguishable from the focused one.
+ */
+export type AnchorRenderState = 'default' | 'active' | 'resolved' | 'hovered';
 
 /** How an anchor resolved against the current DOM. Mirrors `ResolvedAnchor`. */
 export type DocResolutionStatus = 'exact' | 'remapped' | 'ambiguous' | 'stale';
@@ -115,7 +122,14 @@ export type DocMessage =
     }
   | { type: 'anchorsResolved'; v: number; results: AnchorResolution[] }
   | { type: 'geometry'; v: number; results: AnchorGeometry[]; scrollTop: number }
-  | { type: 'anchorActivated'; v: number; anchorId: string };
+  | { type: 'anchorActivated'; v: number; anchorId: string }
+  /**
+   * Pointer entered (or left, `anchorId: null`) a committed anchor. Feeds the
+   * document→card half of hover linking (attn-bb6t.3). Purely advisory: like
+   * every frame message it may not mutate review state, and the shell treats
+   * an unknown anchorId as "nothing hovered".
+   */
+  | { type: 'anchorHover'; v: number; anchorId: string | null };
 
 /** Shell → document. */
 export type ShellMessage =
@@ -404,6 +418,13 @@ export function parseDocMessage(raw: unknown): DocMessage | null {
     case 'anchorActivated': {
       if (!withinBytes(m.anchorId, MAX_SELECTOR_BYTES)) return null;
       return { type: 'anchorActivated', v: DOC_PROTOCOL_VERSION, anchorId: m.anchorId };
+    }
+    case 'anchorHover': {
+      if (m.anchorId === null) {
+        return { type: 'anchorHover', v: DOC_PROTOCOL_VERSION, anchorId: null };
+      }
+      if (!withinBytes(m.anchorId, MAX_SELECTOR_BYTES)) return null;
+      return { type: 'anchorHover', v: DOC_PROTOCOL_VERSION, anchorId: m.anchorId };
     }
     default:
       return null;

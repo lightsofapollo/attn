@@ -727,6 +727,16 @@ fn authorize_event(
         {
             Ok(())
         }
+        // Reopening carries exactly the resolve authority (attn-bb6t.4): a
+        // non-agent participant, acting as themselves. Anything narrower —
+        // "only the resolver may reopen" — would strand a thread whose
+        // resolver has left the room.
+        ReviewEventBody::CommentReopened { reopened_by, .. }
+            if registered.kind != ParticipantKind::Agent
+                && reopened_by == &event.meta.author_id =>
+        {
+            Ok(())
+        }
         ReviewEventBody::PresenceUpdated {
             participant_id,
             device_id,
@@ -1184,6 +1194,47 @@ mod tests {
             .import_event_envelope(&room_id, &envelope)
             .await
             .expect_err("comment tier cannot import suggestion");
+        assert!(matches!(error, InboundError::UnauthorizedEvent));
+        assert_eq!(store.iter_events(&room_id).expect("events").count(), 0);
+    }
+
+    #[tokio::test]
+    async fn reviewer_can_import_self_attributed_comment_reopened() {
+        let (pipeline, store, signer, room_id, _tmp) = fresh_pipeline_with_signer();
+        let envelope = mint_event_envelope_with_body(
+            pipeline.event_key,
+            signer,
+            &room_id,
+            ReviewEventBody::CommentReopened {
+                thread_id: "thread-1".to_string(),
+                reopened_by: id::<ParticipantId>("p-author-01"),
+            },
+        );
+        pipeline
+            .import_event_envelope(&room_id, &envelope)
+            .await
+            .expect("self-attributed reopen must be accepted");
+        assert_eq!(store.iter_events(&room_id).expect("events").count(), 1);
+    }
+
+    #[tokio::test]
+    async fn comment_reopened_on_someone_elses_behalf_is_refused() {
+        let (pipeline, store, signer, room_id, _tmp) = fresh_pipeline_with_signer();
+        let envelope = mint_event_envelope_with_body(
+            pipeline.event_key,
+            signer,
+            &room_id,
+            ReviewEventBody::CommentReopened {
+                thread_id: "thread-1".to_string(),
+                // Not the envelope's author: reopening in another
+                // participant's name is exactly what the guard exists for.
+                reopened_by: id::<ParticipantId>("p-someone-else"),
+            },
+        );
+        let error = pipeline
+            .import_event_envelope(&room_id, &envelope)
+            .await
+            .expect_err("reopen attributed to another participant must be refused");
         assert!(matches!(error, InboundError::UnauthorizedEvent));
         assert_eq!(store.iter_events(&room_id).expect("events").count(), 0);
     }
@@ -1729,11 +1780,6 @@ mod tests {
     // device id (or accepts the broadcast / target=None form) BEFORE
     // AEAD-open, and surfaces a relay-redirect attempt as
     // `InboundError::TargetDeviceMismatch`.
-    //
-    // Tests cover the three branches of the target check:
-    //   12. target=Some(self)  → accept (targeted-to-us).
-    //   13. target=Some(other) → reject with TargetDeviceMismatch (relay redirect).
-    //   14. target=None        → accept (true broadcast).
     // -----------------------------------------------------------------
 
     #[tokio::test]

@@ -31,7 +31,6 @@ FAIL=0
 # --- Helpers ---
 
 cleanup() {
-    # Kill any attn daemon we started
     if [ -n "${ATTN_PID:-}" ] && kill -0 "$ATTN_PID" 2>/dev/null; then
         kill "$ATTN_PID" 2>/dev/null || true
         wait "$ATTN_PID" 2>/dev/null || true
@@ -95,7 +94,6 @@ wait_for_ready() {
     local max_attempts=100
     local attempt=0
 
-    # Wait for socket to appear
     while [ ! -S "$SOCKET" ] && [ $attempt -lt $max_attempts ]; do
         sleep 0.1
         attempt=$((attempt + 1))
@@ -131,7 +129,6 @@ kill_daemon() {
         ATTN_PID=""
     fi
     rm -f "$SOCKET"
-    # Wait for socket to be cleaned up
     local attempt=0
     while [ -S "$SOCKET" ] && [ $attempt -lt 20 ]; do
         sleep 0.1

@@ -6,7 +6,9 @@
     SAVE_STATE_SAVING,
     SAVE_STATE_STORAGE_ATTENTION,
   } from '../../lib/save-state-copy';
+  import { appWorkspaceUrl } from '../../lib/hosted/routes';
   import SaveChip from '../../lib/SaveChip.svelte';
+  import BrandMark from '../../lib/BrandMark.svelte';
   import type { EditorView } from 'prosemirror-view';
   import BottomSheet from './BottomSheet.svelte';
   import DegradedBanner from './DegradedBanner.svelte';
@@ -15,11 +17,18 @@
   import { userProfile } from '../../lib/profile.svelte';
   import { resolveParticipantColor } from '../../lib/participant-color';
   import CommandPalette, { type HostedCommand } from './CommandPalette.svelte';
+  import { cycleTheme, getThemePreference, nextPreference, THEME_LABEL } from '../theme.svelte';
+  import ShortcutsSheet from './ShortcutsSheet.svelte';
+  import ReviewTroubleDialog from './ReviewTroubleDialog.svelte';
+  import { describeReviewTrouble } from './review-trouble';
   import { AutosaveController } from './autosave';
   import type { reviewStore as ReviewStoreInstance } from '../../lib/review/store.svelte';
   import { buildManifest, buildWorkspaceZip, triggerDownload, zipFileName } from './export-zip';
-  import { expandPicked, toImportFiles } from './import-files';
-  import { fileDrop, filesToPicked } from './file-drop';
+  import { expandPicked } from './import-files';
+  import { importIntoWorkspace } from './import-into-workspace';
+  import { createOwnerSessionGate } from './owner-session-gate';
+  import { fileDrop, filesToPicked, watchFileDrag, type DroppedFile } from './file-drop';
+  import { readWorkspaceOrigin } from './workspace-origin';
   import { autofocus } from '../../lib/hosted/autofocus';
   import type {
     EditingSession,
@@ -47,6 +56,7 @@
   import { scrollViewToPos } from '../../lib/scroll-viewport';
   import { peerJumpPosition } from '../../lib/peer-strip-format';
   import { attachCollabPresenceSinks } from '../../lib/prosemirror/collab-presence-sinks';
+  import LoadingLine from './LoadingLine.svelte';
   import HtmlViewer from '../../lib/HtmlViewer.svelte';
   import HtmlCommentComposer from '../../lib/HtmlCommentComposer.svelte';
   import type {
@@ -65,6 +75,9 @@
     /** Decoded head body when the active entry is Markdown; null otherwise. */
     bodyText?: string | null;
     isNewDraft?: boolean;
+    /** Why this session opened the workspace; see AppShell. "blank" suppresses
+     *  the canvas invitation — the person asked for an empty page. */
+    createIntent?: 'blank' | 'import';
     /** Switch the active file in place (no reload). Provided by AppShell. */
     onSelectEntry?: (path: string) => void;
     /** Refresh the workspace after an entry-list change (no reload). */
@@ -81,6 +94,7 @@
     activePath,
     bodyText = null,
     isNewDraft = false,
+    createIntent,
     onSelectEntry,
     onWorkspaceChanged,
     workspaces = [],
@@ -93,6 +107,14 @@
   );
   let shareOpen = $state(false);
   let paletteOpen = $state(false);
+  let shortcutsOpen = $state(false);
+  /* The sidebar footer keeps a resting "Add files" button (attn-mkmz.3); this
+     flag only promotes it to an emphatic drop target while something is over
+     the window. attn-08fa.12 removed the resting control and left the palette
+     command as the sole route, which made uploading findable only by someone
+     who already knew a keystroke. */
+  let draggingFiles = $state(false);
+  $effect(() => watchFileDrag((dragging) => { draggingFiles = dragging; }));
   let filesSheetOpen = $state(false);
   let reviewSheetOpen = $state(false);
   let shareButton = $state<HTMLButtonElement | undefined>();
@@ -177,6 +199,9 @@
   let requestDecorationsRebuild = $state<
     typeof import('../../lib/prosemirror/review-decorations').requestReviewDecorationsRebuild | null
   >(null);
+  let applyHoverHighlight = $state<
+    typeof import('../../lib/prosemirror/review-decorations').applyReviewHoverHighlight | null
+  >(null);
   let ReviewApplyExpandComponent = $state<typeof ReviewApplyExpandComponentType | null>(null);
   let SelectionToolbarComponent = $state<typeof import('../../lib/SelectionToolbar.svelte').default | null>(null);
   let CommentComposerComponent = $state<typeof import('../../lib/CommentComposer.svelte').default | null>(null);
@@ -201,7 +226,21 @@
   let collabClientId = $state<string | null>(null);
   let collabEpoch = $state(0);
   let readyCollabEpoch = $state(-1);
-  let ownerSessionOpening: Promise<EditingSession | null> | null = null;
+  /* One acquisition at a time, tagged with the workspace that asked for it
+     (attn-e9r2.2). Desktop switches workspaces in place, so an untagged
+     pending promise handed the new workspace the old workspace's session —
+     see owner-session-gate.ts for the whole failure. */
+  const ownerSessionGate = createOwnerSessionGate<EditingSession>({
+    current: () => workspace.id,
+    begin: (workspaceId) => service.beginEditing(workspaceId),
+    discard: async (workspaceId, granted) => {
+      // Nothing installed it, so nothing else will close it: hand back the
+      // lease, the heartbeat and the review transport rather than leave an
+      // orphan runtime holding this workspace (attn-e9r2.3).
+      await granted.release().catch(() => undefined);
+      await service.closeEditingRuntime(workspaceId).catch(() => undefined);
+    },
+  });
   let unsubscribeOwner: (() => void) | null = null;
   let collabSeedRequest = 0;
   let loadedCollabGenerationKey: string | null = null;
@@ -221,17 +260,59 @@
       && ownerState?.roomId !== undefined
       && ownerState.authority?.session?.authoringReady === true,
   );
-  // Lease/authoring states only — plain share status ("Shared · relay")
-  // moved into the ShareChip (desktop) and the masthead Share button
-  // (mobile), so the save chip no longer duplicates it.
+  // Lease/authoring states only. Plain share status ("Shared · relay") belongs
+  // to the ShareChip (desktop) and the masthead Share button (mobile), so the
+  // save chip must not duplicate it.
+  //
+  // "Live review paused" is NOT in this list any more. It used to be, which
+  // meant the only header signal for a broken review was the save chip's
+  // fallback ⓘ — a glyph that opens nothing, reports nothing visibly, and
+  // reads as "click me for more" (owner: "Info icon appears to do nothing").
+  // That state now has its own labelled control below.
   const ownerRoomStatus = $derived.by(() => {
     if (joinLive) return 'Live · editing with another tab';
     const state = ownerState;
     if (!state) return null;
     if (state.leaseRole === 'passive') return 'Read-only tab';
-    if (!state.roomId) return null;
-    if (!state.liveEditingAvailable) return 'Live review paused';
     return null;
+  });
+
+  /* One description of "the live review is not working", wherever it broke.
+     Two separate inline banners used to carry this, each printing the runtime's
+     raw error string into the reading column; review-trouble.ts turns those
+     strings into something a reader can act on and keeps the original for the
+     dialog's technical disclosure. */
+  const reviewTrouble = $derived.by(() => {
+    const state = ownerState;
+    if (!state) return null;
+    const deliveryFailing = Boolean(state.authority?.session?.authoringError);
+    // `error` with no room means the runtime STOPPED trying — it tore the
+    // authority down and dropped the room. Even a cause that normally clears
+    // itself is terminal from here, so `exhausted` flips the copy from "this
+    // finishes on its own" to something with an action attached.
+    if (state.status === 'error' && !state.roomId) {
+      return describeReviewTrouble(state.reason, {
+        sharing: false,
+        deliveryFailing,
+        exhausted: true,
+      });
+    }
+    if (state.roomId && !state.liveEditingAvailable) {
+      return describeReviewTrouble(state.reason, { sharing: true, deliveryFailing });
+    }
+    if (deliveryFailing) {
+      return describeReviewTrouble(state.authority?.session?.authoringError, {
+        sharing: true,
+        deliveryFailing: true,
+      });
+    }
+    return null;
+  });
+  let troubleDialogOpen = $state(false);
+  // A trouble that resolves itself must not leave a dialog open describing a
+  // problem that no longer exists.
+  $effect(() => {
+    if (!reviewTrouble) troubleDialogOpen = false;
   });
   const saveChipLabel = $derived(ownerRoomStatus ?? saveState);
   const saveChipTitle = $derived(
@@ -290,7 +371,120 @@
   let entryActionPath = $state<string | null>(null);
   let railError = $state<string | null>(null);
   let assetInput = $state<HTMLInputElement | undefined>();
+  let assetFolderInput = $state<HTMLInputElement | undefined>();
   let previewUrl = $state<string | null>(null);
+
+  /* The empty-canvas invitation (attn-mkmz.5). A brand-new workspace lands on a
+     blank untitled.md, and the only standing offer to bring a real document in
+     was the small dashed button at the foot of the sidebar — so the first thing
+     a reviewer saw in the reviewer-for-agent-docs product was an empty page and
+     no visible way to hand it a page. The desk's own well says the same words;
+     this is that well, in the one place a new workspace actually opens.
+
+     It is not a modal and it does not gate typing. It withdraws on the first doc
+     change (`noteCanvasEdited`, called from onEditorChanged), and everything but
+     its two buttons is pointer-transparent, so clicking the canvas through it
+     lands in the editor exactly as it does today. */
+  /* WHICH FILE has been answered, not a bare "yes" (attn-rjuo).
+     
+     This was a boolean reset by an effect keyed on `activeEntry?.path`. That
+     effect re-ran whenever `activeEntry` recomputed — which happens on every
+     autosave commit, because AppShell hands down a fresh `workspace` and the
+     derived produces a new object for the same path. So the latch cleared a
+     second after you typed and the invitation reappeared over your own words.
+     Holding the path makes the reset structural: it is answered exactly while
+     the answered path is the open one, and no effect can undo it. */
+  let canvasAnsweredPath = $state<string | null>(null);
+
+  const canvasInviteEdited = $derived(
+    canvasAnsweredPath !== null && canvasAnsweredPath === (activeEntry?.path ?? null),
+  );
+
+  function noteCanvasEdited(): void {
+    canvasAnsweredPath = activeEntry?.path ?? null;
+  }
+
+  /* A click into the canvas answers the invitation as surely as a keystroke
+     does (attn-rjuo.1.3). Withdrawing only on a doc change left the caret and
+     the centred offer on screen together — you had asked for the blank page and
+     the page was still asking you back, which is the frame the report called
+     broken. Its own two buttons are the exception: choosing a file there is
+     accepting the invitation, not dismissing it. */
+  function onCanvasPointerDown(event: PointerEvent): void {
+    if (!showCanvasInvite) return;
+    if ((event.target as Element | null)?.closest('.canvas-invite')) return;
+    noteCanvasEdited();
+  }
+
+  /* BARE: the workspace as you arrive at it — one editable file, and that file
+     empty. This is what "no file or folder has been selected" means; both the
+     invitation and the missing rail hang off it, so they cannot disagree about
+     what an untouched workspace is. */
+  const workspaceIsBare = $derived(
+    activeEntry?.presentation === 'editable'
+      // The WORKSPACE has to be bare, not just this file. An empty new file
+      // inside a workspace that already holds documents is an empty file, and
+      // offering to import into it would answer a question nobody asked.
+      && workspace.entries.length <= 1
+      /* The SAME expression the editor is seeded from (see `markdown={…}` on
+         EditorComponent), not `bodyText` alone: the local live-editing path
+         sets `collabSeed` even for a plain local workspace, so any narrower
+         test either misses the seed or — checking `collabSeed === null` —
+         never fires at all. It does not track typing; `canvasInviteEdited`
+         is what answers the invitation. */
+      && (collabSeed?.markdown ?? remountSeed ?? bodyText ?? displayText ?? '').trim().length === 0,
+  );
+
+  /* WHY this workspace exists, read from the durable record rather than from a
+     prop (attn-rjuo).
+     
+     `createIntent` is session state on AppShell, and AppShell clears it on
+     every same-workspace refresh — which fires after each autosave commit. So
+     a page someone had asked to be BLANK was re-covered with an offer to import
+     one, a second after they started typing. The origin was already being
+     persisted; reading it here makes the answer immune to a state clear. The
+     prop stays as the same-session fallback for browsers that refuse
+     localStorage, where nothing else is durable either. */
+  const workspaceOrigin = $derived(readWorkspaceOrigin(workspace.id) ?? createIntent);
+
+  const showCanvasInvite = $derived(
+    workspaceIsBare
+      // `canvasInviteEdited` as well as the emptiness test: autosave is
+      // debounced, so the seed text still reads empty for a beat after the
+      // first keystroke and the invitation would linger over live typing.
+      && !canvasInviteEdited
+      && !joinLive
+      // Someone who asked for a blank untitled.md in so many words has already
+      // answered the question this asks (user ruling, 2026-08-20). That route
+      // gets the ordinary editor — rail, file row, Add files — from the first
+      // frame, because a blank page is a document you are working on, not an
+      // empty surface waiting to be told what it is.
+      && workspaceOrigin !== 'blank',
+  );
+
+  /* The rail is hidden exactly while the invitation is up (user ruling,
+     2026-08-20, refining the earlier one).
+     
+     Two states, not three: the IMPORT route is the invitation screen and has
+     nothing to navigate, so it drops the rail; the BLANK route is an ordinary
+     editor and keeps it. Tying the two together retired a sticky per-workspace
+     flag that had to guess when a bare workspace stopped being bare, and with
+     it a class of "the rail came back on its own" bugs.
+     
+     No mid-word jump, which is what the sticky flag existed to prevent: the
+     invitation withdraws on POINTER-DOWN (attn-rjuo.1.3), so clicking into the
+     canvas restores the rail before a single character is typed.
+     
+     The carve-out below is the rail's FOOTER: it hosts the transient inputs for
+     the new-file, rename and delete flows, so a hidden rail must come back for
+     the duration of one — otherwise ⌘K → "New Markdown file" opens a field that
+     never mounts and the command silently does nothing. */
+  const hideFileRail = $derived(
+    showCanvasInvite
+      && !addingMarkdown
+      && !renamingEntry
+      && !confirmingEntryDelete,
+  );
 
   // ————— iOS reader behaviors (attn-7xl.3.7) —————
   let canvasEl = $state<HTMLElement | undefined>();
@@ -557,8 +751,9 @@
   }
 
   // Transient inputs must not strand keyboard focus on <body> when cancelled:
-  // return it to the sidebar control that owns the flow (the project picker
-  // for workspace-level flows, the active tree row for entry renames).
+  // return it to the control that owns the flow — the project picker (in the
+  // header since 2026-08-20) for workspace-level flows, the active tree row for
+  // entry renames.
   function focusSidebarAnchor(selector: string): void {
     queueMicrotask(() => document.querySelector<HTMLElement>(selector)?.focus());
   }
@@ -632,24 +827,81 @@
         addingMarkdown = false;
         await onWorkspaceChanged(path);
       } else {
-        window.location.assign(`/app/w/${workspace.id}/${path}`);
+        window.location.assign(appWorkspaceUrl(workspace.id, path));
       }
     } catch (error) {
       railError = error instanceof Error ? error.message : String(error);
     }
   }
 
-  async function importFiles(files: Iterable<File>): Promise<void> {
+  /**
+   * The placeholder an import supersedes (attn-rjuo.3.1).
+   *
+   * Both desk routes mint a workspace by creating `untitled.md`, so importing
+   * into a brand-new workspace left the imported document sitting beside an
+   * empty file nobody asked for — the reported "untitled.md that shouldn't
+   * exist". This names the one case where removing it is safe, and the import
+   * path below is the only caller, so every route that imports (the canvas
+   * pickers, a canvas drop, the rail's Add files, the palette, the mobile Files
+   * sheet) inherits the rule.
+   *
+   * Deliberately narrow. It is NOT keyed on how the workspace was created: a
+   * blank page someone typed into is theirs whatever they clicked to get it.
+   * The guards are emptiness and solitude — the sole entry, the default name,
+   * no text, and nothing pending in the autosave buffer.
+   */
+  function supersededPlaceholder(importedPaths: string[]): string | null {
+    if (workspace.entries.length !== 1) return null;
+    const only = workspace.entries[0];
+    if (!only || only.path !== 'untitled.md' || only.kind !== 'markdown') return null;
+    // An import that carries its own untitled.md owns the name; deleting after
+    // adding would take the newcomer with it.
+    if (importedPaths.includes(only.path)) return null;
+    /* Ask the EDITOR, not the seed. `collabSeed.markdown` is what the editor
+       was handed when it mounted — for a local workspace that is the empty
+       string, and it stays the empty string however much you type. Reading it
+       here would have called every placeholder untouched and deleted work.
+       The live document is the only honest answer; the seed chain is the
+       fallback for the frames before the editor exists. */
+    const live = editorRef?.getMarkdown?.() ?? null;
+    const text = live ?? collabSeed?.markdown ?? remountSeed ?? bodyText ?? displayText ?? '';
+    if (text.trim().length > 0) return null;
+    return only.path;
+  }
+
+  /**
+   * Import into THIS workspace, whatever the user does next (attn-e9r2.1).
+   *
+   * The pipeline itself lives in `import-into-workspace.ts`, where the
+   * workspace id is a parameter rather than a live lookup — see that module's
+   * header for the switch-mid-import failure it exists to prevent. This end
+   * supplies the live reads (the editor's own text, the current name, the
+   * route follow-up) and owns the rail's error line.
+   */
+  async function importFiles(files: Iterable<File | DroppedFile>): Promise<void> {
+    const wsId = workspace.id;
+    const onScreen = (): boolean => workspace.id === wsId;
     railError = null;
     try {
-      const importedFiles = toImportFiles(await expandPicked(await filesToPicked(files)));
-      await service.addAssetFiles(workspace.id, importedFiles);
-      const openPath = importedFiles.find((file) => file.kind === 'markdown' || file.kind === 'html')?.path
-        ?? importedFiles[0]?.path;
-      if (onWorkspaceChanged) await onWorkspaceChanged(openPath);
-      else window.location.reload();
+      await importIntoWorkspace({
+        workspaceId: wsId,
+        read: async () => expandPicked(await filesToPicked(files)),
+        port: service,
+        scope: {
+          isOnScreen: onScreen,
+          flushPendingEdits,
+          supersededPlaceholder,
+          currentName: () => workspace.name,
+          follow: async (openPath) => {
+            if (onWorkspaceChanged) await onWorkspaceChanged(openPath);
+            else window.location.reload();
+          },
+        },
+      });
     } catch (error) {
-      railError = error instanceof Error ? error.message : String(error);
+      // The rail belongs to whatever is on screen now; an error about a
+      // workspace the user has left would read as a failure of this one.
+      if (onScreen()) railError = error instanceof Error ? error.message : String(error);
     } finally {
       if (assetInput) assetInput.value = '';
     }
@@ -658,6 +910,12 @@
   function onAssetsPicked(): void {
     const files = assetInput?.files;
     if (files && files.length > 0) void importFiles(Array.from(files));
+  }
+
+  function onAssetFolderPicked(): void {
+    const files = assetFolderInput?.files;
+    if (files && files.length > 0) void importFiles(Array.from(files));
+    if (assetFolderInput) assetFolderInput.value = '';
   }
 
   async function commitEntryRename(): Promise<void> {
@@ -671,7 +929,7 @@
     try {
       await service.renameEntry(workspace.id, entry.path, target);
       if (onWorkspaceChanged) await onWorkspaceChanged(target);
-      else window.location.assign(`/app/w/${workspace.id}/${target}`);
+      else window.location.assign(appWorkspaceUrl(workspace.id, target));
     } catch (error) {
       railError = error instanceof Error ? error.message : String(error);
     }
@@ -686,7 +944,7 @@
     try {
       await service.deleteEntry(workspace.id, entry.path);
       if (onWorkspaceChanged) await onWorkspaceChanged();
-      else window.location.assign(`/app/w/${workspace.id}`);
+      else window.location.assign(appWorkspaceUrl(workspace.id));
     } catch (error) {
       railError = error instanceof Error ? error.message : String(error);
     }
@@ -742,6 +1000,7 @@
       ]).then(([editorModule, pmState, , decorationsModule]) => {
         EditorComponent = editorModule.default;
         requestDecorationsRebuild = decorationsModule.requestReviewDecorationsRebuild;
+        applyHoverHighlight = decorationsModule.applyReviewHoverHighlight;
         changeWatcher = [
           new pmState.Plugin({
             view: () => ({
@@ -933,6 +1192,19 @@
     if (bridge) bridge.renderAnchors(htmlRenderableAnchors);
   });
 
+  // Card → document hover for HTML docs (attn-bb6t.3). The rail stores the
+  // hovered thread by ROOT EVENT id; the frame knows anchors by thread id.
+  $effect(() => {
+    const bridge = htmlBridge;
+    const store = reviewStoreRef;
+    const hovered = store?.hoveredEventId ?? null;
+    if (!bridge || !store) return;
+    const thread = hovered === null
+      ? undefined
+      : store.threadsForCurrentFile.find((item) => item.rootEvent.meta.eventId === hovered);
+    bridge.setHoveredAnchor(thread?.id ?? null);
+  });
+
   // Hover chrome is always live in an annotating frame; taking the CLICK — so
   // the page's own links stop firing — waits until the document is genuinely
   // reviewable.
@@ -987,6 +1259,14 @@
     onAnchorActivated: (anchorId) => {
       const thread = reviewStoreRef?.threadsForCurrentFile.find((item) => item.id === anchorId);
       if (thread) reviewStoreRef?.setFocusEventId(thread.rootEvent.meta.eventId);
+    },
+    onAnchorHover: (anchorId) => {
+      // Document → card (attn-bb6t.3). An unknown id means "nothing", which
+      // is also what the frame sends on exit.
+      const thread = anchorId === null
+        ? undefined
+        : reviewStoreRef?.threadsForCurrentFile.find((item) => item.id === anchorId);
+      reviewStoreRef?.setHoveredEventId(thread?.rootEvent.meta.eventId ?? null);
     },
   };
 
@@ -1228,6 +1508,22 @@
     rebuild(view);
   });
 
+  // Card → segment hover linking (attn-bb6t.2). Kept out of the rebuild
+  // effect above: it fires on every mouseenter and only toggles a class on
+  // one thread's marks. Reading resolutions/events re-applies it after a
+  // ProseMirror redraw, which discards the class.
+  $effect(() => {
+    const store = reviewStoreRef;
+    if (!store) return;
+    const hovered = store.hoveredEventId;
+    void store.anchorResolutions;
+    void store.events;
+    const view = pmViewForReview;
+    const apply = applyHoverHighlight;
+    if (!view || !apply) return;
+    apply(view, hovered);
+  });
+
   function installOwnerSession(granted: EditingSession): void {
     session = granted;
     // A tab that was denied (read-only or live co-editing follower) and later
@@ -1280,12 +1576,11 @@
       unsubscribeOwner = null;
       void stale.release().catch(() => undefined);
     }
-    if (ownerSessionOpening) return ownerSessionOpening;
-    ownerSessionOpening = service.beginEditing(workspace.id).then(async (granted) => {
+    return ownerSessionGate.acquire(async (granted) => {
       if (!granted) {
         editDenied = true;
         ownerState = null;
-        return null;
+        return;
       }
       // Takeover while live co-editing: this editor holds the converged doc
       // (possibly ahead of the dead owner's last commit). Commit it BEFORE
@@ -1305,11 +1600,7 @@
       }
       closeLocalJoin();
       installOwnerSession(granted);
-      return granted;
-    }).finally(() => {
-      ownerSessionOpening = null;
     });
-    return ownerSessionOpening;
   }
 
   // Seamless handoff (user feedback: the "Another tab is editing" wall must
@@ -1740,7 +2031,7 @@
   // share room silently lost its host (attn-707).
   const sessionWorkspaceId = $derived(workspace.id);
   $effect(() => {
-    void sessionWorkspaceId;
+    const departing = sessionWorkspaceId;
     return () => {
       unsubscribeOwner?.();
       unsubscribeOwner = null;
@@ -1750,6 +2041,17 @@
       void session?.release();
       session = null;
       ownerState = null;
+      // Invalidate any acquisition still in flight for the workspace being
+      // left (attn-e9r2.2): whatever it grants is nobody's, and the gate
+      // hands it straight back.
+      ownerSessionGate.invalidate();
+      // Hand back the ROUTE authority too (attn-e9r2.3). `release()` leaves
+      // the editor surface and deliberately keeps the route runtime alive
+      // across an edit/read toggle; leaving the workspace is the other case —
+      // its lease, heartbeat, local-collab hub and review transport have no
+      // reader left, and keeping them made every other tab force a takeover
+      // and every switch back and forth accumulate another runtime.
+      void service.closeEditingRuntime(departing).catch(() => undefined);
     };
   });
 
@@ -1951,6 +2253,9 @@
   });
 
   function onEditorChanged(): void {
+    // Before the autosave guard: the invitation withdraws on the first
+    // keystroke whether or not this tab currently holds the write lease.
+    noteCanvasEdited();
     if (!editorRef || !autosave) return;
     // Defer the (potentially large) markdown serialization to the debounced
     // commit — running it per keystroke made typing latency scale with doc
@@ -2161,6 +2466,13 @@
     service.announceReviewActivity(workspace.id);
   }
 
+  async function reopenReview(threadId: string): Promise<void> {
+    const currentSession = session ?? (await ensureOwnerSession());
+    if (!currentSession) throw new Error('Review authoring is unavailable.');
+    await currentSession.reopenComment(threadId);
+    service.announceReviewActivity(workspace.id);
+  }
+
   async function retryReviewDelivery(): Promise<void> {
     const currentSession = session;
     if (!currentSession) return;
@@ -2228,7 +2540,7 @@
   });
 
   function entryHref(entry: WorkspaceEntry): string {
-    return `/app/w/${workspace.id}/${entry.path}`;
+    return appWorkspaceUrl(workspace.id, entry.path);
   }
 
   /**
@@ -2246,7 +2558,7 @@
     if (!path || path === activeEntry?.path) return;
     await autosave?.flush();
     if (onSelectEntry) onSelectEntry(path);
-    else window.location.assign(`/app/w/${workspace.id}/${path}`);
+    else window.location.assign(appWorkspaceUrl(workspace.id, path));
   }
 
   function navigateDesktopTree(relativePath: string): void {
@@ -2389,7 +2701,7 @@
   // ————— command palette (⌘K) —————
   const paletteCommands = $derived.by<HostedCommand[]>(() => {
     const cmds: HostedCommand[] = [
-      { id: 'share', label: 'Share for review', keywords: 'invite link publish reviewer',
+      { id: 'share', label: 'Share for review', keywords: 'review link invite publish reviewer',
         run: () => openShare(shareButton) },
       { id: 'new', label: 'New Markdown file', keywords: 'create add document',
         // Open the sidebar name field (autofocused) — calling
@@ -2399,6 +2711,28 @@
         run: () => { titleValue = workspace.name; renamingTitle = true; } },
       { id: 'export', label: 'Export workspace', hint: '.zip', keywords: 'download backup save',
         run: () => void exportZip() },
+      /* attn-08fa.11 added five entries here at once. attn-mkmz.6 re-admitted
+         them one at a time; three survived and two did not.
+
+         Appearance and Keyboard shortcuts stay because the NATIVE palette
+         carries the same two ("Switch theme (Paper / Ink / System)" and
+         "Keyboard shortcuts" in App.svelte), and parity with native is the
+         reason this palette exists at all. Add files stays because it acts on
+         this workspace — and it is now an accelerator rather than the only
+         route, since the sidebar footer has its resting button back
+         (attn-mkmz.3).
+
+         Dropped: "Go to your desk" and "Storage & recovery". Both are app
+         navigation in a document-scoped surface, neither has a native
+         counterpart, and both already have visible homes — the sidebar project
+         menu's "All workspaces", and the desk header's Storage. */
+      { id: 'appearance', label: `Appearance: ${THEME_LABEL[getThemePreference()]}`,
+        hint: `Switch to ${THEME_LABEL[nextPreference()]}`, keywords: 'theme dark light ink paper system',
+        run: () => cycleTheme() },
+      { id: 'shortcuts', label: 'Keyboard shortcuts', hint: '?', keywords: 'help keys reference cheatsheet',
+        run: () => { shortcutsOpen = true; } },
+      { id: 'add-files', label: 'Add files to this workspace', keywords: 'import upload assets images drop browse',
+        run: () => assetInput?.click() },
     ];
     // Desktop is editor-first (no Edit/Done mode); this command only matters
     // where editing hasn't started — mobile, or a denied/lost owner lease.
@@ -2430,6 +2764,17 @@
       if (shareOpen || filesSheetOpen || reviewSheetOpen || lightboxOpen) return;
       event.preventDefault();
       paletteOpen = !paletteOpen;
+      return;
+    }
+    /* "?" opens the shortcut list — the convention every keyboard-first tool
+       this product is measured against uses (attn-08fa.11). Never while a text
+       field owns the keyboard: "?" is an ordinary character in a document. */
+    if (event.key === '?' && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      if (shareOpen || filesSheetOpen || reviewSheetOpen || lightboxOpen || paletteOpen) return;
+      const target = event.target;
+      if (target instanceof HTMLElement && target.closest('input, textarea, [contenteditable="true"]')) return;
+      event.preventDefault();
+      shortcutsOpen = true;
       return;
     }
     // File deletion is deliberately an inline tree confirmation rather than a
@@ -2732,6 +3077,33 @@
 <svelte:window onkeydown={onGlobalKeydown} onclick={onGlobalClick} />
 
 <CommandPalette bind:open={paletteOpen} commands={paletteCommands} />
+<ShortcutsSheet bind:open={shortcutsOpen} />
+{#if troubleDialogOpen && reviewTrouble}
+  <ReviewTroubleDialog
+    trouble={reviewTrouble}
+    onclose={() => (troubleDialogOpen = false)}
+    actions={[
+      ...(expiredReviewRecoverable
+        ? [{
+            label: reviewRecoveryPending ? 'Restarting…' : 'Restart live review',
+            primary: true,
+            pending: reviewRecoveryPending,
+            run: () => void recoverExpiredReview(),
+          }]
+        : []),
+      ...(ownerState?.authority?.session?.authoringError
+        ? [{ label: 'Retry sending', run: () => void retryReviewDelivery() }]
+        : []),
+      /* Reload is the last resort, and only where it is the actual fix: a
+         failed share resume re-runs startup publication from scratch. A
+         transient catching-up state fixes itself, so offering a page reload
+         there would invite the reader to interrupt the thing that is working. */
+      ...(!reviewTrouble.transient && ownerState?.status === 'error' && !ownerState.roomId
+        ? [{ label: 'Reload and try again', run: () => window.location.reload() }]
+        : []),
+    ]}
+  />
+{/if}
 
 <NamePrompt
   bind:open={namePromptOpen}
@@ -2803,7 +3175,12 @@
 {/if}
 
 {#snippet documentSurface()}
-  <div class:hosted-native-document={desktopLayout} class:writing-sheet={!desktopLayout}>
+  <!-- svelte-ignore a11y_no_static_element_interactions -->
+  <div
+    class:hosted-native-document={desktopLayout}
+    class:writing-sheet={!desktopLayout}
+    onpointerdown={onCanvasPointerDown}
+  >
     {#if health.mode !== 'persistent' && health.mode !== 'best-effort'}
       <div class="hosted-document-banner">
         <DegradedBanner mode={health.mode} />
@@ -2822,48 +3199,12 @@
         </div>
       </div>
     {/if}
-    {#if ownerState?.status === 'error' && !ownerState.roomId}
-      <!-- Share resume/publish failed with no room to fall back on (attn-dkr):
-           a relay rejection here (expired room, storage cap) used to vanish —
-           the ShareChip simply never appeared. Say it, with the actual reason. -->
-      <div class="degraded-banner hosted-document-banner" role="alert" data-degraded="share-resume-failed">
-        <div>
-          <strong>Live sharing is unavailable.</strong>
-          <p>
-            {(ownerState.reason ?? 'The review room could not be reached').replace(/[:\s.]+$/u, '')}.
-            Your document is safe on this device.
-          </p>
-        </div>
-        <div class="actions">
-          <button class="button" type="button" onclick={() => window.location.reload()}>
-            Retry
-          </button>
-        </div>
-      </div>
-    {/if}
-    {#if ownerState?.roomId && !ownerState.liveEditingAvailable}
-      <div class="degraded-banner owner-authority-banner hosted-document-banner" role="status" data-degraded="owner-authority-paused">
-        <div>
-          <strong>Live review is paused.</strong>
-          <p>{ownerState.reason ?? 'Your encrypted review remains readable while authority reconnects.'}</p>
-        </div>
-        <div class="actions">
-          {#if expiredReviewRecoverable}
-            <button
-              class="button"
-              type="button"
-              disabled={reviewRecoveryPending}
-              onclick={() => void recoverExpiredReview()}
-            >
-              {reviewRecoveryPending ? 'Restarting…' : 'Restart live review'}
-            </button>
-          {/if}
-          {#if ownerState.authority?.session?.authoringError}
-            <button class="button" type="button" onclick={() => void retryReviewDelivery()}>Retry delivery</button>
-          {/if}
-        </div>
-      </div>
-    {/if}
+    <!-- The share-resume and authority-paused banners that used to live here
+         moved into the header (attn-dkr's original point stands: a relay
+         rejection must not vanish silently — it just does not belong in the
+         reading column, printing an engine string, pushing the document down
+         the page every time the relay hiccups). See `reviewTrouble` above and
+         `data-slot="owner-review-trouble"` in the header snippet. -->
     {#if activeEntry?.presentation === 'editable' && EditorComponent}
       <div
         class="hosted-editor-surface"
@@ -2889,7 +3230,13 @@
         {/key}
       </div>
     {:else if desktopLayout && activeEntry?.presentation === 'editable'}
-      <div class="hosted-editor-loading" role="status">Opening editor…</div>
+      <!-- The invitation already fills this wait with something useful, and it
+           renders without the editor chunk (attn-rjuo.1.1). Two "nothing is
+           here yet" messages on one empty canvas is the frame that read as
+           broken. -->
+      {#if !showCanvasInvite}
+        <div class="hosted-editor-loading" role="status"><LoadingLine text="Opening editor" /></div>
+      {/if}
     {:else if activeEntry?.presentation === 'html'}
       <div class="hosted-html-surface" data-slot="hosted-html-document">
         <HtmlViewer
@@ -2901,9 +3248,11 @@
         />
       </div>
     {:else if isNewDraft && (displayText === null || displayText.length === 0)}
-      <div class="eyebrow">New workspace</div>
-      <h1>Untitled</h1>
-      <p class="placeholder">Tap to start writing…</p>
+      {#if !showCanvasInvite}
+        <div class="eyebrow">New workspace</div>
+        <h1>Untitled</h1>
+        <p class="placeholder">Tap to start writing…</p>
+      {/if}
     {:else if activeEntry && activeEntry.presentation !== 'editable'}
       <div class="eyebrow">
         {activeEntry.presentation === 'preview' ? 'Asset preview' : 'Download only'}
@@ -2945,6 +3294,37 @@
         <p class="placeholder">This entry has no Markdown body.</p>
       {/if}
     {/if}
+      {#if showCanvasInvite}
+        <!-- Not aria-hidden. It holds two buttons and the only visible route
+             back to the desk, and aria-hidden over focusable controls is the
+             "hidden but tabbable" defect, not a fix — assistive tech would be
+             handed a page whose every control it must not describe. -->
+        <div class="canvas-invite" data-slot="canvas-invite">
+          <div class="canvas-invite-card">
+            <BrandMark size={40} />
+            <p class="canvas-invite-title">Open a document</p>
+            <!-- "just start typing" only where the canvas IS editable. The
+                 mobile shell is reader-first: the caret arrives when Edit is
+                 tapped, so promising a keystroke there would be a lie. -->
+            <p class="canvas-invite-lede">
+              {desktopLayout
+                ? 'Drop a Markdown file or a folder here, or just start typing.'
+                : 'Drop a Markdown file or a folder here, or choose one.'}
+            </p>
+            <div class="canvas-invite-actions">
+              <button class="button primary" type="button" onclick={() => assetInput?.click()}>
+                Choose files
+              </button>
+              <button class="button" type="button" onclick={() => assetFolderInput?.click()}>
+                Choose folder
+              </button>
+            </div>
+            <p class="canvas-invite-privacy">
+              Files stay in this browser profile — nothing is uploaded.
+            </p>
+          </div>
+        </div>
+      {/if}
   </div>
 {/snippet}
 
@@ -2954,29 +3334,81 @@
   </svg>
 {/snippet}
 
+{#snippet titleRename()}
+  <!-- The rename edits the name AT the name (attn-rjuo.2.1), and as of the
+       2026-08-20 ruling it edits the WORD rather than opening a field over it:
+       no border, no fill, no box growing out of the header — the same type in
+       the same slot, gaining a caret and the rust underline the trigger already
+       wears on hover.
+
+       `data-value` feeds the wrapper's sizer pseudo-element, which is the same
+       string in the same type sharing one grid cell with the field. That is
+       what lets a borderless input be exactly as wide as what is typed: a
+       fixed-width one would have left the name floating in dead space to its
+       right, which is the box by another name. -->
+  <span class="owner-name-edit" data-value={titleValue}>
+    <!-- `size="1"` is load-bearing, exactly as it is on the sidebar filter: an
+         <input> carries an INTRINSIC width from this attribute (default 20
+         characters, ~126px here) and that is what the grid track measures, not
+         the sizer beside it — `min-width` cannot remove it. Left at the default
+         the field stayed 126px wide around a 47px word, which is the box this
+         change exists to delete. -->
+    <input
+      use:autofocus
+      class="owner-title-input"
+      type="text"
+      size="1"
+      aria-label="Workspace title"
+      bind:value={titleValue}
+      onkeydown={(event) => {
+        if (event.key === 'Enter') void commitTitleRename();
+        if (event.key === 'Escape') {
+          renamingTitle = false;
+          focusSidebarAnchor('.owner-project-trigger');
+        }
+      }}
+      onblur={() => { if (renamingTitle) void commitTitleRename(); }}
+    />
+  </span>
+{/snippet}
+
 {#snippet desktopHeaderActions()}
   <div class="hosted-header-actions">
-    <!-- Quiet chrome: workspace identity (and switching) lives in the sidebar
-         project row; renaming lives in ⌘K and on the desk. The input appears
-         here only while a rename is in flight. Desktop is editor-first (the
+    <!-- Quiet chrome. The rename input is NOT here any more (attn-rjuo.2.1):
+         it rendered in the actions cluster at the far right, an unstyled field
+         floating beside Share while the name it renamed sat at the other end of
+         the bar. It now replaces the name where the name is — see
+         `titleRename` below, handed to the frame. Desktop is editor-first (the
          auto-edit effect), so there is no Edit/Done mode toggle — the only
          edit affordance is the recovery path when the owner lease was denied. -->
-    {#if renamingTitle}
-      <input
-        use:autofocus
-        class="hosted-title-input"
-        type="text"
-        aria-label="Workspace title"
-        bind:value={titleValue}
-        onkeydown={(event) => {
-          if (event.key === 'Enter') void commitTitleRename();
-          if (event.key === 'Escape') {
-            renamingTitle = false;
-            focusSidebarAnchor('.sidebar-project-trigger');
-          }
-        }}
-        onblur={() => { if (renamingTitle) void commitTitleRename(); }}
-      />
+    <!-- No "Commands ⌘K" button here (attn-mkmz.6). attn-a9f7.1.8 added one on
+         the true observation that ⌘K was advertised nowhere, but it answered
+         that by spending the header's single-action budget: a labelled control
+         beside Share, in a bar whose whole argument is that the document has
+         one visible action. The native app has the same palette on the same
+         keystroke with no button at all, and parity with native is why this
+         feature exists (James Lal, c810cb9). The advertised surface is the
+         shortcut sheet — "?" here, and "Keyboard shortcuts" inside the palette
+         — exactly as native does it. -->
+    <!-- The review's trouble state, in the header where the owner asked for it
+         and in the destructive tone the situation deserves. It replaces two
+         banners that used to shove the document down the page. Deliberately a
+         labelled button rather than an icon: this is the one control in the
+         header that reports something being WRONG, and a bare glyph for that is
+         the mistake the save chip's ⓘ was already making. -->
+    {#if reviewTrouble}
+      <button
+        class="review-trouble-chip"
+        data-slot="owner-review-trouble"
+        data-kind={reviewTrouble.kind}
+        data-transient={reviewTrouble.transient}
+        type="button"
+        aria-haspopup="dialog"
+        onclick={() => (troubleDialogOpen = true)}
+      >
+        <span class="review-trouble-dot" aria-hidden="true"></span>
+        <span>{reviewTrouble.chip}</span>
+      </button>
     {/if}
     <SaveChip
       class="save-state"
@@ -2989,28 +3421,56 @@
   </div>
 {/snippet}
 
+{#snippet treeRenameField()}
+  <!-- The row's label, accepting keystrokes — no box, the same decision the
+       workspace rename carries in the header. It fills the row's remaining
+       width rather than measuring its own text: a tree row is already a fixed
+       lane, so a field that hugged its content would leave the name floating
+       mid-row instead of starting where every other name in the column starts.
+
+       `size="1"` for the reason documented on the sidebar filter and the
+       workspace rename: an <input> takes an intrinsic width from that
+       attribute (20 characters by default) which no CSS width can shrink past,
+       and at the rail's narrow end that width is wider than the rail. -->
+  <span class="sidebar-name-edit">
+    <input
+      use:autofocus
+      class="sidebar-rename-input"
+      type="text"
+      size="1"
+      aria-label="New path"
+      bind:value={renameEntryValue}
+      onkeydown={(event) => {
+        if (event.key === 'Enter') void commitEntryRename();
+        if (event.key === 'Escape') {
+          renamingEntry = false;
+          focusSidebarAnchor('[data-path][data-active="true"]');
+        }
+      }}
+      onblur={() => { if (renamingEntry) void commitEntryRename(); }}
+    />
+  </span>
+{/snippet}
+
 {#snippet desktopSidebarFooter()}
-  <!-- Resting state: a single drop target. Standing actions moved to where
-       they belong — per-file Rename/Delete in the tree context menu, New
-       Markdown / Export / Download in ⌘K. The inputs below appear only while
-       one of those flows is in flight. -->
-  <div class="hosted-sidebar-footer" aria-label="Add files">
-    {#if renamingEntry && activeEntry}
-      <input
-        use:autofocus
-        class="hosted-sidebar-input"
-        type="text"
-        aria-label="New path"
-        bind:value={renameEntryValue}
-        onkeydown={(event) => {
-          if (event.key === 'Enter') void commitEntryRename();
-          if (event.key === 'Escape') {
-            renamingEntry = false;
-            focusSidebarAnchor('[data-path][data-active="true"]');
-          }
-        }}
-      />
-    {:else if confirmingEntryDelete && activeEntry}
+  <!-- Resting state: one real button that opens the file picker (attn-mkmz.3).
+       Per-file Rename/Delete still live in the tree context menu and New
+       Markdown / Export / Download in ⌘K; the inputs below appear only while
+       one of those flows is in flight. What does NOT belong behind a keystroke
+       is the way files get into a workspace — attn-08fa.12 made this footer
+       empty until a drag started, which left the only findable route to
+       uploading a shortcut you had to already know. -->
+  <!-- No aria-label on this wrapper: a bare div maps to `generic`, which does
+       not support naming, so the string was discarded anyway — and it named
+       only one of the four things this slot renders. The controls inside name
+       themselves. -->
+  <div class="hosted-sidebar-footer">
+    <!-- Rename is NOT here any more (user ruling, 2026-08-20). It rendered as a
+         field pinned to the bottom of the rail while the row it renamed sat at
+         the top, with nothing joining the two — the same defect attn-rjuo.2.1
+         fixed for the workspace name in the header. It now takes the row's own
+         label; see `treeRenameField` below, handed to the frame. -->
+    {#if confirmingEntryDelete && activeEntry}
       <div
         class="hosted-delete-confirm"
         role="group"
@@ -3044,30 +3504,38 @@
           if (event.key === 'Enter') void createMarkdownFile();
           if (event.key === 'Escape') {
             addingMarkdown = false;
-            focusSidebarAnchor('.sidebar-project-trigger');
+            focusSidebarAnchor('.owner-project-trigger');
           }
         }}
       />
+    {:else if draggingFiles}
+      <!-- The drag state ENHANCES the resting button rather than replacing a
+           missing one: same footprint, same words about the same act, promoted
+           to a dashed well because there is now something to catch. -->
+      <p class="hosted-sidebar-dropzone" data-action="add-assets" role="status">
+        <span class="hosted-dropzone-glyph" aria-hidden="true">⤓</span>
+        <span class="hosted-dropzone-copy">Drop to add to this workspace</span>
+      </p>
     {:else}
+      <!-- A drop AREA at rest, not a text button (user ruling, 2026-08-19):
+           "we used to have a space to drag and drop here". attn-mkmz.3 restored
+           the click path but shrank the target to a label, which took away the
+           thing a drag is actually aimed at — you cannot drop onto a word.
+           It is still one real <button>, so the keyboard and pointer paths are
+           unchanged; the button is simply the size and shape of the target. -->
       <button
-        class="hosted-sidebar-dropzone"
+        class="hosted-sidebar-add"
         type="button"
         data-action="add-assets"
         onclick={() => assetInput?.click()}
       >
-        <span class="hosted-dropzone-glyph" aria-hidden="true">⤓</span>
-        <span class="hosted-dropzone-copy">Drop files anywhere<span class="hosted-dropzone-hint">or click to browse</span></span>
+        <svg class="hosted-sidebar-add-glyph" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 5v14M5 12h14" />
+        </svg>
+        <span class="hosted-sidebar-add-label">Add files</span>
+        <span class="hosted-sidebar-add-hint">or drop them here</span>
       </button>
     {/if}
-    <input
-      bind:this={assetInput}
-      type="file"
-      multiple
-      class="sr-only"
-      aria-hidden="true"
-      tabindex="-1"
-      onchange={() => void onAssetsPicked()}
-    />
     {#if railError}
       <p class="hosted-sidebar-error" role="alert">{railError}</p>
     {/if}
@@ -3091,11 +3559,12 @@
         ? { accept: acceptSuggestion, reject: rejectSuggestion }
         : {}}
       onResolveComment={resolveReview}
+          onReopenComment={reopenReview}
       onReplyComment={replyToReview}
     />
   {:else if fixtureReviewHistory}
     <section class="review-history-placeholder" aria-labelledby="review-history-heading">
-      <p class="review-history-label">Saved review</p>
+      <p class="review-history-label">Comments</p>
       <h2 id="review-history-heading">{workspace.reviewCards.length} {workspace.reviewCards.length === 1 ? 'thread' : 'threads'} from this workspace</h2>
       <div class="review-history-list">
         {#each workspace.reviewCards as card (card.author + card.body)}
@@ -3105,13 +3574,13 @@
           </article>
         {/each}
       </div>
-      <p class="review-history-note">Live review adds presence and replies; saved feedback stays here.</p>
+      <p class="review-history-note">Live review adds presence and replies; these comments stay here.</p>
     </section>
   {:else if reviewProjection.replay === 'failed'}
     <section class="review-history-placeholder" aria-labelledby="review-history-heading">
-      <p class="review-history-label">Review history</p>
-      <h2 id="review-history-heading">Review history is temporarily unavailable</h2>
-      <p class="review-history-note">Your document is safe on this device. Reopen this workspace to try loading its saved feedback again.</p>
+      <p class="review-history-label">Comments</p>
+      <h2 id="review-history-heading">Comments are temporarily unavailable</h2>
+      <p class="review-history-note">Your document is safe on this device. Reopen this workspace to try loading its comments again.</p>
     </section>
   {/if}
 {/snippet}
@@ -3122,7 +3591,7 @@
     data-app-view="workspace"
     data-workspace-id={workspace.id}
     data-drop-label="Drop files to add to this workspace"
-    use:fileDrop={{ onFiles: (files) => void importFiles(files) }}
+    use:fileDrop={{ onFiles: (files) => void importFiles(files), onError: (message) => (railError = message) }}
   >
     {#if HostedDesktopWorkspaceFrame}
       <HostedDesktopWorkspaceFrame
@@ -3137,6 +3606,12 @@
           renamingTitle = true;
         }}
         onOpenDesk={() => window.location.assign('/app')}
+        showSidebar={!hideFileRail}
+        fileChosen={!showCanvasInvite}
+        renamingEntryPath={renamingEntry && activeEntry ? activeEntry.path : undefined}
+        entryRename={treeRenameField}
+        renaming={renamingTitle}
+        rename={titleRename}
         activeEntryPath={activeEntry?.path}
         {shareOpen}
         reviewHistoryAvailable={durableReviewHistory || fixtureReviewHistory || reviewProjection.replay === 'failed'}
@@ -3152,7 +3627,10 @@
         onJumpTo={handleJumpToPeer}
       />
     {:else}
-      <div class="hosted-shell-loading" role="status">Opening workspace…</div>
+      <!-- Same words as the shell's own wait one frame earlier (attn-mkmz.7):
+           the workspace frame resolving is a continuation of opening this
+           workspace, not a new thing starting. -->
+      <div class="hosted-shell-loading" role="status"><LoadingLine text={`Opening ${workspace.name}`} /></div>
     {/if}
   </div>
 {:else}
@@ -3174,11 +3652,10 @@
         />
       {:else if editing}
         <!-- The title is a label; the pencil is the affordance (attn-n01r.4).
-             It used to be a bare button that dropped straight into a text input
-             on a single tap — directly above the document, in the thumb's
-             travel path, for an act performed maybe once per workspace. The
-             name is now inert and rename takes a deliberate, separately-sized
-             target beside it. -->
+             A bare button here drops into a text input on a single tap —
+             directly above the document, in the thumb's travel path, for an act
+             performed maybe once per workspace. The name stays inert and rename
+             takes a deliberate, separately-sized target beside it. -->
         <span class="mobile-workspace-title" data-slot="mobile-workspace-name">
           {workspace.name}
         </span>
@@ -3245,7 +3722,7 @@
     tabindex="0"
     aria-label="Document"
     data-drop-label="Drop files to add to this workspace"
-    use:fileDrop={{ onFiles: (files) => void importFiles(files) }}
+    use:fileDrop={{ onFiles: (files) => void importFiles(files), onError: (message) => (railError = message) }}
   >
     {#if editingUnavailable}
       <aside class="viewing-safely" role="status">
@@ -3264,6 +3741,13 @@
           Editing is unavailable in this browser mode. You can still read, navigate files, review, export, or open native attn.
         </div>
       </aside>
+    {/if}
+    <!-- The rail's error line has no rail here (attn-e9r2.5). A failed import
+         — a folder over the drop ceilings, a write that could not land — has
+         to be sayable on the surface the drop happened on, or the reader is
+         left with a document that quietly did not change. -->
+    {#if railError}
+      <p class="editor-canvas-error hosted-sidebar-error" role="alert">{railError}</p>
     {/if}
     {@render documentSurface()}
   </main>
@@ -3455,16 +3939,6 @@
     <button class="file-add-row" type="button" onclick={() => assetInput?.click()}>
       ＋ Add file or asset
     </button>
-    <input
-      bind:this={assetInput}
-      type="file"
-      multiple
-      accept=".md,.markdown,image/*,application/zip,.zip,*/*"
-      style="display: none"
-      aria-hidden="true"
-      tabindex="-1"
-      onchange={() => void onAssetsPicked()}
-    />
   </BottomSheet>
 {/if}
 
@@ -3485,11 +3959,12 @@
             ? { accept: acceptSuggestion, reject: rejectSuggestion }
             : {}}
           onResolveComment={resolveReview}
+          onReopenComment={reopenReview}
           onReplyComment={replyToReview}
         />
       </div>
     {:else if fixtureReviewHistory}
-      <p class="review-history-note">Live review adds presence and replies; saved feedback stays here.</p>
+      <p class="review-history-note">Live review adds presence and replies; these comments stay here.</p>
       {#each workspace.reviewCards as card (card.author + card.body)}
         <div class="review-card">
           <strong>{card.author} · {card.ageLabel}</strong>
@@ -3501,7 +3976,7 @@
         </p>
       {/each}
     {:else if reviewProjection.replay === 'failed'}
-      <p class="review-empty">Saved review history could not load. Reopen this workspace to try again.</p>
+      <p class="review-empty">Comments could not load. Reopen this workspace to try again.</p>
     {:else}
       <p class="review-empty">No review yet. Share this workspace to open an encrypted room around it.</p>
     {/if}
@@ -3511,3 +3986,30 @@
 {#if reviewRoomActive && ReviewApplyExpandComponent}
   <ReviewApplyExpandComponent onApplySuggestion={applyReviewedSuggestion} />
 {/if}
+
+<!-- ONE pair of pickers for every "add files" affordance (attn-rjuo.3.2).
+     They used to live inside the surfaces that offer them — the rail's footer
+     and the canvas invitation — so whichever surface was unmounted took its
+     input with it. A bare workspace hides the rail and withdraws the invitation
+     on the first keystroke, which left ⌘K → "Add files to this workspace"
+     clicking a ref that was `undefined`: the command did nothing at all. At the
+     component root they are always there, whatever is on screen. -->
+<input
+  bind:this={assetInput}
+  type="file"
+  multiple
+  accept=".md,.markdown,image/*,application/zip,.zip,*/*"
+  class="sr-only"
+  aria-hidden="true"
+  tabindex="-1"
+  onchange={() => void onAssetsPicked()}
+/>
+<input
+  bind:this={assetFolderInput}
+  type="file"
+  webkitdirectory
+  class="sr-only"
+  aria-hidden="true"
+  tabindex="-1"
+  onchange={onAssetFolderPicked}
+/>

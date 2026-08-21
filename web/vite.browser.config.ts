@@ -198,6 +198,11 @@ export default defineConfig({
   // Prebundle its UI-only dependencies up front so Vite never performs a
   // first-navigation dependency-optimization reload after the invite fragment
   // has already been stripped from the address bar.
+  // Its own dep cache — see the longer note in vite.config.ts. The two dev
+  // servers optimize different dependency sets, so sharing the default
+  // `node_modules/.vite` let whichever started second invalidate the other's
+  // prebundled chunk hashes and break the running page.
+  cacheDir: path.join(webRoot, 'node_modules/.vite/browser'),
   optimizeDeps: {
     include: [
       '@lucide/svelte/icons/cloud-off',

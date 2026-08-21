@@ -8,6 +8,8 @@
 //   /app?shell=blocked   Lockdown/capability failure (no local storage)
 //   /app?shell=quota     quota pressure (writes blocked, head preserved)
 //   /app?shell=empty     first visit, no workspaces yet
+//   /app?shell=review-paused  live review paused mid-publish (transient trouble)
+//   /app?shell=review-failed  share resume failed with no room (hard trouble)
 
 import type {
   EditingSession,
@@ -47,12 +49,14 @@ function mockInvite() {
 
 /** 'real' (no ?shell= param) boots the storage-backed service; every other
  * scenario runs this mock so degraded states stay directly reachable. */
-export type ShellScenario = 'real' | 'demo' | 'private' | 'best-effort' | 'blocked' | 'quota' | 'empty';
+export type ShellScenario = 'real' | 'demo' | 'private' | 'best-effort' | 'blocked' | 'quota' | 'empty'
+  | 'review-paused' | 'review-failed';
 
 export function shellScenarioFromSearch(search: string): ShellScenario {
   const value = new URLSearchParams(search).get('shell');
   if (value === null) return 'real';
-  return value === 'private' || value === 'best-effort' || value === 'blocked' || value === 'quota' || value === 'empty'
+  return value === 'private' || value === 'best-effort' || value === 'blocked' || value === 'quota'
+    || value === 'empty' || value === 'review-paused' || value === 'review-failed'
     ? value
     : 'demo';
 }
@@ -157,6 +161,10 @@ export class MockWorkspaceService implements WorkspaceAppService {
         return { mode: 'quota-pressure', usedLabel: '101 MB', quotaLabel: '104 MB', usedFraction: 0.97 };
       case 'empty':
         return { mode: 'best-effort', usedLabel: '0 B', quotaLabel: '104 MB', usedFraction: 0 };
+      // These degrade the REVIEW, not storage: the whole point of them is a
+      // healthy local desk with a broken relay connection.
+      case 'review-paused':
+      case 'review-failed':
       case 'demo':
       case 'real':
         return { mode: 'persistent', usedLabel: '18.7 MB', quotaLabel: '104 MB', usedFraction: 0.18 };
@@ -339,6 +347,9 @@ export class MockWorkspaceService implements WorkspaceAppService {
 
   async yieldEditing(): Promise<void> {}
 
+  /** The mock holds no lease, heartbeat or transport to hand back. */
+  async closeEditingRuntime(): Promise<void> {}
+
   async acknowledgeWriterHandoff(): Promise<void> {}
 
   async forceWriterLease(): Promise<void> {}
@@ -373,16 +384,24 @@ export class MockWorkspaceService implements WorkspaceAppService {
   }
 
   async beginEditing(workspaceId: string): Promise<EditingSession | null> {
+    /* `review-paused` reaches the trouble chip and its dialog (attn-mkmz
+       follow-up). This mock exists so every DESIGNED degraded state stays
+       directly reachable for tests and screenshots, and the paused review had
+       no scenario at all — which is part of why it shipped for months showing
+       a raw engine string. The reason below is the literal one the owner
+       reported seeing; review-trouble.ts classifies it as transient. */
+    const paused = this.scenario === 'review-paused';
+    const failed = this.scenario === 'review-failed';
     const ownerState: BrowserOwnerWorkspaceRuntimeState = {
-      status: 'active',
+      status: paused ? 'paused' : failed ? 'error' : 'active',
       leaseRole: 'owner',
       writable: true,
       liveEditingAvailable: false,
       localCollab: false,
-      reason: null,
+      reason: paused || failed ? 'published source revision moved before promotion' : null,
       workspaceId,
-      roomId: null,
-      capId: null,
+      roomId: paused ? 'mock-room' : null,
+      capId: paused ? 'mock-cap' : null,
       bindings: [],
       controllerGeneration: 0,
       authority: null,
@@ -409,6 +428,7 @@ export class MockWorkspaceService implements WorkspaceAppService {
       announceProfile: async () => {},
       replyToComment: async () => { throw new Error('Mock review authoring is unavailable.'); },
       resolveComment: async () => { throw new Error('Mock review authoring is unavailable.'); },
+      reopenComment: async () => { throw new Error('Mock review authoring is unavailable.'); },
       retryReviewOutbox: async () => undefined,
       recoverReview: async () => undefined,
       inspectShare: async () => this.mockShare ? structuredClone(this.mockShare) : null,

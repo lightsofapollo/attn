@@ -14,9 +14,9 @@
       copied = true;
       failed = false;
     } catch {
-      // Previously an empty catch, so a denied clipboard permission was
-      // indistinguishable from success-minus-feedback (attn-n01r.19). Say so;
-      // the command stays selectable either way.
+      // Say so: an empty catch makes a denied clipboard permission
+      // indistinguishable from success-minus-feedback (attn-n01r.19). The
+      // command stays selectable either way.
       failed = true;
       copied = false;
     }

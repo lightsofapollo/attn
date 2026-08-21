@@ -289,12 +289,11 @@
 
       {#if hasActiveRoom}
         <!-- NO WRAPPER DIVS around these three (attn-64iy.3).
-             They used to sit in `review-bar-peers` / `-snapshot` / `-outbox`
-             divs that rendered unconditionally. A wrapper whose child renders
-             nothing is still a flex item of this `gap-1.5` row, so three empty
-             wrappers silently ate ~18px — all of it landing between the share
-             control and the comments toggle, which is the uneven spacing that
-             was reported.
+             Unconditional `review-bar-peers` / `-snapshot` / `-outbox` wrappers
+             break this: a wrapper whose child renders nothing is still a flex
+             item of this `gap-1.5` row, so three empty ones silently eat ~18px,
+             all of it landing between the share control and the comments
+             toggle.
 
              Letting each component BE the flex item makes the collapse exact
              and self-maintaining: SnapshotBadge and OutboxIndicator render no
@@ -321,12 +320,11 @@
              the two must never disagree about which glyph means which state.
 
              CHROME: the same resting-ghost convention as every other header
-             icon (attn-11g4.6). It used to be a permanently bordered pill,
-             which — once the ShareChip beside it was demoted to a ghost in
-             attn-64iy.6 — would have left it the only outlined control in a
-             row of ghosts, reproducing the inconsistency that was reported.
-             Its surface is the rail, so the active pill maps to `panelOpen`,
-             which `aria-pressed` already announces. -->
+             icon (attn-11g4.6). A permanently bordered pill here would be the
+             only outlined control in a row of ghosts, the ShareChip beside it
+             being a ghost since attn-64iy.6. Its surface is the rail, so the
+             active pill maps to `panelOpen`, which `aria-pressed` already
+             announces. -->
         <button
           type="button"
           class="relative inline-flex h-7 shrink-0 items-center gap-1 rounded-md border px-1.5 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 {reviewStore.panelOpen

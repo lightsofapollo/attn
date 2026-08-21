@@ -92,6 +92,40 @@ export function requestReviewDecorationsRebuild(view: EditorView): void {
   );
 }
 
+/** Class toggled on the inline mark whose card is hovered (attn-bb6t.2). */
+export const REVIEW_HOVER_CLASS = 'is-hovered';
+
+/**
+ * Paint the card→document half of hover linking (attn-bb6t.2).
+ *
+ * Hover deliberately does NOT go through the decoration set. `buildDecorations`
+ * rebuilds every mark in the document, and hovering a card would run that on
+ * each mouseenter — for a change that only ever adds one class to one range.
+ * Toggling the class straight on the rendered mark DOM is O(marks-for-this-
+ * thread) and needs no transaction, which is why the doc→card direction has
+ * always been CSS-only on `[data-event-id]`.
+ *
+ * ProseMirror owns these nodes, so a redraw between mouseenter and mouseleave
+ * drops the class. That is why the host also re-applies after every rebuild:
+ * the store's `hoveredEventId` is the truth, this is just its projection.
+ */
+export function applyReviewHoverHighlight(
+  view: EditorView,
+  eventId: EventId | null,
+): void {
+  const root = view.dom;
+  for (const stale of root.querySelectorAll(`.${REVIEW_HOVER_CLASS}`)) {
+    stale.classList.remove(REVIEW_HOVER_CLASS);
+  }
+  if (!eventId) return;
+  // Attribute selectors need the id escaped — event ids are base64url-ish and
+  // a bare `"` or `\` in one would otherwise break the selector.
+  const escaped = eventId.replace(/["\\]/g, '\\$&');
+  for (const mark of root.querySelectorAll(`[data-event-id="${escaped}"]`)) {
+    mark.classList.add(REVIEW_HOVER_CLASS);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Pending-anchor highlight — the range a composer is being written against.
 //

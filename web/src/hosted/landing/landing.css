@@ -4,12 +4,20 @@
    the landing entry module). */
 
 html {
-  scroll-behavior: smooth;
   /* Anchor targets clear the sticky nav (attn-n01r.21). .chapter had
      scroll-margin-top: 0 under a 70px sticky header, so every #how / #native
      jump parked the section's top rule and heading underneath it. A token, so
      the two cannot drift apart. */
   scroll-padding-top: calc(var(--nav-h, 70px) + 1rem);
+}
+
+/* Guarded separately from the base stylesheet's blanket transition kill, which
+   does not reach scroll-behavior (critique 2026-08-18): an anchor jump is
+   motion too. */
+@media (prefers-reduced-motion: no-preference) {
+  html {
+    scroll-behavior: smooth;
+  }
 }
 
 :root {
@@ -259,6 +267,7 @@ p {
   min-width: 190px;
   padding: 0.9rem 1rem;
   border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
   background: var(--sheet);
   box-shadow: var(--shadow-label);
   font-family: var(--sans);
@@ -305,6 +314,32 @@ p {
   background: var(--rust);
 }
 
+/* Interactive proof, one click deep (critique 2026-08-18): the guided review
+   demo already exists at /app?surface=landing-review-demo; this is its only
+   landing entry. Chrome anchor, not a button — it must stay subordinate to the
+   hero actions, and it takes no rest underline per the chrome-anchor rule. */
+.stage-demo-link {
+  position: absolute;
+  left: 0;
+  bottom: 6px;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  min-height: 44px;
+  color: var(--hosted-muted);
+  font: 600 0.86rem var(--sans);
+}
+
+.stage-demo-link:hover {
+  color: var(--ink);
+}
+
+.stage-demo-link:focus-visible {
+  outline: 2px solid var(--rust);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
 .secondary-start {
   max-width: 1300px;
   margin: 0 auto 8rem;
@@ -325,6 +360,10 @@ p {
      inside a 390px viewport (attn-n01r.23). */
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   border: 1px solid var(--rule);
+  /* The hairline dividers are grid gap showing the container's own background,
+     so the cells have no radius of their own to round — clip them instead. */
+  border-radius: var(--radius-lg);
+  overflow: hidden;
   background: var(--rule);
   gap: 1px;
 }
@@ -373,7 +412,13 @@ p {
   overflow-wrap: break-word;
 }
 
+/* Cap the measure (attn-08fa.6). The column is ~604px, which at this size is
+   ~90 characters a line — the cards' copy had simply always been short enough
+   to hide it, so rewriting one entry to a full sentence was what exposed it.
+   62ch matches the hero lede, so the two blocks of running copy on this page
+   wrap on the same rule. */
 .entry p {
+  max-width: 62ch;
   margin: 0;
   color: var(--hosted-muted);
   font: 0.84rem/1.45 var(--sans);
@@ -499,6 +544,8 @@ p {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
 }
 
 .surface {
@@ -593,6 +640,13 @@ p {
 .native-section p {
   color: var(--hosted-muted);
   font: 1rem/1.65 var(--sans);
+}
+
+/* Lead-in for the agent join command — a step quieter than the intro copy so
+   the command row keeps the emphasis. */
+.native-section .cli-note {
+  margin: 1.6rem 0 0;
+  font: 0.86rem/1.5 var(--sans);
 }
 
 .code {
@@ -872,12 +926,21 @@ footer {
   }
 
   .window {
-    inset: 18px 0 10px 12px;
+    /* Bottom inset reserves a strip for the demo link, which cannot share the
+       desktop's bottom-left corner here — the mobile window fills the stage.
+       The shot is cover-cropped decoration at this width; the link under it is
+       the working proof. */
+    inset: 18px 0 56px 12px;
   }
 
   .window img {
     object-fit: cover;
     object-position: 48% top;
+  }
+
+  .stage-demo-link {
+    left: 12px;
+    bottom: 0;
   }
 
   .stage-label {

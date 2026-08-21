@@ -63,6 +63,47 @@ export type AppRoute =
   | { view: 'workspace'; workspaceId: string; filePath: string | undefined };
 
 /**
+ * The desk's two URL intents live in the fragment, not the path: `/app#new`
+ * asks for a fresh workspace, `/app#join` for the join-a-review panel.
+ *
+ * A caller must read this at the moment the surface that answers it mounts,
+ * never from a copy taken at boot (attn-ze60.3). The desk unmounts when a
+ * workspace opens and mounts again on the way back, so a boot-time snapshot
+ * outlives the URL that justified it: the panel would reopen on a Back
+ * navigation whose address bar says plain `/app`, having been closed — and the
+ * hash removed — several screens earlier. The fragment is the only record that
+ * stays honest, because closing the panel rewrites it.
+ */
+export function appHashIntent(hash: string): 'new' | 'join' | undefined {
+  switch (hash) {
+    case '#new':
+      return 'new';
+    case '#join':
+      return 'join';
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * Build the canonical URL for a workspace route (attn-1l2f.3).
+ *
+ * Every `/app/w/…` URL the app writes must come through here. Entry paths are
+ * only constrained by `normalizeEntryPath`, which allows `#`, `?`, `%`, spaces
+ * and unicode — all legal in a filename and all meaningful in a URL. Written
+ * raw, `draft#1.md` becomes a fragment and `plan?.md` a query string, so a
+ * reload or a copied link reopens the wrong document or none at all.
+ *
+ * `parseAppRoute` already decodes per segment, so this is the encoding half of
+ * a round-trip that was previously only half-implemented.
+ */
+export function appWorkspaceUrl(workspaceId: string, filePath?: string): string {
+  const base = `/app/w/${encodeURIComponent(workspaceId)}`;
+  if (filePath === undefined || filePath.length === 0) return base;
+  return `${base}/${filePath.split('/').map(encodeURIComponent).join('/')}`;
+}
+
+/**
  * Parse a deep path owned by the app entry. Workspaces are folder-shaped, so
  * everything after the workspace id is a normalized relative file path that
  * may contain nested segments (`/app/w/:workspaceId/docs/notes.md`).

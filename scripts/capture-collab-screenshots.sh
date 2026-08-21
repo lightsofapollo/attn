@@ -29,7 +29,7 @@ cd "$PROJECT_DIR"
 : "${RELAY_PORT:=8793}"
 : "${ATTN_BIN:=$PROJECT_DIR/target/debug/attn}"
 RELAY_URL="http://localhost:${RELAY_PORT}"
-OWNER_HOME="/tmp/attn-cap-owner"; RV_HOME="/tmp/attn-cap-rv"
+OWNER_HOME="/tmp/attn-cap-owner"; RV_HOME="/tmp/attn-cap-rv"; AGENT_HOME="/tmp/attn-cap-agent"
 WORK="/tmp/attn-cap-work"; SHARED_DOC="$WORK/launch-plan.md"; RELAY_LOG="$WORK/relay.log"
 SCRATCH="/tmp/attn-cap-scratch"
 OUT="$PROJECT_DIR/site/static/screenshots"
@@ -52,15 +52,17 @@ esac
 HERO_THEME="$ATTN_CAPTURE_VARIANT"
 HERO_SUFFIX="$ATTN_CAPTURE_VARIANT"
 
-RELAY_PID=""; OWNER_PID=""; RV_PID=""
+RELAY_PID=""; OWNER_PID=""; RV_PID=""; AGENT_PID=""
+AGENT_CMDS=""; AGENT_LOG=""
 
 log(){ printf '==> %s\n' "$*"; }
 attn_owner(){ ATTN_HOME="$OWNER_HOME" ATTN_RELAY_URL="$RELAY_URL" "$ATTN_BIN" "$@"; }
 attn_rv(){ ATTN_HOME="$RV_HOME" ATTN_RELAY_URL="$RELAY_URL" "$ATTN_BIN" "$@"; }
+attn_agent(){ ATTN_HOME="$AGENT_HOME" ATTN_RELAY_URL="$RELAY_URL" "$ATTN_BIN" "$@"; }
 poll(){ local t="$1"; shift; local d=$(( $(date +%s)*1000 + t )); while [ "$(($(date +%s)*1000))" -lt "$d" ]; do "$@" >/dev/null 2>&1 && return 0; sleep 0.25; done; return 1; }
 wait_ready(){ poll "${3:-25000}" "$1" --wait-for "$2" --timeout 1000; }
 kill_pid(){ local p="$1"; [ -z "$p" ] && return 0; kill "$p" 2>/dev/null||true; local i=0; while kill -0 "$p" 2>/dev/null && [ $i -lt 30 ];do sleep 0.1;i=$((i+1));done; kill -0 "$p" 2>/dev/null && kill -9 "$p" 2>/dev/null||true; }
-cleanup(){ log "cleanup"; kill_pid "$OWNER_PID"; kill_pid "$RV_PID"; [ -n "$RELAY_PID" ] && { pkill -P "$RELAY_PID" 2>/dev/null||true; kill_pid "$RELAY_PID"; }; pkill -f "wrangler dev --local --port $RELAY_PORT" 2>/dev/null||true; rm -rf "$SCRATCH"; }
+cleanup(){ log "cleanup"; kill_pid "$AGENT_PID"; kill_pid "$OWNER_PID"; kill_pid "$RV_PID"; [ -n "$RELAY_PID" ] && { pkill -P "$RELAY_PID" 2>/dev/null||true; kill_pid "$RELAY_PID"; }; pkill -f "wrangler dev --local --port $RELAY_PORT" 2>/dev/null||true; rm -rf "$SCRATCH"; }
 trap cleanup EXIT INT TERM
 focus_owner(){
   local pid
@@ -108,14 +110,19 @@ shot(){ attn_owner --screenshot 2>/dev/null | grep -oE '/tmp/attn-screenshot-[0-
 owner_window_id(){ attn_owner --info 2>/dev/null | awk '/^window_id:/ {print $2; exit}'; }
 reviewer_window_id(){ attn_rv --info 2>/dev/null | awk '/^window_id:/ {print $2; exit}'; }
 owner_shot(){
-  local wid out
+  local wid out native
   focus_owner
+  # Native WKWebView snapshot first: exact webview pixels (1920×1440 at 2x),
+  # independent of Spaces/occlusion — `screencapture -l` of an off-space
+  # window silently returns a ~214px proxy thumbnail.
+  native="$(shot)"
+  if [ -n "$native" ] && [ -f "$native" ]; then echo "$native"; return 0; fi
   wid="$(owner_window_id)"
   out="$SCRATCH/owner-shot-$(date +%s%N).png"
   if [ -n "$wid" ] && command -v screencapture >/dev/null 2>&1; then
     screencapture -x -o -l "$wid" "$out" >/dev/null 2>&1 && { echo "$out"; return 0; }
   fi
-  shot
+  return 1
 }
 # Match the app's setTheme (theme.ts): set BOTH data-theme AND the .dark class,
 # otherwise prose text color and shadcn surfaces disagree.
@@ -132,6 +139,39 @@ sel(){ attn_rv --eval "(function(){var v=window.__attnPmView;if(!v)return 'no';v
 selText(){ local mode="${2:-}"; attn_rv --eval "(function(){var v=window.__attnPmView;if(!v)return 'no';var doc=v.state.doc,n='$1',f=null;doc.descendants(function(node,pos){if(f||!node.isText)return !f;var i=node.text.indexOf(n);if(i>=0)f={a:pos+i,b:pos+i+n.length};return !f;});if(!f)return 'notfound';var S=v.state.selection.constructor;v.focus();var to='$mode'==='collapse'?f.a:f.b;v.dispatch(v.state.tr.setSelection(S.create(doc,f.a,to)));return 'ok';})()" 2>/dev/null | tr -d '"'; }
 pm_insert_reviewer(){ local text="$1"; text="${text//\\/\\\\}"; text="${text//\'/\\\'}"; attn_rv --eval "(function(){var v=window.__attnPmView;if(!v)return 'no-view';v.focus();v.dispatch(v.state.tr.insertText('$text'));return 'ok';})()" >/dev/null 2>&1; }
 type_reviewer_text(){ local text="$1"; local i ch; for ((i=0; i<${#text}; i++)); do ch="${text:i:1}"; pm_insert_reviewer "$ch"; sleep 0.16; done; }
+# Stage a persona display name directly in a home's identity.json. Announces
+# (ParticipantJoined) load the identity fresh, so editing between boot and
+# share/join is enough — and it keeps the first-run name prompt out of the
+# captures.
+set_identity_name(){
+  python3 - "$1" "$2" <<'PY'
+import json, sys
+path, name = sys.argv[1], sys.argv[2]
+with open(path) as f:
+    data = json.load(f)
+data["displayName"] = name
+with open(path, "w") as f:
+    json.dump(data, f, indent=2)
+PY
+}
+# Fallback if the first-run name prompt still appears in front of a flow.
+confirm_name_prompt(){ # $1 = attn fn, $2 = persona name
+  if "$1" --wait-for '[data-slot=name-prompt-input]' --timeout 2500 >/dev/null 2>&1; then
+    "$1" --fill '[data-slot=name-prompt-input]' "$2" >/dev/null 2>&1
+    sleep 0.3
+    "$1" --eval "document.querySelector('[data-slot=name-prompt-confirm]')?.click();'x'" >/dev/null 2>&1
+    sleep 0.6
+  fi
+}
+# Count owner margin cards of one kind.
+sugg_cards_owner(){ attn_owner --eval "document.querySelectorAll('[data-testid=review-margin-card][data-kind=suggestion]').length" 2>/dev/null | tr -d '"'; }
+# Append one JSON command line to the headless agent's command file.
+agent_suggest_diff(){
+  python3 - "$1" >> "$AGENT_CMDS" <<'PY'
+import json, sys
+print(json.dumps({"cmd": "suggest-diff", "diff": open(sys.argv[1]).read()}))
+PY
+}
 drive_hero_workflow(){
   sleep 0.8
 
@@ -139,6 +179,7 @@ drive_hero_workflow(){
   selText 'a few teams' >/dev/null
   sleep 0.35
   attn_rv --eval "window.dispatchEvent(new KeyboardEvent('keydown',{key:'.',code:'Period',metaKey:true,bubbles:true}));'x'" >/dev/null 2>&1
+  confirm_name_prompt attn_rv "Sam Porter"
   if wait_ready attn_rv '.comment-composer textarea' 8000; then
     attn_rv --fill '.comment-composer textarea' 'Can we open this to the whole waitlist, not just a few teams?' >/dev/null 2>&1
     sleep 0.35
@@ -148,17 +189,17 @@ drive_hero_workflow(){
   fi
   sleep 1.3
 
-  log "hero workflow: reviewer suggests editorial rewrite"
-  selText 'internal dogfooding' >/dev/null
-  sleep 0.35
-  attn_rv --eval "window.dispatchEvent(new KeyboardEvent('keydown',{key:'.',code:'Period',metaKey:true,shiftKey:true,bubbles:true}));'x'" >/dev/null 2>&1
-  if wait_ready attn_rv '[data-slot=suggestion-composer-text]' 8000; then
-    attn_rv --fill '[data-slot=suggestion-composer-text]' 'internal dogfooding + a team bug bash' >/dev/null 2>&1
-    sleep 0.35
-    attn_rv --eval "document.querySelector('[data-slot=suggestion-composer-submit]')?.click(); 'x'" >/dev/null 2>&1
-  else
-    log "suggestion composer did not open"
-  fi
+  # The suggestion beat now belongs to the AGENT (landing cast: one human
+  # comment + one agent-attributed suggestion in the same margin). The
+  # headless participant anchors a diff hunk against the shared snapshot.
+  log "hero workflow: agent suggests editorial rewrite"
+  agent_suggest_diff "$AGENT_DIFF"
+  d=$(( $(date +%s)+20 ))
+  while [ "$(date +%s)" -lt "$d" ]; do
+    [ "$(sugg_cards_owner)" -ge 1 ] 2>/dev/null && break
+    sleep 0.5
+  done
+  log "owner shows agent suggestion card: $(sugg_cards_owner)"
   sleep 1.3
 
   log "hero workflow: reviewer parks a live cursor"
@@ -182,6 +223,16 @@ record_hero_video(){
   local out="$OUT/collab-hero-${HERO_SUFFIX}.mp4"
   local raw="$SCRATCH/collab-hero-${HERO_SUFFIX}.mov"
   local wid
+  # Stills-only mode: the workflow must still run (it stages the margin cards
+  # the editorial shots need), but the screen recording is skipped — it is the
+  # slowest leg and long runs let the relay WS idle into an Offline chip.
+  if [ "${ATTN_CAPTURE_SKIP_VIDEO:-0}" = "1" ]; then
+    log "skipping hero video (ATTN_CAPTURE_SKIP_VIDEO=1); staging workflow only"
+    set_theme "$HERO_THEME"
+    focus_owner
+    drive_hero_workflow
+    return 0
+  fi
   wid="$(owner_window_id)"
   if [ -z "$wid" ]; then log "SKIP collab-hero-${HERO_SUFFIX}.mp4 (no owner window id)"; return 0; fi
   if ! command -v screencapture >/dev/null 2>&1; then log "SKIP collab-hero-${HERO_SUFFIX}.mp4 (screencapture missing)"; return 0; fi
@@ -230,25 +281,38 @@ record_share_flow(){
   focus_owner
   sleep 0.5
 
+  # ⌘⇧S opens the file-picker step; `share-start` ("Create review link…")
+  # mints the durable share and swaps the dialog into its link/command state.
+  drive_share_dialog(){
+    attn_owner --eval "window.dispatchEvent(new KeyboardEvent('keydown',{key:'s',code:'KeyS',metaKey:true,shiftKey:true,bubbles:true}));'x'" >/dev/null 2>&1
+    confirm_name_prompt attn_owner "Maya Alvarez"
+    wait_ready attn_owner '[data-slot=share-start]' 10000 || { log "share dialog did not open"; return 1; }
+    sleep 0.8
+    attn_owner --eval "document.querySelector('[data-slot=share-start]')?.click();'x'" >/dev/null 2>&1
+    wait_ready attn_owner '[data-slot=share-invite-url]' 20000
+  }
+
   if [ -n "$wid" ] && command -v screencapture >/dev/null 2>&1; then
     rm -f "$raw" "$OUT/share-flow-${HERO_SUFFIX}.gif"
     log "recording share-flow-${HERO_SUFFIX}.gif from owner window $wid"
-    screencapture -x -o -v -V 4 -l "$wid" "$raw" >/dev/null 2>&1 &
+    screencapture -x -o -v -V 8 -l "$wid" "$raw" >/dev/null 2>&1 &
     local rec_pid=$!
     sleep 0.65
-    attn_owner --eval "window.dispatchEvent(new KeyboardEvent('keydown',{key:'s',code:'KeyS',metaKey:true,shiftKey:true,bubbles:true}));'x'" >/dev/null 2>&1
-    wait_ready attn_owner '[data-slot=share-invite-url]' 20000 || { log "no invite"; kill_pid "$rec_pid"; exit 1; }
+    drive_share_dialog || { log "no invite"; kill_pid "$rec_pid"; exit 1; }
     sleep 1.2
     wait "$rec_pid" || log "FAILED recording share-flow-${HERO_SUFFIX}.gif"
     encode_share_flow_gif "$raw"
   else
     log "open Share dialog"
-    attn_owner --eval "window.dispatchEvent(new KeyboardEvent('keydown',{key:'s',code:'KeyS',metaKey:true,shiftKey:true,bubbles:true}));'x'" >/dev/null 2>&1
-    wait_ready attn_owner '[data-slot=share-invite-url]' 20000 || { log "no invite"; exit 1; }
+    drive_share_dialog || { log "no invite"; exit 1; }
   fi
 }
 
-rm -rf "$OWNER_HOME" "$RV_HOME" "$WORK" "$SCRATCH"; mkdir -p "$OWNER_HOME" "$RV_HOME" "$WORK" "$WORK/empty-rv" "$SCRATCH" "$OUT"
+rm -rf "$OWNER_HOME" "$RV_HOME" "$AGENT_HOME" "$WORK" "$SCRATCH"; mkdir -p "$OWNER_HOME" "$RV_HOME" "$AGENT_HOME" "$WORK" "$WORK/empty-rv" "$SCRATCH" "$OUT"
+AGENT_CMDS="$WORK/agent-cmds.jsonl"; AGENT_LOG="$WORK/agent.log"; AGENT_DIFF="$WORK/agent-suggestion.diff"
+# The "Review loop" section exists so the hero window's bottom third carries
+# document instead of empty paper (landing critique 2026-08-18) — and the copy
+# it carries is the product's own thesis.
 cat > "$SHARED_DOC" <<'MD'
 # Q3 Launch Plan
 
@@ -260,11 +324,26 @@ Reviewers join from a link — no install required, end-to-end encrypted.
 - Week 1 — internal dogfooding
 - Week 2 — closed beta with design partners
 - Week 3 — public launch on attn.sh
+
+## Review loop
+
+Comments and suggestions land in one margin, attributed to their author.
+The file on disk changes only when the owner accepts a change.
 MD
+cat > "$AGENT_DIFF" <<'DIFF'
+--- a/launch-plan.md
++++ b/launch-plan.md
+@@ -8 +8 @@
+-- Week 1 — internal dogfooding
++- Week 1 — internal dogfooding + a team bug bash
+DIFF
 
 [ -d relay/node_modules ] || (cd relay && npm ci >/dev/null)
 log "relay :$RELAY_PORT"
-( cd relay && exec npx wrangler dev --local --port "$RELAY_PORT" ) >"$RELAY_LOG" 2>&1 & RELAY_PID=$!
+# QUOTA_ALLOW_UNATTRIBUTED_CREATES: local wrangler has no CF-Connecting-IP, so
+# durable-share creation 503s (ATTN_QUOTA_UNAVAILABLE) without it — same var
+# relay/package.json's dev script passes.
+( cd relay && exec npx wrangler dev --local --port "$RELAY_PORT" --var QUOTA_ALLOW_UNATTRIBUTED_CREATES:true ) >"$RELAY_LOG" 2>&1 & RELAY_PID=$!
 d=$(( $(date +%s)+60 )); while [ "$(date +%s)" -lt "$d" ]; do curl -fsS "$RELAY_URL/health" >/dev/null 2>&1 && break; sleep 0.3; done
 
 log "boot owner + reviewer"
@@ -273,15 +352,32 @@ ATTN_HOME="$RV_HOME" ATTN_RELAY_URL="$RELAY_URL" "$ATTN_BIN" --no-fork "$WORK/em
 wait_ready attn_owner 'h1' || { log "owner not ready"; exit 1; }
 wait_ready attn_rv 'body' || { log "rv not ready"; exit 1; }
 
+# Personas, not the machine's git identity (the boot created identity.json;
+# the share/join announces re-read it).
+set_identity_name "$OWNER_HOME/identity.json" "Maya Alvarez" && log "owner persona set"
+set_identity_name "$RV_HOME/identity.json" "Sam Porter" && log "reviewer persona set"
+
 record_share_flow
-INVITE=""; d=$(( $(date +%s)+15 )); while [ "$(date +%s)" -lt "$d" ]; do INVITE="$(attn_owner --eval "document.querySelector('[data-slot=share-invite-url]')?.value||''" 2>/dev/null | tr -d '"\\' | tr -d '\r\n')"; case "$INVITE" in attn://review/*) break;; esac; sleep 0.3; done
+# The url slot now carries the HTTPS browser link; the attn:// deep link the
+# native CLI join needs lives in the "Send this command" card.
+INVITE=""; d=$(( $(date +%s)+15 )); while [ "$(date +%s)" -lt "$d" ]; do INVITE="$(attn_owner --eval "((document.querySelector('[data-slot=share-cli-command]')?.textContent||'').match(/attn:\\/\\/review\\/[^' ]+/)||[''])[0]" 2>/dev/null | tr -d '"' | sed 's|\\/|/|g' | tr -d '\r\n')"; case "$INVITE" in attn://review/*) break;; esac; sleep 0.3; done
+ROOM_ID="$(printf '%s' "$INVITE" | sed -E 's|^attn://review/([^#?]+).*|\1|')"
 
 # --- SHARE dialog shots (no reviewer yet → clean, no warnings) ---
-dlg(){ attn_owner --eval "(document.querySelector('[data-slot=share-dialog]')||document.querySelector('[data-slot=dialog-overlay]'))?'open':'CLOSED'" 2>/dev/null | tr -d '"'; }
+# Visibility, not DOM presence: closed overlays stay mounted (`display: none`
+# per the Truth Rule), so a presence probe lies about what pixels show.
+dlg(){ attn_owner --eval "var d=document.querySelector('[data-slot=share-dialog]'); d&&(d.offsetWidth||d.offsetHeight)?'open':'CLOSED'" 2>/dev/null | tr -d '"'; }
+ensure_share_dialog(){
+  [ "$(dlg)" = "open" ] && return 0
+  attn_owner --eval "window.dispatchEvent(new KeyboardEvent('keydown',{key:'s',code:'KeyS',metaKey:true,shiftKey:true,bubbles:true}));'x'" >/dev/null 2>&1
+  sleep 1.2
+  [ "$(dlg)" = "open" ]
+}
 set_theme light
+ensure_share_dialog || log "share dialog could not be reopened"
 log "share dialog before light shot: $(dlg)"
 sleep 1; save "$(owner_shot)" share-light.png
-set_theme dark; sleep 1; log "share dialog before dark shot: $(dlg)"; save "$(owner_shot)" share-dark.png
+set_theme dark; sleep 1; ensure_share_dialog; log "share dialog before dark shot: $(dlg)"; save "$(owner_shot)" share-dark.png
 set_theme light; sleep 1
 
 # Close the dialog so the editorial shots show the doc — invoke the Done button
@@ -290,12 +386,18 @@ set_theme light; sleep 1
 for _ in $(seq 1 16); do
   [ "$(dlg)" = "CLOSED" ] && break
   attn_owner --eval "var b=document.querySelector('[data-slot=share-start]'); if(b&&!b.disabled){b.click();} var e=new KeyboardEvent('keydown',{key:'Escape',code:'Escape',bubbles:true}); document.dispatchEvent(e); window.dispatchEvent(e); 'x'" >/dev/null 2>&1
+  # The dialog's own × carries an accessible "Close" — the one path that
+  # cannot be argued with by focus-trap or synthetic-event quirks.
+  attn_owner --click 'text=Close' >/dev/null 2>&1
   sleep 0.4
 done
 log "share dialog after close: $(dlg)"
+[ "$(dlg)" = "CLOSED" ] || { log "FATAL: share dialog still open before editorial shots"; exit 1; }
 
 log "reviewer joins"
-attn_rv --eval "window.ipc&&window.ipc.postMessage(JSON.stringify({type:'review_join',invite:'$INVITE'}));'x'" >/dev/null 2>&1
+# Daemon-routed CLI join: the webview's review_join IPC is privileged (token
+# only the app bundle holds), so a raw postMessage is rejected.
+attn_rv review join "$INVITE" >/dev/null 2>&1 || log "reviewer join command failed"
 rv_has_doc(){ [ -n "$(attn_rv --eval "window.__attnPmView && window.__attnPmView.state.doc.textContent.includes('Launch Plan') ? 'y':''" 2>/dev/null | tr -d '"')" ]; }
 d=$(( $(date +%s)+30 )); while [ "$(date +%s)" -lt "$d" ]; do rv_has_doc && break; sleep 0.5; done
 log "reviewer shows shared doc: $(rv_has_doc && echo yes || echo NO)"
@@ -304,17 +406,43 @@ log "reviewer shows shared doc: $(rv_has_doc && echo yes || echo NO)"
 # visible collaborator, then let the recording itself tell the feedback story.
 selText 'public launch' collapse >/dev/null
 
+# --- Agent participant joins headlessly (kind=agent → violet/hex in the UI).
+#     It signs with its own home's base identity and gets a suggest-tier
+#     invite, so its diff-anchored suggestion is allowed and attributed. ---
+log "agent joins headlessly"
+# Suggest-tier invite minted by room id (path matching predates the durable
+# share flow and no longer resolves).
+AGENT_INVITE="$(attn_owner review invite "$ROOM_ID" --tier suggest 2>/dev/null | tail -1 | tr -d '\r\n')"
+case "$AGENT_INVITE" in
+  attn://review/*) ;;
+  *) log "no agent invite (got: ${AGENT_INVITE:-empty})"; exit 1 ;;
+esac
+: > "$AGENT_CMDS"
+ATTN_HOME="$AGENT_HOME" ATTN_RELAY_URL="$RELAY_URL" ATTN_AGENT_CMD_FILE="$AGENT_CMDS" \
+  "$ATTN_BIN" review agent >"$AGENT_LOG" 2>&1 & AGENT_PID=$!
+d=$(( $(date +%s)+20 )); while [ "$(date +%s)" -lt "$d" ]; do grep -q '@agent ready' "$AGENT_LOG" 2>/dev/null && break; sleep 0.3; done
+# Name the agent BEFORE the join announce; the announce reads identity.json.
+set_identity_name "$AGENT_HOME/identity.json" "Claude" && log "agent persona set"
+python3 - "$AGENT_INVITE" >> "$AGENT_CMDS" <<'PY'
+import json, sys
+print(json.dumps({"cmd": "join", "invite": sys.argv[1], "kind": "agent"}))
+PY
+# Joined once updates start flowing into the agent's store.
+d=$(( $(date +%s)+30 )); while [ "$(date +%s)" -lt "$d" ]; do grep -q '@update' "$AGENT_LOG" 2>/dev/null && break; sleep 0.5; done
+log "agent runtime: $(grep -c '@update' "$AGENT_LOG" 2>/dev/null || echo 0) update line(s)"
+
 # --- Hero MP4/GIF ---
 record_hero_video
 
-# Did the suggestion register on the reviewer's OWN screen? (submit vs propagation)
-log "reviewer self-sees suggestion: $(attn_rv --eval "document.body.textContent.includes('bug bash')?'yes':'no'" 2>/dev/null | tr -d '"')"
+# Did the agent's suggestion propagate to the OTHER peer too? (mesh, not just owner)
+log "reviewer sees agent suggestion: $(attn_rv --eval "document.querySelectorAll('[data-testid=review-margin-card][data-kind=suggestion]').length>=1?'yes':'no'" 2>/dev/null | tr -d '"')"
 
 # Wait for the owner's review-margin CARDS to actually render (rail auto-opens
 # on first feedback, then cards y-position via coordsAtPos). Wait on the DOM,
 # don't sleep blindly.
 cards_n(){ attn_owner --query '.review-margin-slot' 2>/dev/null | python3 -c 'import sys,json;print(json.load(sys.stdin).get("count",0))' 2>/dev/null || echo 0; }
-d=$(( $(date +%s)+25 )); while [ "$(date +%s)" -lt "$d" ]; do [ "$(cards_n)" -ge 1 ] && break; sleep 0.5; done
+# Two cards now: the reviewer's comment and the agent's suggestion.
+d=$(( $(date +%s)+25 )); while [ "$(date +%s)" -lt "$d" ]; do [ "$(cards_n)" -ge 2 ] && break; sleep 0.5; done
 log "owner review-margin cards: $(cards_n)"
 log "owner transport: $(attn_owner --eval "(/Live|Connected|Offline/.exec(document.body.textContent)||['?'])[0]" 2>/dev/null | tr -d '"')"
 log "owner persisted suggestion_created: $(grep -rqa 'suggestion_created' "$OWNER_HOME/reviews" 2>/dev/null && echo YES || echo NO)"
@@ -323,6 +451,12 @@ log "capture window ids: owner=$(owner_window_id) reviewer=$(reviewer_window_id)
 attn_owner --eval "JSON.stringify({sharedBanner: !!document.querySelector('[data-slot=shared-doc-banner]'), cards: document.querySelectorAll('[data-testid=review-margin-card]').length, trayChildren: (document.querySelector('[data-testid=review-margin-tray]')?.children.length||0), hasSuggestionText: document.body.textContent.includes('bug bash'), backdrop: !!document.querySelector('.comment-composer-backdrop, [data-slot=suggestion-composer], [data-slot=share-dialog]')})" 2>/dev/null
 
 # --- Editorial shots ---
+# The header transport chip is in frame: wait for Live so the capture doesn't
+# ship an Offline badge next to a "Review room · live" claim.
+d=$(( $(date +%s)+25 )); while [ "$(date +%s)" -lt "$d" ]; do
+  [ "$(attn_owner --eval "(/Live|Connected|Offline/.exec(document.body.textContent)||['?'])[0]" 2>/dev/null | tr -d '"')" = "Live" ] && break
+  sleep 1
+done
 set_theme light; sleep 1; save "$(owner_shot)" collab-light.png
 set_theme dark; sleep 1; save "$(owner_shot)" collab-dark.png
 log "done"

@@ -23,8 +23,9 @@
 //! Stdin commands:
 //! ```text
 //! {"cmd":"share","path":"/work/doc.md","mode":"live"}
-//! {"cmd":"join","invite":"attn://review/<roomId>#key=..."}
+//! {"cmd":"join","invite":"attn://review/<roomId>#key=...","kind":"agent"?}
 //! {"cmd":"comment","body":"text"}
+//! {"cmd":"suggest-diff","diff":"--- a/doc.md\n+++ b/doc.md\n@@ ...","room":"<optional>"}
 //! {"cmd":"collab","payload":"{...opaque...}"}
 //! {"cmd":"pull"}
 //! {"cmd":"quit"}
@@ -72,6 +73,9 @@ pub fn run(share: Option<&str>, mode: &str, relay_url: Option<&str>) -> Result<(
     let relay_url = resolve_relay_url(relay_url)?;
 
     let store = Arc::new(ReviewStore::open().context("open review store for agent")?);
+    // Kept alongside the manager's handle: suggest-diff anchors hunks against
+    // the snapshots this store persisted during join.
+    let store_for_diffs = Arc::clone(&store);
     let working_copy = Arc::new(WorkingCopyService::new());
 
     // Latest room id learned from updates, so comment/collab can target the
@@ -149,8 +153,16 @@ pub fn run(share: Option<&str>, mode: &str, relay_url: Option<&str>) -> Result<(
                     .get("invite")
                     .and_then(|v| v.as_str())
                     .unwrap_or_default();
+                // `"kind":"agent"` announces this participant as an agent
+                // (violet/hex in every peer's UI) while signing with the same
+                // base identity every later event uses.
+                let as_agent = cmd.get("kind").and_then(|v| v.as_str()) == Some("agent");
                 if invite.is_empty() {
                     emit(&stdout_lock, "error join: missing invite");
+                } else if as_agent {
+                    manager.submit(ReviewCommand::JoinAsAgent {
+                        invite: invite.to_string(),
+                    });
                 } else {
                     manager.submit(ReviewCommand::Join {
                         invite: invite.to_string(),
@@ -173,6 +185,44 @@ pub fn run(share: Option<&str>, mode: &str, relay_url: Option<&str>) -> Result<(
                         parent_thread_id: None,
                     }),
                     None => emit(&stdout_lock, "error comment: no active room"),
+                }
+            }
+            "suggest-diff" => {
+                let diff = cmd.get("diff").and_then(|v| v.as_str()).unwrap_or_default();
+                let room = cmd.get("room").and_then(|v| v.as_str());
+                if diff.is_empty() {
+                    emit(&stdout_lock, "error suggest-diff: missing diff");
+                } else {
+                    match crate::review::diff_suggestions::suggestions_from_diff(
+                        &store_for_diffs,
+                        diff,
+                        room,
+                    ) {
+                        Ok(report) => {
+                            for item in report.suggestions {
+                                match manager.submit_suggestion_sync(item.room_id, item.draft) {
+                                    Ok(id) => emit(
+                                        &stdout_lock,
+                                        &format!("suggested hunk={} id={id}", item.hunk),
+                                    ),
+                                    Err(e) => emit(
+                                        &stdout_lock,
+                                        &format!("error suggest-diff hunk={}: {e:#}", item.hunk),
+                                    ),
+                                }
+                            }
+                            for failure in report.failures {
+                                emit(
+                                    &stdout_lock,
+                                    &format!(
+                                        "error suggest-diff hunk={}: {}",
+                                        failure.hunk, failure.message
+                                    ),
+                                );
+                            }
+                        }
+                        Err(e) => emit(&stdout_lock, &format!("error suggest-diff: {e:#}")),
+                    }
                 }
             }
             "collab" => {

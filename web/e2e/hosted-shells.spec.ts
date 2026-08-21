@@ -15,8 +15,10 @@ async function expectNoHorizontalScroll(page: Page): Promise<void> {
 test('desk home lists recent workspaces with storage health', async ({ page }) => {
   await page.goto('/app?shell=demo');
   await expect(page.locator('h1')).toHaveText('Your desk');
+  // The storage badge was removed from the header (user ruling, 2026-08-20);
+  // the shell still reports which state it is in on the header itself.
   await expect(page.locator('[data-storage-mode]')).toHaveAttribute('data-storage-mode', 'persistent');
-  await expect(page.locator('.local-badge').first()).toContainText('On this device');
+  await expect(page.locator('.app-header .local-badge')).toHaveCount(0);
   await expect(page.locator('.quick')).toHaveCount(3);
   await expect(page.locator('.workspace-row')).toHaveCount(3);
   await expect(page.locator('.workspace-row').first()).toContainText('Product direction');
@@ -57,15 +59,265 @@ test('mobile Desk makes workspace facts and administration scannable', async ({ 
   await expectNoHorizontalScroll(page);
 });
 
+/* The Join panel's open state is a question for the URL, asked at every mount
+   (attn-ze60.3). It used to be answered once at boot and handed down, and the
+   desk mounts more than once per page load — it unmounts when a workspace opens
+   and mounts again on the way back. So the snapshot was wrong in both
+   directions: it reopened the panel over an address bar that had said plain
+   /app for two screens, and it left the panel shut on a Back to a history entry
+   that genuinely asked for #join. Both directions are pinned here, because a
+   fix for either one alone looks correct from the other side. */
+test('the Join panel follows the URL across desk↔workspace navigation', async ({ page }) => {
+  const panel = page.locator('[data-slot="join-panel"]');
+
+  // A workspace to travel into. (Creating one REPLACES the desk history entry,
+  // so the Back that matters is the one out of an already-existing workspace.)
+  await page.goto('/app');
+  await page.locator('[data-action="start-blank"]').click();
+  await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
+
+  // Arrive with the intent, then dismiss it: closing takes the hash with it.
+  await page.goto('/app#join');
+  await expect(panel).toBeVisible();
+  await page.getByRole('button', { name: 'Cancel' }).click();
+  await expect(panel).toHaveCount(0);
+  expect(new URL(page.url()).hash).toBe('');
+
+  // Into the workspace and back out. The desk remounts against a URL with no
+  // fragment, and must come back the way it was left.
+  await page.locator('.row-open').first().click();
+  await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
+  await page.goBack();
+  await expect(page.locator('[data-app-view="home"]')).toBeVisible();
+  expect(new URL(page.url()).hash).toBe('');
+  await expect(panel).toHaveCount(0);
+
+  // The other direction: opening the panel from the desk pushes #join, so that
+  // history entry really is asking for an open panel and Back must honour it.
+  await page.getByRole('link', { name: /Join a review/iu }).first().click();
+  await expect(panel).toBeVisible();
+  expect(new URL(page.url()).hash).toBe('#join');
+  await page.locator('.row-open').first().click();
+  await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
+  await page.goBack();
+  await expect(page.locator('[data-app-view="home"]')).toBeVisible();
+  expect(new URL(page.url()).hash).toBe('#join');
+  await expect(panel).toBeVisible();
+});
+
 test('landing one-click intent opens an untitled draft editor', async ({ page }) => {
   await page.goto('/app#new');
   await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
   await expect(page.locator('.hosted-native-document .ProseMirror')).toBeVisible();
-  await expect(page.locator('[data-path][data-active="true"]')).toContainText('untitled.md');
+  // A bare workspace mounts no file rail (attn-mkmz.5): a filter over a single
+  // row, and that row is the document already open beside it. The header does
+  // not name a file either (user ruling, 2026-08-20) — while the canvas is
+  // asking which document to open, the placeholder `untitled.md` is not a file
+  // anyone has chosen, and printing it contradicted the invitation beneath.
+  await expect(page.locator('[data-slot="owner-file-name"]')).toHaveCount(0);
+  await expect(page.locator('[data-path][data-active="true"]')).toHaveCount(0);
+  await expect(page.locator('[data-slot="canvas-invite"]')).toBeVisible();
+  // The workspace switcher survives the rail's absence — it lives in the header.
+  await expect(page.getByRole('combobox', { name: 'Project picker' })).toBeVisible();
   await expect(page.locator('[data-save-state]')).toHaveAttribute(
     'data-save-state',
     'Changes autosaved',
   );
+});
+
+test('the bare canvas invitation withdraws when the canvas is answered', async ({ page }) => {
+  await page.goto('/app#new');
+  const invite = page.locator('[data-slot="canvas-invite"]');
+  await expect(invite).toBeVisible();
+  // Pointer-transparent except its buttons: a click anywhere else has to reach
+  // the ProseMirror and place a caret, exactly as on any other empty document —
+  // and that click alone withdraws the offer (attn-rjuo.1.3). Waiting for a
+  // keystroke left the caret and the centred invitation on screen together.
+  await page.locator('.hosted-native-document .ProseMirror').click({ position: { x: 300, y: 20 } });
+  await expect(invite).toHaveCount(0);
+  await page.keyboard.type('Typed straight through the invitation.');
+  await expect(page.locator('.hosted-native-document .ProseMirror')).toContainText(
+    'Typed straight through the invitation.',
+  );
+  // Answering the canvas also returns the rail — the rail is hidden exactly
+  // while the invitation is up. Because the trigger is POINTER-DOWN, that
+  // happens before the first character, never mid-word.
+  await expect(page.locator('[data-path][data-active="true"]')).toContainText('untitled.md');
+  // And it must not come back a second later, when the autosave commit hands
+  // down a fresh workspace: that refresh used to reset the answered latch and
+  // resurrect the invitation over live typing (attn-rjuo).
+  await page.waitForTimeout(3000);
+  await expect(invite).toHaveCount(0);
+});
+
+test('a blank untitled.md opens the ordinary editor, rail and all', async ({ page }) => {
+  // Case 2 of the desk's two routes (user ruling, 2026-08-20). "Start a blank
+  // untitled.md" is a document you are already working on, not an empty surface
+  // waiting to be told what it is: no invitation, and the file rail, the file
+  // row and the Add files footer are all there from the first frame.
+  await page.goto('/app');
+  await page.locator('[data-action="start-blank"]').click();
+  await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
+  await expect(page.locator('[data-slot="canvas-invite"]')).toHaveCount(0);
+  await expect(page.getByRole('textbox', { name: 'Filter files' })).toBeVisible();
+  await expect(page.locator('[data-path][data-active="true"]')).toContainText('untitled.md');
+  await expect(page.locator('.hosted-sidebar-add')).toContainText('Add files');
+
+  // The invitation must not arrive late — the autosave commit that follows the
+  // first keystroke refreshes the workspace, and that refresh used to clear the
+  // create-intent this route depends on.
+  await page.locator('.hosted-native-document .ProseMirror').click();
+  await page.keyboard.type('rotwjboritj');
+  await page.waitForTimeout(3000);
+  await expect(page.locator('[data-slot="canvas-invite"]')).toHaveCount(0);
+  await expect(page.getByRole('textbox', { name: 'Filter files' })).toBeVisible();
+});
+
+test('the invitation does not wait for the editor chunk', async ({ page }) => {
+  // THE FAILURE THIS PINS (attn-rjuo.1.1): the invitation was nested inside the
+  // branch that renders once the lazily-imported editor resolves, so a bare
+  // workspace's first paint was a lone caret on an empty canvas for the length
+  // of a dynamic import — reported as "the untitled experience is broken".
+  //
+  // Asserted STRUCTURALLY, not by racing the network. "The editor has not
+  // mounted yet" is not a claim a test can hold on both builds: the dev server
+  // fetches the chunk on demand while the worker modulepreloads it, so a
+  // timing proxy passes on one and lies on the other. Whether the invitation is
+  // a DESCENDANT of the editor surface is the regression itself, and it is the
+  // same answer in every build.
+  await page.goto('/app#new');
+  const invite = page.locator('[data-slot="canvas-invite"]');
+  await expect(invite).toBeVisible();
+  await expect(page.locator('.hosted-editor-surface [data-slot="canvas-invite"]')).toHaveCount(0);
+  // Nor may the wait's own message double up with it on one empty canvas.
+  await expect(page.locator('.hosted-editor-loading')).toHaveCount(0);
+});
+
+test('the invitation still paints while the editor chunk is stalled', async ({ page }) => {
+  // The other half of attn-rjuo.1.1, as close to the reported symptom as a test
+  // can get: hold the editor chunk and the canvas must still say something.
+  // Matches the chunk in BOTH shapes — `…/Editor.svelte` on the dev server,
+  // `assets/Editor-<hash>.js` from the build.
+  await page.route('**/*', async (route) => {
+    if (/\bEditor(\.svelte|-[A-Za-z0-9_-]+\.js)/u.test(route.request().url())) {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+    await route.continue();
+  });
+  await page.goto('/app#new', { waitUntil: 'domcontentloaded' });
+  await expect(page.locator('[data-slot="canvas-invite"]')).toBeVisible({ timeout: 10_000 });
+});
+
+test.describe('while the editor chunk is not here', () => {
+  /* The service worker caches chunks — which is what makes the app work
+     offline, and what would hide these tests' control of the network from
+     them: a cached copy is served without the request ever reaching it.
+     Blocking it puts the fetch back where both cases below actually live. */
+  test.use({ serviceWorkers: 'block' });
+
+  test('the wait fills its screen and centres its sentence', async ({ page }) => {
+    /* attn-ze60.5: the wait ran a spinner in front of the sentence, and the
+       surfaces centre their single child — so what was centred was the GROUP, and
+       the words sat ~15px right of the middle by a distance that changed with the
+       sentence. Crossing from one stage of a wait to the next therefore slid the
+       line sideways. Asserted as geometry because that is what the defect was:
+       the markup looked centred at every step. */
+    await page.setViewportSize({ width: 1280, height: 800 });
+    await page.goto('/app');
+    await page.locator('[data-action="start-blank"]').click();
+    await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
+    const workspaceUrl = page.url();
+
+    // Hold the desktop frame's chunk so its wait stays on screen to be measured.
+    let release: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => (release = resolve));
+    await page.route('**/*', async (route) => {
+      if (/HostedDesktopWorkspaceFrame/u.test(route.request().url())) await held;
+      return route.continue();
+    });
+    await page.goto(workspaceUrl, { waitUntil: 'domcontentloaded' });
+
+    const wait = page.locator('.hosted-shell-loading');
+    await expect(wait).toBeVisible();
+
+    const geometry = await page.evaluate(() => {
+      const surface = document.querySelector('.hosted-shell-loading')!.getBoundingClientRect();
+      const line = document.querySelector('.loading-line')!.getBoundingClientRect();
+      return {
+        surface: { width: surface.width, height: surface.height },
+        lineCentre: line.x + line.width / 2,
+        viewport: { width: window.innerWidth, height: window.innerHeight },
+      };
+    });
+    // Full available space, and the sentence in the middle of it.
+    expect(geometry.surface.width).toBe(geometry.viewport.width);
+    expect(geometry.surface.height).toBe(geometry.viewport.height);
+    expect(Math.abs(geometry.lineCentre - geometry.viewport.width / 2)).toBeLessThanOrEqual(1);
+    // The mechanism, after the outcome: nothing shares the centred line.
+    await expect(page.locator('.loading-spinner')).toHaveCount(0);
+
+    release();
+  });
+
+  test('an editor chunk that never arrives reloads once, then says so', async ({ page }) => {
+    /* attn-ze60.1: the loader had no rejection handler, so a chunk that failed to
+       arrive — an offline tab, or hashed chunks 404ing because the deployment the
+       document came from has been replaced — left the workspace under "Opening
+       ..." indefinitely, with an unhandled rejection as the only record.
+
+       Retrying the import cannot fix it (the module map answers with the same
+       rejection without re-fetching), so the recovery is one automatic reload,
+       and the ceiling of ONE is the load-bearing part: a page that reloads on
+       every failure and fails on every load is a loop nobody can click their way
+       out of. Matches the chunk in BOTH shapes, like the stall case above. */
+    const isEditorChunk = (url: string) =>
+      /\bEditorShell(\.svelte|-[A-Za-z0-9_-]+\.js)/u.test(url);
+
+    // A workspace to open, created while the chunk still loads normally.
+    await page.goto('/app');
+    await page.locator('[data-action="start-blank"]').click();
+    await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
+    const workspaceUrl = page.url();
+
+    let attempts = 0;
+    await page.route('**/*', async (route) => {
+      if (!isEditorChunk(route.request().url())) return route.continue();
+      attempts += 1;
+      return route.abort();
+    });
+
+    await page.goto(workspaceUrl);
+
+    await expect(page.getByText('The editor didn’t finish loading')).toBeVisible();
+    await expect(page.locator('[data-app-view="editor-loading"]')).toHaveCount(0);
+    // The two ways out are real: a reload, and a route back to the desk.
+    await expect(page.getByRole('button', { name: 'Reload attn' })).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Go to your desk' })).toBeVisible();
+    // The first load and exactly one retry — never a reload loop.
+    expect(attempts).toBe(2);
+  });
+});
+
+test('an explicitly blank workspace stays blank across a reload', async ({ page }) => {
+  // attn-rjuo.1.2: the create-intent used to live only in component state, so a
+  // refresh re-covered a page someone had asked to be blank with an offer to
+  // import something.
+  await page.goto('/app');
+  await page.locator('[data-action="start-blank"]').click();
+  await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
+  await expect(page.locator('[data-slot="canvas-invite"]')).toHaveCount(0);
+  await page.reload();
+  await expect(page.locator('[data-app-view="workspace"]')).toBeVisible();
+  await expect(page.locator('[data-slot="canvas-invite"]')).toHaveCount(0);
+  await expect(page.locator('.ProseMirror p.is-editor-empty')).toBeVisible();
+});
+
+test('the import route keeps its invitation across a reload', async ({ page }) => {
+  await page.goto('/app');
+  await page.locator('[data-action="import-files"]').click();
+  await expect(page.locator('[data-slot="canvas-invite"]')).toBeVisible();
+  await page.reload();
+  await expect(page.locator('[data-slot="canvas-invite"]')).toBeVisible();
 });
 
 test('desktop editor reuses the native sidebar, editor, and review rail frame', async ({ page }) => {
@@ -78,22 +330,26 @@ test('desktop editor reuses the native sidebar, editor, and review rail frame', 
   await expect(page.locator('.hosted-native-document .ProseMirror')).toBeVisible();
   await expect(page.locator('[data-action="edit"]')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Done', exact: true })).toHaveCount(0);
-  const savedReview = page.getByRole('button', { name: 'Saved review' });
-  await expect(savedReview).toBeVisible();
-  await expect(savedReview).toHaveAttribute('aria-expanded', 'false');
+  // Addressed by slot, not by name: this control RENAMES itself between states
+  // ("Comments" -> "Hide comments"), so a name-based locator silently stops
+  // matching the moment it is opened — which is exactly what it did.
+  const commentsToggle = page.locator('[data-slot="comments-toggle"]');
+  await expect(commentsToggle).toBeVisible();
+  await expect(commentsToggle).toHaveAccessibleName('Comments');
+  await expect(commentsToggle).toHaveAttribute('aria-expanded', 'false');
   await expect(page.locator('[data-slot="right-rail"]')).toHaveCount(0);
   await expect(page.locator('.review-history-placeholder')).toHaveCount(0);
-  await savedReview.click();
-  await expect(savedReview).toHaveAttribute('aria-expanded', 'true');
+  await commentsToggle.click();
+  await expect(commentsToggle).toHaveAttribute('aria-expanded', 'true');
+  await expect(commentsToggle).toHaveAccessibleName('Hide comments');
   await expect(page.locator('[data-slot="right-rail"]')).toHaveAttribute('data-mode', 'expanded');
-  await expect(page.locator('.review-history-placeholder')).toContainText('Saved review');
+  await expect(page.locator('.review-history-placeholder')).toContainText('Comments');
   await expect(page.locator('.review-history-placeholder')).toContainText('JULES');
   await expect(page.locator('.review-history-placeholder')).toContainText(
-    'Live review adds presence and replies; saved feedback stays here.',
+    'Live review adds presence and replies; these comments stay here.',
   );
-  // Saved review has its own docked column. It reflows the document only while
+  // Comments get their own docked column. It reflows the document only while
   // explicitly open; closing removes the rail rather than retaining a gutter.
-  await expect(page.getByRole('button', { name: 'Hide saved review' })).toBeVisible();
   const readingLayout = await page.evaluate(() => {
     const documentSurface = document.querySelector<HTMLElement>('.hosted-native-document');
     const rail = document.querySelector<HTMLElement>('[data-slot="right-rail"]');
@@ -111,9 +367,9 @@ test('desktop editor reuses the native sidebar, editor, and review rail frame', 
   expect(readingLayout.documentWidth).toBeGreaterThanOrEqual(600);
   expect(readingLayout.railWidth).toBeGreaterThanOrEqual(300);
   await page.screenshot({ path: 'test-results/hosted-saved-review-docked.png' });
-  await page.getByRole('button', { name: 'Hide saved review' }).click();
+  await commentsToggle.click();
   await expect(page.locator('[data-slot="right-rail"]')).toHaveCount(0);
-  await page.getByRole('button', { name: 'Saved review' }).click();
+  await commentsToggle.click();
   await expect(page.locator('[data-slot="right-rail"]')).toHaveAttribute('data-mode', 'expanded');
   // 1024px is still the desktop workspace (the phone layout begins below the
   // app's 900px breakpoint). The dock must shrink the reading measure rather
@@ -189,7 +445,8 @@ test('open page presents the import handoff', async ({ page }) => {
 test('private browsing scenario degrades honestly', async ({ page }) => {
   await page.goto('/app?shell=private');
   await expect(page.locator('[data-storage-mode]')).toHaveAttribute('data-storage-mode', 'session-only');
-  await expect(page.locator('.local-badge').first()).toContainText('This session only');
+  // The banner is the whole surface now — it says the state, the consequence,
+  // and offers the remedy, which the removed badge never did.
   await expect(page.locator('[data-degraded="session-only"]')).toContainText(
     'This private session may erase your desk when it closes.',
   );
@@ -197,7 +454,7 @@ test('private browsing scenario degrades honestly', async ({ page }) => {
 
 test('blocked-storage scenario keeps the desk viewable', async ({ page }) => {
   await page.goto('/app?shell=blocked');
-  await expect(page.locator('.local-badge').first()).toContainText('View-only');
+  await expect(page.locator('[data-storage-mode]')).toHaveAttribute('data-storage-mode', 'unavailable');
   await expect(page.locator('[data-degraded="unavailable"]')).toContainText(
     'This browser currently blocks local document storage.',
   );

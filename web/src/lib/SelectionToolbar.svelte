@@ -10,15 +10,14 @@
   mousedown so clicking a button never collapses the editor selection (the
   composer reads `view.state.selection` when it opens).
 
-  UNAVAILABLE STATES (attn-64iy.2). This toolbar used to be suppressed entirely
-  whenever composing was impossible — App cleared `toolbarSelection` if no
-  snapshot resolved — so a user in a room highlighted text and nothing at all
-  appeared. That is what was reported ("I highlight text but nothing appears"),
-  and from outside it is indistinguishable from a broken build. The toolbar now
-  renders whenever there is a review context and says what the state is:
-  `pending` reads as a wait (it resolves itself), `blocked` reads as a refusal
-  with its reason. Only `absent` — no room at all — keeps it off screen, and
-  there the affordance genuinely does not exist.
+  UNAVAILABLE STATES (attn-64iy.2). Suppressing this toolbar whenever composing
+  is impossible — App clearing `toolbarSelection` when no snapshot resolves —
+  means a user in a room highlights text and nothing appears at all, which from
+  outside is indistinguishable from a broken build. So it renders whenever there
+  is a review context and says what the state is: `pending` reads as a wait (it
+  resolves itself), `blocked` reads as a refusal with its reason. Only `absent`
+  — no room at all — keeps it off screen, and there the affordance genuinely
+  does not exist.
 -->
 
 <script lang="ts">

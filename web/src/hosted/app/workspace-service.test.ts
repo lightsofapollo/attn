@@ -298,6 +298,66 @@ defineCase('leases are reachable through the service', async () => {
   }
 });
 
+// A workspace the tab has LEFT must give its runtime back (attn-e9r2.3).
+//
+// Desktop switches workspaces in place, and the only teardown on that path was
+// EditingSession.release() — a no-op — so the departed workspace kept its
+// lease, its heartbeat, its local-collab hub and its review transport. Other
+// tabs then had to force a takeover to edit a document nobody had open, and
+// every switch back and forth left another live runtime in the map.
+defineCase('closing a departed workspace releases its lease and evicts the runtime', async () => {
+  const service = await openService();
+  try {
+    const created = await service.createWorkspace();
+    const workspaceId = created.workspace.workspaceId;
+
+    const runtime = await service.beginOwnerRuntime(workspaceId, 'tab-a');
+    assertEqual(runtime.getState().leaseRole, 'owner', 'the tab holds the pen');
+    assert(await service.leases.current(workspaceId), 'a lease record exists');
+    // Another tab cannot politely acquire while this one holds it.
+    assertEqual(await service.leases.acquire(workspaceId, 'tab-b'), null, 'held against tab-b');
+
+    await service.closeOwnerRuntime(workspaceId);
+    assertEqual(runtime.getState().status, 'closed', 'the runtime is closed');
+    const handedBack = await service.leases.acquire(workspaceId, 'tab-b');
+    assert(handedBack, 'tab-b can now acquire without forcing a takeover');
+    await service.leases.release(handedBack);
+
+    // Evicted, not merely closed: the next claim builds a live runtime rather
+    // than handing back the husk.
+    const rebuilt = await service.beginOwnerRuntime(workspaceId, 'tab-a');
+    assert(rebuilt !== runtime, 'a fresh runtime, not the closed one');
+    assertEqual(rebuilt.getState().leaseRole, 'owner', 'and it holds the pen again');
+    await service.closeOwnerRuntime(workspaceId);
+  } finally {
+    service.close();
+  }
+});
+
+// Switching A -> B -> A -> B used to leave four live runtimes behind.
+defineCase('repeated in-place switches do not accumulate runtimes', async () => {
+  const service = await openService();
+  try {
+    const a = (await service.createWorkspace()).workspace.workspaceId;
+    const b = (await service.createWorkspace()).workspace.workspaceId;
+    const seen: unknown[] = [];
+    for (const workspaceId of [a, b, a, b]) {
+      seen.push(await service.beginOwnerRuntime(workspaceId, 'tab-a'));
+      await service.closeOwnerRuntime(workspaceId);
+    }
+    for (const runtime of seen) {
+      assertEqual(
+        (runtime as { getState(): { status: string } }).getState().status,
+        'closed',
+        'every departed runtime was closed',
+      );
+    }
+    assertEqual(await service.openOwnerRuntimeCount(), 0, 'nothing left holding either workspace');
+  } finally {
+    service.close();
+  }
+});
+
 defineCase('label helpers format sizes and relative times', () => {
   assertEqual(sizeLabel(42), '42 B', 'bytes');
   assertEqual(sizeLabel(2048), '2 KB', 'kilobytes');

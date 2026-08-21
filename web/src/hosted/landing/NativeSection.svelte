@@ -36,6 +36,11 @@
       </p>
       <CopyCode code="brew install lightsofapollo/attn/attn" />
       <CopyCode code="npx attnmd" />
+      <!-- The hero states the claim in plain language ("Agents join by invite,
+           as peers"); this is the mechanism, placed where the CLI already
+           lives. -->
+      <p class="cli-note">Agents join a shared review from the same CLI, headlessly:</p>
+      <CopyCode code={'attn review join <invite> --as-agent claude'} />
     </div>
     <div class="native-shot">
       <ResponsiveScreenshot

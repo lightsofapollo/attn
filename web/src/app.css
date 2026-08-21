@@ -119,59 +119,12 @@
   display: none !important;
 }
 
-/* ---------------------------------------------------------------------------
-   THE HEADER IS AN ACCENT PLANE (2026-08-10, owner-directed).
-
-   The bar is `--header-surface`, which is `--primary` itself. That makes every
-   control on it wrong by default: the whole header vocabulary is written in
-   `--foreground`, `--muted-foreground`, `--accent` and — worst — `--primary`,
-   which is now the ground those controls sit ON. The active-state convention
-   (`bg-primary/10` + `border-primary/35` + `text-primary`, attn-11g4.6) would
-   be an invisible accent-on-accent pill.
-
-   Rather than rewrite ~8 components' class strings, the header RE-POINTS the
-   tokens for its own subtree. Every Tailwind utility inside — `text-muted-
-   foreground`, `bg-accent`, `border-primary/35`, `text-primary` — resolves
-   through `--color-*: var(--*)` in the @theme block above, so they all adapt
-   with no component edits. The translation is exact: on this plane the pencil
-   IS the on-accent foreground, so "active" still reads as a filled, outlined
-   pill and "muted" still reads as a step back.
-
-   POLARITY FLIPS BETWEEN THEMES and that is why nothing here is hard-coded to
-   white: Paper's accent is dark (0.48) so its foreground is near-white, while
-   Ink's is light (0.72) so its foreground is near-black. `--primary-foreground`
-   is correct in both, `white` would be correct in one.
-
-   --amber-deep goes with them: the dirty save glyph's amber has no contrast on
-   terracotta. DESIGN.md already states the save chip's real signal is the
-   GLYPH (disk+pen vs disk+check), not the tint, so flattening both states to
-   the on-accent foreground costs nothing that was carrying meaning.
-
-   THE POPOVERS OPT OUT below. ShareChip, SnapshotBadge, OutboxIndicator and
-   PeerStrip render their floating cards INSIDE the header subtree (deliberately
-   — they are absolutely positioned rather than portalled, so they cannot be
-   torn away by the overflow-prone dock row). Those cards are their own
-   surface, not the accent plane, so they restore the ordinary palette from the
-   `--chrome-*` values captured at :root. Portalled menus (bits-ui dropdowns)
-   escape the subtree and need nothing. */
-:is(
-  [data-slot="native-header"],
-  [data-slot="owner-header"],
-  [data-slot="browser-review-header"]
-) {
-  --foreground: var(--primary-foreground);
-  --muted-foreground: color-mix(in oklch, var(--primary-foreground) 80%, transparent);
-  --faint-foreground: color-mix(in oklch, var(--primary-foreground) 62%, transparent);
-  --primary: var(--primary-foreground);
-  --accent: color-mix(in oklch, var(--primary-foreground) 16%, transparent);
-  --accent-foreground: var(--primary-foreground);
-  --border: color-mix(in oklch, var(--primary-foreground) 34%, transparent);
-  --input: color-mix(in oklch, var(--primary-foreground) 34%, transparent);
-  --ring: var(--primary-foreground);
-  --amber-deep: var(--primary-foreground);
-  --muted: color-mix(in oklch, var(--primary-foreground) 14%, transparent);
-  color: var(--primary-foreground);
-}
+/* THE HEADER IS AN ACCENT PLANE — the token re-pointing that makes it work now
+   lives in tokens.css, because the hosted app entry imports tokens.css and
+   chrome.css but NOT this file (attn-08fa.13). It had been declared here, so
+   the hosted shell's header painted the accent ground and then rendered
+   page-coloured controls on it. The opt-out below stays here: the popover slots
+   it names are native/review components that never mount in the hosted shell. */
 
 /* The floating cards are NOT the accent plane. Restoring from the captured
    root values keeps this honest — no literal is repeated, and a palette change
@@ -205,6 +158,17 @@
   padding-inline-start: 0;
 }
 
+/* The rail's inline gutter for the file tree (attn-mkmz.4). Unlayered on
+   purpose, and this is the whole reason: the reset directly above is unlayered
+   too, so ANY rule inside @layer components loses to it on the start side no
+   matter how specific — the first attempt at this landed 12px on the right and
+   0 on the left, which is worse than the full-bleed it was fixing. Same
+   specificity race, one step further along. `--sidebar-gutter` is declared on
+   `.project-sidebar`; the fallback covers a tree mounted outside one. */
+ul.sidebar-tree-menu[data-sidebar] {
+  padding-inline: var(--sidebar-gutter, 12px);
+}
+
 [data-sidebar="group"] {
   padding-inline: 6px;
   padding-block-end: 4px;
@@ -222,11 +186,23 @@
   /* Flush editorial furniture — no floating card. The controls sit directly on
      the sidebar so the paper grain reads continuously; a hairline rule under
      the project label (not a bordered panel) separates identity from the tree. */
+  /* ONE gutter down the whole rail (attn-mkmz.4). The controls block, the
+     outline wrap and the empty card each carried their own inset (12px, 10px,
+     10px) and the FILE TREE carried none, so the tree rows ran edge to edge:
+     the active row's fill touched both walls of the sidebar and its radius was
+     invisible on the sides it touched — a full-bleed band where the design
+     specifies a contained item. Named once here and used by everything below,
+     so the four cannot drift apart again. Shared with the native app, which had
+     the same defect for the same reason. */
+  .project-sidebar {
+    --sidebar-gutter: 12px;
+  }
+
   .project-sidebar .sidebar-controls[data-sidebar-controls="true"] {
     display: grid;
     gap: 8px;
     margin: 0;
-    padding: 10px 12px 8px;
+    padding: 10px var(--sidebar-gutter) 8px;
     background: transparent;
     border: 0;
     box-shadow: none;
@@ -246,6 +222,136 @@
      the intrinsic floor so the two agree. */
   .project-sidebar .sidebar-controls[data-sidebar-controls="true"] > * {
     min-width: 0;
+  }
+
+  /* Renaming a file happens ON its row, in the row's own type — the rail's
+     half of the same ruling the header's workspace rename carries. No border,
+     no fill, no field: the name simply starts accepting keystrokes, with a rust
+     underline saying it is live and the row's own active fill still behind it.
+
+     Full width rather than content width, unlike the header's. A tree row is
+     already a fixed lane whose names all start at the same x; a field that hugged
+     its text would put the name in the middle of the row while every name above
+     and below it stayed left. */
+  .sidebar-name-edit {
+    position: relative;
+    display: block;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .sidebar-rename-input {
+    width: 100%;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    /* The tree row's own ink, not the rail's generic foreground: the label this
+       replaces is set by the active-row rule, and any other value would change
+       colour the instant the name became editable. */
+    color: color-mix(in oklch, var(--foreground) 96%, transparent);
+    font-family: var(--sans);
+    font-size: 0.875rem;
+    font-weight: 500;
+    line-height: 1;
+    caret-color: var(--primary);
+  }
+
+  .sidebar-rename-input:focus,
+  .sidebar-rename-input:focus-visible {
+    outline: none;
+  }
+
+  .sidebar-name-edit::after {
+    content: '';
+    position: absolute;
+    inset-inline: 0;
+    bottom: -3px;
+    height: 1.5px;
+    background: var(--primary);
+  }
+
+  /* The row wears the ACTIVE row's treatment while the field is up — same fill,
+     same inset, same accent tick at the left — because it is the active row:
+     renaming a file switches to it first. Reproduced rather than inherited
+     because the button and its `[data-active]` attribute are what the tree
+     drops for the duration, and losing the "you are here" mark mid-rename would
+     make the row look like it had been deselected by its own rename. */
+  .sidebar-tree-menu .sidebar-tree-row--renaming {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    min-height: 34px;
+    max-height: 34px;
+    margin-bottom: 2px;
+    padding-right: 10px;
+    padding-left: calc(var(--tree-depth, 0) * 20px + 10px);
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: color-mix(in oklch, var(--foreground) 19%, transparent);
+    color: color-mix(in oklch, var(--foreground) 96%, transparent);
+  }
+
+  .sidebar-tree-menu .sidebar-tree-row--renaming::before {
+    content: "";
+    position: absolute;
+    inset: 5px auto 5px 1px;
+    width: 2px;
+    border-radius: 2px;
+    background: var(--primary);
+  }
+
+  /* Back to the desk — hosted only, first row in the rail. It borrows the tree
+     row's inset, radius and hover accent so it belongs to this column rather
+     than sitting on top of it, but stays shorter and muted and carries a BACK
+     chevron: it points out of the tree that every row beneath it points into,
+     and should not read as one more file. No rule beneath it — the filter box
+     below already draws its own edge, and on native the project row draws the
+     one hairline this stack is allowed. */
+  .sidebar-back {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    width: 100%;
+    min-width: 0;
+    margin: 0;
+    padding: 6px 10px;
+    border: 0;
+    border-radius: 8px;
+    background: transparent;
+    font-family: var(--sans);
+    font-size: 0.78rem;
+    font-weight: 500;
+    line-height: 1.2;
+    color: color-mix(in oklch, var(--sidebar-foreground) 86%, transparent);
+    text-align: start;
+    cursor: pointer;
+    -webkit-user-select: none;
+    user-select: none;
+    transition: background-color var(--t) var(--ease), color var(--t) var(--ease);
+  }
+
+  .sidebar-back:hover {
+    background: var(--sidebar-accent);
+    color: var(--sidebar-foreground);
+  }
+
+  .sidebar-back:focus-visible {
+    outline: 2px solid var(--sidebar-ring);
+    outline-offset: 1px;
+  }
+
+  .sidebar-back-glyph {
+    flex: none;
+    opacity: 0.75;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .sidebar-back {
+      transition: none;
+    }
   }
 
   /* Brand row (attn-64iy.5) — browser tabs only, where the top-left corner is
@@ -340,6 +446,194 @@
     opacity: 0.9;
   }
 
+  /* The mark, as a link home. Deliberately the same weight it had as inert
+     furniture — a logo that starts glowing is a logo competing with the
+     document. Hover dims it a step, which is the whole of the affordance;
+     focus takes the app's ring like every other control in the bar. */
+  .owner-brand {
+    display: flex;
+    flex: none;
+    align-items: center;
+    gap: 6px;
+    border-radius: 6px;
+    color: inherit;
+    text-decoration: none;
+    transition: opacity var(--t) var(--ease);
+  }
+
+  .owner-brand:hover {
+    opacity: 0.72;
+    text-decoration: none;
+  }
+
+  .owner-brand:focus-visible {
+    outline: 2px solid var(--ring);
+    outline-offset: 2px;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .owner-brand {
+      transition: none;
+    }
+  }
+
+  /* ONE TYPE FOR BOTH NAMES (user ruling, 2026-08-20). The file name had been
+     set a step lighter and a step dimmer than the workspace, on the theory that
+     the interactive half should out-rank the inert one. Printed side by side
+     they simply looked like a mistake — the same face at two weights, four
+     words apart — and the header stopped reading as one line.
+     They are now the same declaration; `.owner-project-name` carries it too, so
+     changing one changes both. Interactivity is said by BEHAVIOUR instead: the
+     workspace lifts on hover and underlines in rust on focus, the file does
+     neither. */
+  .owner-file-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--sans);
+    font-size: var(--text-meta);
+    font-weight: 500;
+    line-height: 1.2;
+    color: var(--foreground);
+  }
+
+  /* The header variant of the same picker (user ruling, 2026-08-20). The MENU
+     is shared verbatim with the rail's — same card, same rows — because it is
+     the same control; only the trigger changes register.
+
+     The trigger is a NAME IN A PATH: same face, size, weight and colour as the
+     file beside it, because they are two names on one line and any difference
+     between them reads as a mistake rather than as a hint. What marks it as the
+     control is what it DOES — see the hover and focus rules below. */
+  .owner-project-trigger {
+    display: inline-flex;
+    align-items: center;
+    max-width: 100%;
+    min-width: 0;
+    padding: 0;
+    border: 0;
+    background: transparent;
+    color: inherit;
+    cursor: pointer;
+  }
+
+  .owner-project-name {
+    display: block;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-family: var(--sans);
+    font-size: var(--text-meta);
+    font-weight: 500;
+    line-height: 1.2;
+    color: var(--foreground);
+  }
+
+  .owner-project-trigger:focus {
+    outline: none;
+  }
+
+  /* With the chevron gone, this pair IS the affordance. A rust underline on
+     hover and on keyboard focus — the same mark, so pointer and keyboard learn
+     one thing — and it holds while the menu is open, which keeps the trigger
+     visibly attached to the card hanging off it. Nothing beside it in the bar
+     underlines, so the treatment stays unambiguous. */
+  .owner-project-trigger:hover .owner-project-name,
+  .owner-project-trigger:focus-visible .owner-project-name,
+  .owner-project-trigger[aria-expanded='true'] .owner-project-name {
+    color: var(--foreground);
+    text-decoration: underline;
+    text-decoration-color: var(--primary);
+    text-decoration-thickness: 1.5px;
+    text-underline-offset: 3px;
+  }
+
+  /* Renaming edits the name where the name is (attn-rjuo.2.1).
+   
+     The input this replaces (`.hosted-title-input`) rendered in the header's
+     ACTIONS cluster, at the far right, while the name it renamed sat at the far
+     left — and it painted `--background` on `--foreground`, which on the accent
+     plane is a near-black slab on terracotta or steel. Detached and off-plane: it
+     read as a rendering fault rather than a control.
+   
+     This one takes the picker trigger's slot and its type step, so renaming looks
+     like editing the word rather than opening a dialog somewhere else. Colours
+     come from the header's own re-pointed tokens — `--primary-foreground` for ink
+     on the plane, a hairline of the same at low alpha for the field. */
+  /* NO BOX (user ruling, 2026-08-20). The field above still announced itself as
+     a field — a bordered, filled, fixed-16rem slab that appeared where a word
+     had been and pushed the rest of the path sideways. Renaming is not a
+     separate mode you enter; it is the same word, still in its own slot, now
+     accepting keystrokes.
+     The wrapper is a one-cell grid holding two things: the field, and a hidden
+     copy of what is typed set in exactly the same type. The cell takes the
+     copy's width, the field fills the cell — so the control is always precisely
+     as wide as the name and nothing around it moves as you type. */
+  .owner-name-edit {
+    position: relative;
+    display: inline-grid;
+    align-items: center;
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .owner-name-edit::after {
+    content: attr(data-value);
+    grid-area: 1 / 1;
+    visibility: hidden;
+    overflow: hidden;
+    /* `pre` keeps trailing spaces in the measurement, and the extra pixel is
+       the caret's room at the end of the string. */
+    white-space: pre;
+    padding-inline-end: 1px;
+    font-family: var(--sans);
+    font-size: var(--text-meta);
+    font-weight: 500;
+    line-height: 1.2;
+  }
+
+  /* The one mark that the word is live, and it is a mark the trigger already
+     wears on hover — so entering rename reads as the hover state gaining a
+     caret rather than a control appearing. Drawn in the grid cell and pulled
+     below the text box, so arriving and leaving costs no layout. */
+  .owner-name-edit::before {
+    content: '';
+    grid-area: 1 / 1;
+    align-self: end;
+    height: 1.5px;
+    margin-block-end: -3px;
+    background: var(--primary);
+  }
+
+  .owner-title-input {
+    grid-area: 1 / 1;
+    width: 100%;
+    min-width: 1.5rem;
+    padding: 0;
+    border: 0;
+    border-radius: 0;
+    background: transparent;
+    color: var(--foreground);
+    font-family: var(--sans);
+    font-size: var(--text-meta);
+    font-weight: 500;
+    line-height: 1.2;
+    caret-color: var(--primary);
+  }
+
+  /* The underline IS the focus indicator here; a ring around a borderless
+     field would put back the box this rule exists to remove. */
+  .owner-title-input:focus,
+  .owner-title-input:focus-visible {
+    outline: none;
+  }
+
+  .owner-title-input::placeholder {
+    color: color-mix(in oklch, var(--foreground) 55%, transparent);
+  }
+
   .sidebar-project-menu {
     min-width: 220px;
     max-width: 320px;
@@ -422,10 +716,12 @@
     background: var(--primary);
   }
 
-  /* Workspace actions appended below the project list (hosted picker):
-     same type as the project rows, indented past the check gutter. */
+  /* Workspace actions appended below the project list (hosted picker): same
+     type as the project rows. Their GEOMETRY is set unlayered further down —
+     `px-2 py-1.5` rides in on the dropdown item's own class and beats anything
+     declared here, which is why the inset those rows are supposed to share had
+     no effect from this block. */
   .sidebar-project-menu-action {
-    padding-inline-start: calc(0.5rem + 8px + 0.875rem);
     font-family: var(--sans);
     font-size: 0.95rem;
     line-height: 1.25;
@@ -614,6 +910,12 @@
     background: color-mix(in oklch, var(--sidebar-foreground) 8%, transparent);
   }
 
+  /* The section label joins the same gutter. The file tree's own copy of this
+     has to live unlayered — see the note beside the `[data-sidebar] ul` reset. */
+  [data-slot="sidebar-shared-label"] {
+    padding-inline: var(--sidebar-gutter, 12px);
+  }
+
   .sidebar-tree-menu [data-sidebar="menu-button"],
   .sidebar-tree-menu [data-sidebar="menu-sub-button"] {
     position: relative;
@@ -667,6 +969,12 @@
     color: color-mix(in oklch, var(--foreground) 96%, transparent);
   }
 
+  /* The active bar is the ACCENT (attn-08fa.9). DESIGN.md's navigation spec has
+     always said "a 2px accent bar at the left inset", and One Pencil lists
+     current selection among the accent's three jobs — this is the signature
+     one. It shipped as 62% ink, which made the bar a second, weaker statement
+     of the fill it sits inside instead of the one mark that says "you are
+     here". */
   .sidebar-tree-menu [data-sidebar="menu-button"][data-active="true"]::before,
   .sidebar-tree-menu [data-sidebar="menu-sub-button"][data-active="true"]::before {
     content: "";
@@ -674,7 +982,7 @@
     inset: 5px auto 5px 1px;
     width: 2px;
     border-radius: 2px;
-    background: color-mix(in oklch, var(--foreground) 62%, transparent);
+    background: var(--primary);
   }
 
   .sidebar-tree-row {
@@ -841,7 +1149,7 @@
 
   .sidebar-outline-wrap {
     margin: 0;
-    padding: 0 10px 12px;
+    padding: 0 var(--sidebar-gutter) 12px;
     border: 0;
     border-radius: 0;
     background: transparent;
@@ -894,10 +1202,9 @@
     border: 1px dashed color-mix(in oklch, var(--foreground) 16%, transparent);
     border-radius: 10px;
     padding: 12px;
-    /* Inset to the same 10px gutter `.sidebar-outline-wrap` gives its rows, so
-       the card lines up with the filter and the file list instead of running
-       edge to edge. */
-    margin: 0 10px 12px;
+    /* The rail's one gutter, so the card lines up with the filter and the file
+       list instead of running edge to edge. */
+    margin: 0 var(--sidebar-gutter) 12px;
     background: color-mix(in oklch, var(--background) 75%, white 25%);
   }
 
@@ -936,6 +1243,28 @@
     background-color: var(--suggestion-deletion);
     text-decoration: line-through;
     text-decoration-thickness: 1px;
+  }
+
+  /* ----- Card ↔ segment linking (attn-bb6t.2) -----
+     Both halves of the hover tie are painted here rather than baked into the
+     decoration set: the mark keeps whatever kind/confidence fill it already
+     has and gains a ring, so one rule covers comments, suggestions, deletions
+     and every confidence tier without inventing a second color per kind.
+     `box-decoration-break: clone` on the base classes makes the ring wrap
+     correctly around each line fragment of a multi-line range.
+
+     `is-hovered` is toggled directly on the mark DOM by
+     `applyReviewHoverHighlight` (hover must never rebuild decorations);
+     `is-focused` comes from the decoration set itself. Focus is declared last
+     so the stronger ring wins when a card is both hovered and focused. */
+  [data-event-id].is-hovered {
+    border-radius: 2px;
+    box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 42%, transparent);
+  }
+
+  [data-event-id].is-focused {
+    border-radius: 2px;
+    box-shadow: 0 0 0 2px color-mix(in oklch, var(--primary) 72%, transparent);
   }
 
   /* Inline ghost text for a proposed insertion/replacement — the editorial
@@ -1036,6 +1365,25 @@
 }
 
 /* Sidebar control hard overrides (outside @layer to beat utility classes). */
+
+/* THE ACTIVE TREE ROW (attn-08fa.9). DESIGN.md specifies "active fills 19% ink
+   with a 2px accent bar at the left inset", and `@layer components` above
+   declares exactly that — but shadcn's menu-button ships
+   `data-[active=true]:bg-sidebar-accent` as a Tailwind UTILITY, and the Layer
+   Order puts utilities last on purpose. So the shipped fill was
+   `--sidebar-accent` (10% ink): the doc said 19, the page drew 10, and neither
+   was wrong about itself. Measured, not guessed — the row read
+   `oklch(0.14 0.008 55 / 0.1)` in the hosted editor.
+
+   This belongs in the hard-override block for the same reason the input sizing
+   does: it is a design-system decision that a component-library utility would
+   otherwise win. The ::before bar is layered and needs no override, since
+   nothing in the utility layer paints it. */
+.sidebar-tree-menu [data-sidebar="menu-button"][data-active="true"],
+.sidebar-tree-menu [data-sidebar="menu-sub-button"][data-active="true"] {
+  background: color-mix(in oklch, var(--foreground) 19%, transparent);
+}
+
 .project-sidebar [data-slot="sidebar-input"] {
   height: 36px;
   min-height: 36px;
@@ -1080,6 +1428,38 @@
 
 .sidebar-project-menu[data-slot="dropdown-menu-content"] [data-slot="command-list"] {
   padding: 6px 0;
+}
+
+/* THE DEFECT THIS FIXES: the action rows ran the full width of a popover that
+   clips its own overflow (`overflow-x-hidden` + a rounded border on the
+   dropdown content), so the focus ring drawn on the highlighted row was sliced
+   off at both walls — a focused control with no visible left or right edge.
+   The rows above it never showed this because command items already carry a
+   6px inline margin, which is also why the two lists never lined up: the
+   actions sat 10px to the left of the project labels they were supposed to
+   continue.
+   One inset for both, and it is spent twice: it is the margin the ring needs
+   and the alignment the list needs. The last row also gives its ring room at
+   the bottom, since the content scrolls on the block axis rather than
+   clipping. Unlayered because `px-2 py-1.5` arrives on the dropdown item's own
+   class and would beat any layered rule. */
+.sidebar-project-menu[data-slot="dropdown-menu-content"] .sidebar-project-menu-action {
+  margin: 2px 10px;
+  padding: 8px 12px;
+  /* Past the check gutter, so actions align with the project labels above:
+     the item's own 12px, the 0.875rem check, and the 8px gap between them. */
+  padding-inline-start: calc(12px + 0.875rem + 8px);
+  border-radius: 8px;
+}
+
+.sidebar-project-menu[data-slot="dropdown-menu-content"] .sidebar-project-menu-action:last-child {
+  margin-block-end: 6px;
+}
+
+/* The separator's `-mx-1` was written for a menu with `p-1`; this one is `p-0`,
+   so it hung 4px past both walls and got clipped like everything else. */
+.sidebar-project-menu[data-slot="dropdown-menu-content"] [data-slot="dropdown-menu-separator"] {
+  margin-inline: 0;
 }
 
 /* ============================================
@@ -1327,16 +1707,13 @@
 /* Inline suggesting mode (track changes, attn-07i.2). Reviewer suggestions
    render as colored, attributed inline marks: green insertions, red
    strikethrough deletions. The owner accepts/rejects; the file stays clean. */
-/* Colours come from the review tokens, not Tailwind's palette (design-system
-   consolidation, 2026-08-08). These marks previously used Tailwind hexes —
-   green-700/#15803d, red-700/#b91c1c and their dark variants — which are COOL
-   greens and reds from a different system. attn's own vocabulary is the
-   150-hue suggestion green and the 27-hue destructive clay, and the product
-   principle is one vocabulary for review marks everywhere: a `del` here must
-   be the same red as `.attn-review-suggestion--deletion`, because they are the
-   same statement made by two renderers. The tokens are theme-aware, so the
-   :root.dark colour overrides that existed only to re-state the hexes are
-   gone rather than migrated. */
+/* Colours come from the review tokens, never Tailwind's palette: its greens
+   and reds are COOL, from a different system. attn's vocabulary is the 150-hue
+   suggestion green and the 27-hue destructive clay, and review marks use one
+   vocabulary everywhere — a `del` here must be the same red as
+   `.attn-review-suggestion--deletion`, because they are the same statement
+   made by two renderers. The tokens are theme-aware, so no :root.dark
+   override belongs here. */
 .ProseMirror ins[data-id] {
   text-decoration: none;
   color: var(--review-card-suggestion-accent);

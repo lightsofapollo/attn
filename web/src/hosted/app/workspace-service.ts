@@ -267,6 +267,44 @@ export class BrowserWorkspaceService {
   }
 
   /**
+   * How many owner runtimes this tab is holding open.
+   *
+   * Eviction is not observable from the lease alone — a closed runtime hands
+   * that back either way — so the "repeated switches do not accumulate
+   * runtimes" property (attn-e9r2.3) needs the map's own size to be visible.
+   */
+  openOwnerRuntimeCount(): number {
+    return this.ownerRuntimes.size;
+  }
+
+  /**
+   * Close and EVICT this tab's owner runtime for a workspace it has left
+   * (attn-e9r2.3).
+   *
+   * The distinction from `yieldOwnerRuntime` is the cache. A yield is
+   * temporary — the tab still has the workspace open and expects to reclaim
+   * the pen, so the closed runtime stays keyed here and `beginOwnerRuntime`
+   * rebuilds on the next claim. Leaving the workspace is permanent for this
+   * route: nothing will look at that entry again, and keeping it made
+   * repeated in-place switches grow the map one dead runtime at a time.
+   *
+   * The map entry is dropped only AFTER close resolves, so a `beginOwnerRuntime`
+   * racing this call still finds the closing runtime and awaits it (its
+   * `isClosing()` branch) instead of building a second runtime that claims the
+   * lease while the first is still releasing it.
+   */
+  async closeOwnerRuntime(workspaceId: string): Promise<void> {
+    const runtime = this.ownerRuntimes.get(workspaceId);
+    if (!runtime) return;
+    await runtime.close();
+    // A fresh runtime may already own the slot (switched away and back while
+    // this one was closing); never evict somebody else's.
+    if (this.ownerRuntimes.get(workspaceId) === runtime) {
+      this.ownerRuntimes.delete(workspaceId);
+    }
+  }
+
+  /**
    * Hydrate this tab's review store from the workspace's durable inbound
    * log and keep it fresh on the cross-tab review doorbell, so every tab
    * shows the same comment threads regardless of which tab holds the

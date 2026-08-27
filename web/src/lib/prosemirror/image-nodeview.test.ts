@@ -134,9 +134,9 @@ defineCase('2. node.attrs.src is never written', () =>
 
 defineCase('3. with no resolver the authored src is used verbatim', () =>
   withFakeDocument(() => {
-    // The app never mounts the view without a resolver — Editor.svelte leaves
-    // the key off entirely (case 19) — but the parameter is optional, so the
-    // degenerate case is held to doing nothing rather than inventing a URL.
+    // The hosted app and the reviewer-snapshot editor mount the view with no
+    // resolver (cases 19 and 21). They get the card on failure but must never
+    // get a URL nobody asked for, so "no resolver" has to mean "do nothing".
     const { img } = mount(imageNode('![a](./diagram.png)'), 'none');
     assertEq(img.getAttribute('src'), './diagram.png', 'unchanged');
   }),
@@ -356,11 +356,16 @@ defineCase("19. Editor's nodeView reactor tracks resolveAssetUrl", () => {
     /void resolveAssetUrl;/.test(reactor[0]),
     'the nodeView reactor must touch `resolveAssetUrl` so switching tabs rebuilds the image views',
   );
+  // Unconditional: a surface with no resolver still gets the placeholder card
+  // rather than the platform's broken-image glyph. A conditional here would
+  // silently strand the hosted app on the stock `toDOM`.
   assert(
-    /\.\.\.\(resolveAssetUrl \? \{ image: \(node: PmNode\) => imageNodeView\(node, resolveAssetUrl\) \} : \{\}\),/.test(
-      editor,
-    ),
-    'buildNodeViews() must register the image NodeView ONLY when a resolver was supplied',
+    /^\s*image: \(node: PmNode\) => imageNodeView\(node, resolveAssetUrl\),$/m.test(editor),
+    'buildNodeViews() must register the image NodeView on every surface',
+  );
+  assert(
+    !/resolveAssetUrl \? \{ image:/.test(editor),
+    'the image NodeView must not be registered conditionally',
   );
 });
 
@@ -381,7 +386,9 @@ defineCase('20. App passes a resolver whose identity actually changes', () => {
 defineCase('21. the reviewer snapshot editor is left unresolved', () => {
   // That editor renders the OWNER's document; its relative srcs name files on
   // the owner's disk. Resolving them would mint a convincing attn:// URL for a
-  // file that is not on this machine — worse than the authored src.
+  // file that is not on this machine — worse than the authored src. It still
+  // MOUNTS the view (registration is unconditional), so an unloadable src
+  // there gets the card; what it must not have is a resolver.
   const app = read('../App.svelte');
   const bound = app.match(/resolveAssetUrl=\{resolveActiveAssetUrl\}/g) ?? [];
   assertEq(bound.length, 2, 'exactly the local markdown editor and the editor-only diagnostic');

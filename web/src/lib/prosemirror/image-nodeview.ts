@@ -31,10 +31,15 @@
 // reading column and make blank paper to the right of a thumbnail a drag
 // handle for it.
 //
-// This view is registered ONLY when a resolver is supplied (Editor.svelte's
-// buildNodeViews). Callers with no local file behind the document — the hosted
-// app, the reviewer viewing an owner's snapshot — keep the stock `toDOM`, so
-// their DOM is byte-identical to what it was before this file existed.
+// This view is registered on every surface (Editor.svelte's buildNodeViews).
+// Callers with no local file behind the document — the hosted app, the
+// reviewer viewing an owner's snapshot — pass no resolver and so render the
+// authored src verbatim, which is what the stock `toDOM` did. They differ from
+// stock only when that src fails to load, where they get this file's card
+// instead of the platform's broken-image glyph. That is deliberate: those
+// surfaces genuinely cannot fetch a relative local asset, so the failure is
+// permanent until workspace-relative assets land, and a permanent failure is
+// exactly the one worth explaining to the reader.
 
 import type { Node as PmNode } from 'prosemirror-model';
 import type { NodeView } from 'prosemirror-view';
@@ -57,10 +62,10 @@ export function imageFileName(src: string): string {
  *
  * @param node            the image node
  * @param resolveAssetUrl maps an authored src onto something the webview can
- *                        load, or `null` when it cannot be resolved. Optional
- *                        so the view stays testable without one; in the app
- *                        the view is not registered at all when there is no
- *                        resolver.
+ *                        load, or `null` when it cannot be resolved. Omitted
+ *                        by surfaces with no local document behind them, where
+ *                        it means "resolve nothing": the authored src is used
+ *                        as-is and, when it fails, the placeholder explains.
  */
 export function imageNodeView(
   node: PmNode,

@@ -494,14 +494,20 @@
     const builtIn: Record<string, NodeViewConstructor> = {
       task_list_item: taskListItemNodeView,
       frontmatter: (node) => frontmatterNodeView(node),
-      // Registered ONLY where there is something to resolve against. With no
-      // resolver the view would render the authored src verbatim — the same
-      // bytes the stock `toDOM` emits — but it would still swap the platform's
-      // broken-image glyph for our placeholder on every relative src the
-      // hosted app cannot load yet, which is a visible change on a surface
-      // that is explicitly out of scope until workspace-relative assets land.
-      // Leaving the key off keeps that DOM byte-identical.
-      ...(resolveAssetUrl ? { image: (node: PmNode) => imageNodeView(node, resolveAssetUrl) } : {}),
+      // Registered on EVERY surface, resolver or not. Where one is supplied
+      // the view resolves `./x.png` against the document's directory; where
+      // none is (the hosted app, the reviewer viewing an owner's snapshot) it
+      // renders the authored src verbatim — the same bytes the stock `toDOM`
+      // emits — and the src fails exactly as it did before.
+      //
+      // What changes for those surfaces is only the FAILURE state, and that is
+      // the point: hosted has no filesystem behind `./diagram.png` and its CSP
+      // has no `https:` in `img-src`, so those images cannot load there and
+      // will not until workspace-relative assets land. Until then the honest
+      // answer is the same card native shows — alt text and a filename in the
+      // document's voice — not the platform's broken-image glyph. Shipping the
+      // graceful state on one of two surfaces is a half-landed feature.
+      image: (node: PmNode) => imageNodeView(node, resolveAssetUrl),
       code_block(node, editorView, getPos) {
         const mermaid = mermaidNodeView(node, editorView, getPos);
         if (mermaid) return mermaid;

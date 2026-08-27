@@ -29,6 +29,12 @@ blocks written inline in the markdown source.
 
 Anything with a scheme passes through untouched, so remote images keep working.
 
+The src below is deliberately unresolvable: the E2E suite asserts the exact
+string survives the resolver, and anchoring that on a live host would make the
+run fail offline and in CI. **Expect a placeholder card here** — what is being
+tested is the `src` attribute, not the pixels. To see a remote image actually
+render, swap in any live URL by hand; it will load, because nothing rewrites it.
+
 ![A remote pixel](https://example.com/pixel.png)
 
 ## Missing file

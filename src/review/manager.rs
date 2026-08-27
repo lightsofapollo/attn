@@ -2353,6 +2353,39 @@ impl ReviewManager {
 
     /// Translate a `JoinOutcome` (or its error) into the corresponding
     /// `ReviewUpdate` and dispatch it.
+    /// Join a room and REPORT whether it worked (attn-q8gs).
+    ///
+    /// `ReviewCommand::Join` is fire-and-forget: `submit` hands it to the
+    /// dispatch loop, the caller is told nothing, and a failure surfaces only
+    /// as a `ReviewUpdate::Error` in the window and a line in the daemon log.
+    /// That is right for the in-app path — the window is watching — and wrong
+    /// for `attn review join`, whose caller is a terminal that exits before
+    /// any update arrives and so reported success for joins that never
+    /// happened.
+    ///
+    /// This runs the SAME work as the `Join` arm of `submit` — same
+    /// bootstrapper call, same `emit_join_outcome`, so the window still
+    /// updates exactly as it would have — and additionally returns the
+    /// outcome to whoever asked. Returns the joined `RoomId` on success, or a
+    /// human-readable reason on failure.
+    pub fn join_blocking(&self, invite: String) -> Result<String, String> {
+        let (Some(bootstrap), Some(runtime)) = (self.bootstrap.as_ref(), self.runtime.as_ref())
+        else {
+            return Err("review bootstrapper unavailable (daemon started without one)".to_string());
+        };
+        let cache = self.verifying_keys.clone();
+        let result = runtime.block_on(bootstrap.join(&invite, cache));
+        // Summarise BEFORE handing ownership to the emitter, which consumes
+        // the result. The emit must still happen: it starts the room runtime
+        // and flips the window onto the shared document.
+        let summary = match &result {
+            Ok(outcome) => Ok(outcome.room_id.as_str().to_string()),
+            Err(err) => Err(format!("{err}")),
+        };
+        self.emit_join_outcome(result);
+        summary
+    }
+
     fn emit_join_outcome(
         &self,
         result: Result<JoinOutcome, crate::review::bootstrap::BootstrapError>,

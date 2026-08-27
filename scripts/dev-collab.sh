@@ -86,6 +86,14 @@ require_fixture() {
     fi
 }
 
+# The port `ATTN_RELAY_URL` points at. Everything below needs it as a number,
+# and defaulting to 8787 keeps a URL without an explicit port working.
+relay_port() {
+    local port
+    port=$(printf '%s' "$ATTN_RELAY_URL" | sed -E 's#^[a-z]+://[^/:]+:?([0-9]*).*#\1#')
+    printf '%s' "${port:-8787}"
+}
+
 # Start Miniflare via the relay package. Installs deps on first run.
 # Waits for /health to return 200 before returning.
 start_relay() {
@@ -94,7 +102,26 @@ start_relay() {
         (cd "$PROJECT_DIR/relay" && npm ci) >/dev/null
     fi
 
-    log "Starting Miniflare relay (wrangler dev --local --port 8787)"
+    # Refuse to start on a port someone else already holds (attn-1kvp). The
+    # health poll below cannot tell our relay from a stranger's — a foreign
+    # process answers /health identically — and wrangler SURVIVES its own
+    # EADDRINUSE, so `kill -0 $RELAY_PID` stays true while the runtime that
+    # failed to bind sits there dead. The harness then runs both daemons
+    # against a relay holding unrelated Durable Object state, and the user
+    # sees a reviewer that never opens the shared doc, a 409 on device
+    # registration, and a missing <room>.secret — three symptoms that point
+    # nowhere near a port clash. Fail here, where the cause is still legible.
+    local port
+    port=$(relay_port)
+    local holder
+    holder=$(lsof -ti "tcp:$port" -sTCP:LISTEN 2>/dev/null | head -1 || true)
+    if [ -n "$holder" ]; then
+        err "port $port is already in use by PID $holder ($(ps -p "$holder" -o comm= 2>/dev/null || echo 'unknown'))"
+        err "another relay or dev server is running. Stop it first:  kill $holder"
+        return 1
+    fi
+
+    log "Starting Miniflare relay (wrangler dev --local --port $port)"
     (
         cd "$PROJECT_DIR/relay"
         exec npm run dev
@@ -108,6 +135,14 @@ start_relay() {
         if ! kill -0 "$RELAY_PID" 2>/dev/null; then
             err "relay process exited early — see $RELAY_LOG"
             tail -30 "$RELAY_LOG" >&2 || true
+            return 1
+        fi
+        # wrangler keeps running after a failed bind, so the liveness check
+        # above never fires for the one failure that matters. The log is the
+        # only place it is stated.
+        if grep -q "Address already in use" "$RELAY_LOG" 2>/dev/null; then
+            err "relay could not bind port $port — another process took it"
+            tail -10 "$RELAY_LOG" >&2 || true
             return 1
         fi
         if curl -fsS "$ATTN_RELAY_URL/health" >/dev/null 2>&1; then
@@ -152,37 +187,48 @@ join_reviewer() {
     log "Click [Share] in the OWNER window — the one showing '$FIXTURE_PATH'."
     log "(The reviewer window shows '$REVIEWER_FIXTURE_PATH' until it joins.) Copy the invite, then paste it here."
     log "(Empty line cancels and leaves the daemons running.)"
-    printf 'Paste invite > '
-    IFS= read -r pasted || true
-    if [ -z "$pasted" ]; then
-        log "No invite supplied — daemons remain up. Ctrl+C to stop."
-        return 0
-    fi
 
-    # The share dialog offers two copyable things: the bare attn:// URL and
-    # the full `npx attnmd review join 'attn://…'` one-liner. Accept either
-    # (plus stray quotes/whitespace) by extracting the invite URL from
-    # whatever was pasted — passing the npx command through verbatim used to
-    # send garbage to the daemon while this script still claimed success.
-    invite=$(printf '%s' "$pasted" | grep -oE "attn://review/[^'\"[:space:]]+" | head -1)
-    if [ -z "$invite" ]; then
-        err "no attn://review/… invite found in the pasted text — copy either the Direct link or the npx command from the Share dialog"
-        log "Daemons remain up. Ctrl+C to stop."
-        return 0
-    fi
+    # Loop until a join succeeds or the user cancels (attn-0cnt). A single
+    # prompt meant any first-attempt failure — a truncated paste, a relay
+    # hiccup, an invite the daemon declined — could only be retried by tearing
+    # the whole harness down and starting over, since by then the script had
+    # already fallen through to "Ctrl+C to stop". The daemons are still up and
+    # the owner can share again, so the only thing missing was somewhere to
+    # put the next invite.
+    while true; do
+        printf 'Paste invite > '
+        IFS= read -r pasted || true
+        if [ -z "$pasted" ]; then
+            log "No invite supplied — daemons remain up. Ctrl+C to stop."
+            return 0
+        fi
 
-    log "Reviewer joining (windowed daemon)..."
-    # Route the join to the already-running reviewer DAEMON via its ATTN_HOME
-    # socket — deliberately NOT `--as-agent`, which forks a separate *headless*
-    # agent process (no window, no UI) and leaves the reviewer window idle.
-    # The daemon-routed join makes the reviewer's own window switch to the
-    # shared document, which is the experience a human reviewer expects.
-    if ATTN_HOME="$ATTN_DUAL_REVIEWER" ATTN_RELAY_URL="$ATTN_RELAY_URL" \
-        "$ATTN_BIN" review join "$invite"; then
-        log "Reviewer joined — both windows are now collaborating."
-    else
-        err "reviewer join failed — see daemon logs under $ATTN_DUAL_REVIEWER/"
-    fi
+        # The share dialog offers two copyable things: the bare attn:// URL and
+        # the full `npx attnmd review join 'attn://…'` one-liner. Accept either
+        # (plus stray quotes/whitespace) by extracting the invite URL from
+        # whatever was pasted — passing the npx command through verbatim used to
+        # send garbage to the daemon while this script still claimed success.
+        invite=$(printf '%s' "$pasted" | grep -oE "attn://review/[^'\"[:space:]]+" | head -1)
+        if [ -z "$invite" ]; then
+            err "no attn://review/… invite found in the pasted text — copy either the Direct link or the npx command from the Share dialog"
+            continue
+        fi
+
+        log "Reviewer joining (windowed daemon)..."
+        # Route the join to the already-running reviewer DAEMON via its ATTN_HOME
+        # socket — deliberately NOT `--as-agent`, which forks a separate *headless*
+        # agent process (no window, no UI) and leaves the reviewer window idle.
+        # The daemon-routed join makes the reviewer's own window switch to the
+        # shared document, which is the experience a human reviewer expects.
+        if ATTN_HOME="$ATTN_DUAL_REVIEWER" ATTN_RELAY_URL="$ATTN_RELAY_URL" \
+            "$ATTN_BIN" review join "$invite"; then
+            log "Reviewer joined — both windows are now collaborating."
+            return 0
+        fi
+
+        err "reviewer join failed — see $ATTN_DUAL_REVIEWER/attn.log"
+        err "share again from the owner window and paste the new invite, or press Enter to give up."
+    done
 }
 
 # Guard against double-fire: SIGINT + EXIT would otherwise both invoke

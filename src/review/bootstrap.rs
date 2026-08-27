@@ -1947,10 +1947,41 @@ impl Bootstrapper {
                 grant_signature: None,
             },
         )?;
+        // Images the selected documents reference travel WITH them (attn-udu8).
+        // Scanned before the selection is recorded, because a wire path is only
+        // minted for a path in `selected_paths` — an asset outside it publishes
+        // fine and then has no name the reviewer can look it up by.
+        //
+        // The share root is what the user chose: a folder share confines to the
+        // folder, a single-file share to that file's own directory. Nothing
+        // outside it is ever read — see `review::assets`.
+        let share_root: PathBuf = if is_dir {
+            path.clone()
+        } else {
+            path.parent()
+                .map(std::path::Path::to_path_buf)
+                .unwrap_or_else(|| path.clone())
+        };
+        let image_scan = scan_share_images(&doc_targets, &share_root);
+        let asset_targets: Vec<PathBuf> = image_scan
+            .included
+            .iter()
+            .map(|img| img.path.clone())
+            .collect();
+        for skipped in &image_scan.skipped {
+            tracing::info!(
+                "share: not sending image {} ({})",
+                skipped.authored_src,
+                skipped.reason.describe()
+            );
+        }
+
         if !has_explicit_selection {
             record_local_share(self.store.root(), &room_id, &path, is_dir)?;
         } else {
-            record_local_share_selection(self.store.root(), &room_id, &path, &doc_targets)?;
+            let mut selection = doc_targets.clone();
+            selection.extend(asset_targets.iter().cloned());
+            record_local_share_selection(self.store.root(), &room_id, &path, &selection)?;
         }
 
         // 6b. Publish the initial snapshot(s) so reviewers get the doc bytes the
@@ -1994,6 +2025,39 @@ impl Bootstrapper {
                 }
             }
         }
+        // Assets after the documents: a failure to publish one costs the
+        // reviewer a picture, never the review. `publish_errors` is
+        // deliberately NOT extended — an unreadable image must not fail a
+        // share the way an unreadable document does.
+        for image in &image_scan.included {
+            match self
+                .publish_asset_snapshot(&room_id, &image.path, &image.media_type, now_ms)
+                .await
+            {
+                Ok((file_id, snapshot_id)) => {
+                    if has_explicit_selection {
+                        match manifest_entry_for_snapshot(
+                            &self.store,
+                            &room_id,
+                            &image.path,
+                            &file_id,
+                            &snapshot_id,
+                        ) {
+                            Ok(entry) => manifest_entries.push(entry),
+                            Err(err) => tracing::warn!(
+                                "share: image {} published but has no manifest entry: {err}",
+                                image.path.display()
+                            ),
+                        }
+                    }
+                }
+                Err(err) => tracing::warn!(
+                    "share: could not publish image {}: {err}",
+                    image.path.display()
+                ),
+            }
+        }
+
         if published == 0 || (has_explicit_selection && !publish_errors.is_empty()) {
             return Err(BootstrapError::InvalidShare(format!(
                 "the selected files could not all be published for {}{}",
@@ -3170,6 +3234,70 @@ impl Bootstrapper {
     /// at the blob via `encryptedBlobRef`. Ciphertexts above the relay's
     /// 1 MiB inline threshold spill to R2 (presign + PUT); at or below, the
     /// blob envelope rides the normal outbox.
+    /// Publish one image as a `DocType::Asset` snapshot (attn-udu8).
+    ///
+    /// Same envelope path as a document — the relay stays content-blind,
+    /// seeing only ciphertext — with the bytes base64url'd because a snapshot
+    /// payload is JSON. The wire path is the asset's path relative to the
+    /// share root, which is what lets a reviewer find it: they resolve
+    /// `./chart.svg` against their copy of the document's own wire path and
+    /// look up the result.
+    pub async fn publish_asset_snapshot(
+        &self,
+        room_id: &RoomId,
+        path: &std::path::Path,
+        media_type: &str,
+        now_ms: u64,
+    ) -> Result<(FileId, SnapshotId), BootstrapError> {
+        use crate::review::crypto::ids::{content_hash, derive_file_id, derive_snapshot_id};
+        use crate::review::model::{DocType, SnapshotAssetEncoding};
+        use base64::Engine as _;
+        use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+
+        let bytes = std::fs::read(path)
+            .map_err(|e| BootstrapError::Store(format!("read asset {}: {e}", path.display())))?;
+        let base_hash = content_hash(&bytes);
+        let room_secret = load_room_secret(self.store.root(), room_id)?;
+        let display_path =
+            selected_share_wire_path(self.store.root(), room_id, path)?.ok_or_else(|| {
+                BootstrapError::Store(format!(
+                    "asset {} has no portable share path",
+                    path.display()
+                ))
+            })?;
+        let file_id = derive_file_id(&room_secret, &display_path, &base_hash);
+        let snapshot_id = derive_snapshot_id(room_id, &file_id, &base_hash, now_ms as i64);
+        let plaintext = SnapshotPlaintext {
+            doc_type: DocType::Asset,
+            content: Some(URL_SAFE_NO_PAD.encode(&bytes)),
+            anchor_index: None,
+            media_type: Some(media_type.to_string()),
+            encoding: Some(SnapshotAssetEncoding::Base64url),
+            manifest: None,
+            annotation: None,
+        };
+        let published = self
+            .publish_snapshot_plaintext(
+                room_id,
+                file_id.clone(),
+                snapshot_id,
+                Some(display_path),
+                base_hash,
+                plaintext,
+                now_ms,
+            )
+            .await?;
+        record_share_file_id(self.store.root(), room_id, path, &file_id)?;
+        tracing::info!(
+            "published asset file={} snapshot={} bytes={} room={}",
+            published.0.as_str(),
+            published.1.as_str(),
+            bytes.len(),
+            room_id.as_str(),
+        );
+        Ok(published)
+    }
+
     pub async fn publish_snapshot(
         &self,
         room_id: &RoomId,
@@ -4457,6 +4585,47 @@ fn record_share_file_id(
 /// Wire paths for owner-curated shares are normalized relative to the project
 /// root. Legacy file/folder shares retain their historical absolute display
 /// path until those links migrate to manifests.
+/// Scan every markdown document in a share for the images it references
+/// (attn-udu8).
+///
+/// Results are unioned across documents and deduplicated by resolved path, so
+/// a logo referenced by six files is sent once. HTML targets are skipped: an
+/// HTML share already carries its own assets through the workspace entries,
+/// and its srcs are not markdown srcs.
+fn scan_share_images(
+    doc_targets: &[PathBuf],
+    share_root: &std::path::Path,
+) -> crate::review::assets::ImageScan {
+    use crate::review::assets::{ImageScan, scan_document_images};
+    use std::collections::HashSet;
+
+    let mut combined = ImageScan::default();
+    let mut seen_paths: HashSet<PathBuf> = HashSet::new();
+    let mut seen_skips: HashSet<(String, usize)> = HashSet::new();
+    for doc_path in doc_targets {
+        if is_html_path(doc_path) {
+            continue;
+        }
+        let Ok(source) = std::fs::read_to_string(doc_path) else {
+            continue;
+        };
+        let scan = scan_document_images(&source, doc_path, share_root);
+        for image in scan.included {
+            if seen_paths.insert(image.path.clone()) {
+                combined.included.push(image);
+            }
+        }
+        for skipped in scan.skipped {
+            // Same src skipped for the same reason in two documents is one
+            // fact, not two.
+            if seen_skips.insert((skipped.authored_src.clone(), skipped.reason as usize)) {
+                combined.skipped.push(skipped);
+            }
+        }
+    }
+    combined
+}
+
 fn selected_share_wire_path(
     store_root: &std::path::Path,
     room_id: &RoomId,

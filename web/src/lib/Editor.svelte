@@ -22,6 +22,7 @@
   import { codeHighlightPlugin } from './prosemirror/code-highlight';
   import { codeBlockNodeView } from './prosemirror/code-block-nodeview';
   import { frontmatterNodeView } from './prosemirror/frontmatter-nodeview';
+  import { imageNodeView } from './prosemirror/image-nodeview';
   import { markdownInputRules } from './prosemirror/markdown-input-rules';
   import { markdownPastePlugin } from './prosemirror/markdown-paste';
   import { placeholderPlugin } from './prosemirror/placeholder';
@@ -80,6 +81,20 @@
      * entries win on key collision so callers can override built-ins.
      */
     nodeViews?: Record<string, NodeViewConstructor>;
+    /**
+     * Maps a markdown image's authored `src` onto a URL this webview can
+     * actually load, or `null` when it cannot be resolved. Only the DISPLAYED
+     * src is affected — `node.attrs.src` keeps the authored string, so
+     * markdown serialization still round-trips it.
+     *
+     * Omitted by every caller that has no local file behind the document (the
+     * hosted app, the reviewer viewing an owner's snapshot): resolving there
+     * would mint a plausible-looking path to a file that isn't on that
+     * machine. Unset, the image NodeView is not registered at all and images
+     * render through the stock spec — byte-identical DOM, including the
+     * platform's own broken-image glyph.
+     */
+    resolveAssetUrl?: (src: string) => string | null;
     /**
      * Invoked once the underlying `EditorView` is mounted (and again after a
      * full re-mount). Callers use this to dispatch their own meta-only
@@ -149,6 +164,7 @@
     onDocChange,
     plugins: extraPlugins,
     nodeViews: extraNodeViews,
+    resolveAssetUrl,
     onReady,
     collabClientId,
     collabEpoch = 0,
@@ -478,6 +494,14 @@
     const builtIn: Record<string, NodeViewConstructor> = {
       task_list_item: taskListItemNodeView,
       frontmatter: (node) => frontmatterNodeView(node),
+      // Registered ONLY where there is something to resolve against. With no
+      // resolver the view would render the authored src verbatim — the same
+      // bytes the stock `toDOM` emits — but it would still swap the platform's
+      // broken-image glyph for our placeholder on every relative src the
+      // hosted app cannot load yet, which is a visible change on a surface
+      // that is explicitly out of scope until workspace-relative assets land.
+      // Leaving the key off keeps that DOM byte-identical.
+      ...(resolveAssetUrl ? { image: (node: PmNode) => imageNodeView(node, resolveAssetUrl) } : {}),
       code_block(node, editorView, getPos) {
         const mermaid = mermaidNodeView(node, editorView, getPos);
         if (mermaid) return mermaid;
@@ -1006,6 +1030,22 @@
     // Touch the reactive props so Svelte tracks them.
     void extraPlugins;
     void extraNodeViews;
+    // Tracked so switching tabs rebuilds the image NodeViews against the new
+    // document's directory. buildNodeViews() hands back fresh closures every
+    // call, so prosemirror-view's identity comparison sees a change and
+    // redraws; without this line the images keep the previous file's base dir
+    // and silently resolve against the wrong folder.
+    //
+    // Costly on purpose, and the cost is the point: because the closures are
+    // never identical, `changedNodeViews()` reports a change and prosemirror
+    // tears down and rebuilds the ENTIRE docView — every mermaid, math,
+    // code-block and frontmatter view in the document, losing their local
+    // state (a panned diagram returns to its default view). That is what it
+    // takes to re-resolve images already on screen, and the one flow where it
+    // is visible is a path change with unchanged content, i.e. a rename; a tab
+    // switch replaces the document anyway. Do not add further props to this
+    // effect casually — each one buys the same full redraw.
+    void resolveAssetUrl;
     if (!view) return;
     const nextState = view.state.reconfigure({ plugins: buildPlugins(lastMarkdown) });
     view.updateState(nextState);

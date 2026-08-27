@@ -125,6 +125,7 @@
     extractStructureFromMarkdown,
     loadMarkdownFromPath,
     markdownSourceUrl,
+    resolveImageSrc,
   } from './lib/markdown-layer';
   import { reviewStore } from './lib/review/store.svelte';
   import { consumePendingRoomFocus } from './lib/review/pending-room-focus';
@@ -271,6 +272,19 @@
 
   let activeTab = $derived(tabs.find((t) => t.id === activeTabId));
   let activePath = $derived(activeTab?.path ?? '');
+
+  // Rebuilt whenever the active file changes, and deliberately NOT written as
+  // an inline arrow at the call site: Editor's nodeView reactor tracks this
+  // prop by identity, and an arrow that merely CLOSES over `activePath` keeps
+  // one identity forever, so every image NodeView would stay bound to the
+  // directory of whatever file was open when the editor mounted. `$derived.by`
+  // with the path read eagerly is what makes the dependency real — a plain
+  // `$derived((src) => …)` would never re-run either, since the body that
+  // reads `activePath` is not evaluated while the derived is.
+  let resolveActiveAssetUrl = $derived.by(() => {
+    const docPath = activePath;
+    return (src: string) => resolveImageSrc(docPath, src);
+  });
   let hasActiveTab = $derived(Boolean(activeTab));
   let activeFileType = $derived<FileType>(activeTab?.fileType ?? 'unsupported');
 
@@ -3679,10 +3693,14 @@
         />
       {/if}
     {:else if activeFileType === 'markdown'}
+      <!-- resolveAssetUrl is bound HERE and not on the reviewer-snapshot
+           editor above: that one renders the owner's document, whose relative
+           image srcs name files on the OWNER's disk. -->
       <Editor
         bind:this={editorRef}
         markdown={collabActive ? (collabSeedMarkdown || effectiveMarkdown) : effectiveMarkdown}
         editable={(collabActive && collabRole === 'owner') || mode === 'edit'}
+        resolveAssetUrl={resolveActiveAssetUrl}
         onLinkNavigate={handleEditorLinkNavigate}
         onSuggestionClick={handleSuggestionClick}
         onSave={saveEdits}
@@ -3970,6 +3988,7 @@
         bind:this={editorRef}
         markdown={rawMarkdown}
         editable={mode === 'edit'}
+        resolveAssetUrl={resolveActiveAssetUrl}
         onLinkNavigate={handleEditorLinkNavigate}
         onSuggestionClick={handleSuggestionClick}
         onSave={saveEdits}

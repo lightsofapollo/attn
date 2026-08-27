@@ -849,6 +849,106 @@
   word-break: break-word;
 }
 
+/* Images (attn-cgev). The NodeView wraps every image in a span so the missing
+   state has somewhere to render; `display: block` is what Tailwind preflight
+   already makes the <img> itself, and the wrapper carries no border, padding
+   or height, so the image's own `margin: 1rem 0` from base.css collapses
+   straight through it. The healthy case therefore lays out exactly as it did
+   before the wrapper existed.
+
+   `width: fit-content` is not cosmetic. prosemirror-view hangs both
+   `ProseMirror-selectednode` and `draggable` on the NodeView's OWN element,
+   which is now this wrapper rather than the <img> it used to be; a wrapper
+   stretched to the measure would draw the selection ring across the entire
+   reading column around a 96px thumbnail, and make the blank paper beside it
+   a drag handle. `fit-content` does not establish a BFC, so the margin still
+   collapses through, and `max-width` keeps an oversized raster inside the
+   column so `.attn-doc img { max-width: 100% }` still has something to clamp
+   against. */
+.ProseMirror .md-image {
+  display: block;
+  width: fit-content;
+  max-width: 100%;
+}
+
+/* Match the ring to whichever box is actually showing — the image keeps
+   base.css's 6px, the placeholder card takes the 8px bordered-box step — so
+   the outline's corners don't disagree with the thing it encloses. */
+.ProseMirror .md-image.ProseMirror-selectednode {
+  border-radius: 6px;
+}
+
+.ProseMirror .md-image[data-broken].ProseMirror-selectednode {
+  border-radius: 8px;
+}
+
+/* The placeholder is off until the <img> reports failure — a src that has not
+   resolved yet is not an error. */
+.ProseMirror .md-image-fallback {
+  display: none;
+}
+
+.ProseMirror .md-image[data-broken] .md-image-fallback {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  align-items: flex-start;
+  /* Sized to its own contents, not the measure: a missing image is a slot in
+     the page, and a full-bleed banner would read as louder than the image it
+     stands in for. */
+  width: fit-content;
+  max-width: 100%;
+  /* Same slot a working image would have occupied: base.css gives content
+     images `margin: 1rem 0`. The radius is NOT that image's 6px — this box
+     draws a full border, which puts it under the "nothing that draws a box is
+     square" ruling in DESIGN.md, and the ladder's step for a small bordered
+     card is 8px. */
+  margin: 1rem 0;
+  padding: 0.75rem 0.875rem;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  /* The recessed embedded surface shared by pre/code/tables/frontmatter — an
+     asset that would not load is that same class of object: a slot in the page
+     where content should be. */
+  background: var(--code-block);
+  font-family: var(--sans);
+  color: var(--muted-foreground);
+  /* The card is chrome sitting inside the reading column, so it leaves the
+     document's leading behind — inherited, `--doc-leading` (1.58–1.9 by
+     preset) would set an 11px eyebrow in a ~19px line box and leave the card
+     visibly looser than the frontmatter card it is modelled on. */
+  line-height: 1.4;
+}
+
+/* Muted ink, not --destructive: an asset that would not load is not an error
+   the reader caused, and this matches the .mermaid-error/.math-error register
+   above. Typography is the Label preset, identical to `.frontmatter-label` —
+   the other uppercase micro eyebrow in this file and this card's nearest
+   sibling in the reading column. */
+.ProseMirror .md-image-fallback-label {
+  font: 600 0.7rem/1.2 var(--sans);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* The alt line is DOCUMENT content, so it owes the document-scoped tokens: the
+   typeset-owned `--doc-font` (Modern re-points it to sans, Terminal to mono)
+   and `em`, which resolves against `.attn-doc`'s own scale. A hard `--serif`
+   at a `rem` size would be the only Source Serif text on a Terminal page, set
+   11% larger than the prose around it. */
+.ProseMirror .md-image-fallback-alt {
+  font-family: var(--doc-font, var(--serif));
+  font-size: 0.9375em;
+  color: var(--foreground);
+}
+
+.ProseMirror .md-image-fallback-name {
+  font-family: var(--mono);
+  font-size: 0.6875rem;
+  line-height: 1.2;
+  word-break: break-all;
+}
+
 }
 
 /* Frontmatter card focus ring — deliberately unlayered, like the scrollbar

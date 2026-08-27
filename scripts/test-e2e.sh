@@ -267,6 +267,90 @@ assert_contains "Breadcrumb shows nested path" "$result" "child.md"
 screenshot "06-nested-file"
 
 # ===================================================================
+# TEST SUITE 3: Relative image resolution (attn-cgev)
+# ===================================================================
+
+echo ""
+echo "=== Test Suite 3: Relative Images (images.md) ==="
+
+# Poll a synchronous eval until it stops returning `null`/empty. `--eval` hands
+# back whatever the expression evaluates to, JSON-encoded, and does NOT await a
+# Promise — so waiting has to happen out here, not in the page.
+poll_eval() {
+    local js="$1"
+    local tries=0
+    local out=""
+    while [ "$tries" -lt 40 ]; do
+        out=$("$ATTN" --eval "$js" 2>/dev/null || echo "")
+        case "$out" in
+            ''|null|'""'|false|0) ;;
+            *) echo "$out"; return 0 ;;
+        esac
+        sleep 0.1
+        tries=$((tries + 1))
+    done
+    echo "$out"
+}
+
+start_daemon "$FIXTURES/images.md"
+
+# Single-file mode, so directory ordering in tests/fixtures/ is irrelevant here.
+"$ATTN" --wait-for '.attn-doc .md-image img' --timeout 5000 >/dev/null 2>&1
+
+result=$("$ATTN" --query '.attn-doc .md-image img' | jq -r '.count' 2>/dev/null || echo "0")
+assert_truthy "Image nodes rendered" "$result"
+
+# The whole bug: a relative src used to reach the DOM verbatim and 404 against
+# the app origin. It must now address the file through the attn:// handler.
+result=$("$ATTN" --query '.attn-doc .md-image img' | jq -r '.elements[0].attributes.src' 2>/dev/null || echo "")
+assert_contains "Relative src resolved through attn://" "$result" "attn://localhost/"
+assert_contains "Resolved against the markdown file's own directory" "$result" "tests/fixtures/diagram.png"
+
+# The authored src is what gets serialized back to disk, so it must survive.
+# Read through --query rather than --eval: the webview JSON-escapes '/' in a
+# returned string, which turns every path assertion into a slash-counting exercise.
+result=$("$ATTN" --query '.attn-doc .md-image' | jq -r '.elements[0].attributes["data-src"]' 2>/dev/null || echo "")
+assert_eq "Authored src preserved on the node" "$result" "./diagram.png"
+
+# naturalWidth is not a DOM attribute, and decode is asynchronous.
+result=$(poll_eval "Array.from(document.querySelectorAll('.attn-doc .md-image img')).filter((img) => img.complete && img.naturalWidth > 0).length")
+assert_truthy "Local image bytes actually decoded (naturalWidth > 0)" "$result"
+
+# Every local src in the fixture except the deliberate miss should decode: two
+# PNGs (sibling, bare, subdirectory) plus the SVG, which carries explicit
+# width/height so WebKit reports an intrinsic size for it.
+result=$(poll_eval "(() => { const n = Array.from(document.querySelectorAll('.attn-doc .md-image img')).filter((img) => img.complete && img.naturalWidth > 0).length; return n >= 4 ? n : null; })()")
+assert_eq "All four local assets decoded" "$result" "4"
+
+# A missing file gets the document's own placeholder, not the platform glyph.
+# Anchored on the deliberate miss by its authored src, NOT on "the first broken
+# image": the remote https src in this fixture also fails (there is no network
+# in the E2E environment), and which of the two reports `error` first is a race
+# between a local 404 and a DNS timeout.
+GONE='.attn-doc .md-image[data-src="./gone.png"]'
+result=$(poll_eval "document.querySelector('$GONE[data-broken]')?.textContent")
+assert_contains "Missing image shows the alt text" "$result" "A diagram that moved"
+assert_contains "Missing image names the file" "$result" "gone.png"
+assert_contains "Missing image is labelled, not left blank" "$result" "Image didn’t load"
+
+# The card is announced as one thing, not three loose runs: the eyebrow, alt and
+# filename are aria-hidden and the wrapper carries a single composed label.
+result=$(poll_eval "document.querySelector('$GONE .md-image-fallback')?.getAttribute('aria-label')")
+assert_contains "Missing image is announced as a single image role" "$result" "A diagram that moved"
+
+# The selection ring and the drag handle both land on the NodeView's own
+# element, so the wrapper has to hug the picture rather than span the measure.
+result=$(poll_eval "(() => { const w = document.querySelector('.attn-doc .md-image[data-loaded]'); if (!w) return null; const img = w.querySelector('img'); return Math.abs(w.getBoundingClientRect().width - img.getBoundingClientRect().width) < 1 ? 'hugs' : 'spans'; })()")
+# `--eval` hands back a JSON-encoded string, hence the contains form.
+assert_contains "Image wrapper hugs the image, not the measure" "$result" "hugs"
+
+# A remote src has no business being rewritten.
+result=$("$ATTN" --query '.attn-doc .md-image[data-src^="https:"] img' | jq -r '.elements[0].attributes.src' 2>/dev/null || echo "")
+assert_eq "Absolute URL passes through untouched" "$result" "https://example.com/pixel.png"
+
+screenshot "07-relative-images"
+
+# ===================================================================
 # Summary
 # ===================================================================
 

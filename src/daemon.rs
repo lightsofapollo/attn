@@ -1361,6 +1361,35 @@ function __resolve(sel) {
     }
     return Array.from(document.querySelectorAll(sel));
 }
+
+// Which of several `text=` matches should a CLICK land on.
+//
+// A text match is satisfied by every element whose trimmed text equals the
+// target, which for one sidebar row is the <li>, the <button> inside it, and
+// the <span> inside that. Taking the first in document order takes the <li> —
+// an element with no click handler — so the click reported success and nothing
+// happened. That is how "Navigate to basic.md" failed while its sibling case
+// passed vacuously: the document had not moved for either, and the sibling
+// happened to already be open (attn-537h).
+//
+// Prefer the innermost INTERACTIVE match, since that is the thing a person
+// would have clicked. Fall back to the innermost match of any kind, whose
+// click still bubbles to whatever handler is above it.
+function __best(els) {
+    if (els.length < 2) return els[0];
+    var interactive = els.filter(function (el) {
+        return el.matches('button, a, [role=button], input, select, textarea, label, [data-sidebar="menu-button"]');
+    });
+    var pool = interactive.length > 0 ? interactive : els;
+    // Innermost = the one containing no other candidate.
+    for (var i = 0; i < pool.length; i++) {
+        var containsAnother = pool.some(function (other) {
+            return other !== pool[i] && pool[i].contains(other);
+        });
+        if (!containsAnother) return pool[i];
+    }
+    return pool[0];
+}
 "#;
 
     match action {
@@ -1371,7 +1400,7 @@ function __resolve(sel) {
 {resolve_fn}
 var els = __resolve({sel_json});
 if (els.length === 0) return JSON.stringify({{status:'not_found',selector:{sel_json}}});
-els[0].click();
+__best(els).click();
 return JSON.stringify({{status:'ok'}});
 }})()"#,
             )

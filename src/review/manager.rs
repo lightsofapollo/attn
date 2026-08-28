@@ -4338,17 +4338,68 @@ fn validate_workspace_manifest_binding(
         .as_ref()
         .ok_or_else(|| "workspace manifest payload is missing its manifest".to_string())?;
 
-    // Every joined/owned room persists the invite secret before starting its
-    // transport. It is therefore available at this production hydration
-    // boundary and lets native receivers reject an ordinary file masquerading
-    // as the room's one synthetic manifest document.
-    let room_secret = crate::review::bootstrap::load_room_secret(store.root(), room_id)
-        .map_err(|err| format!("load room secret for manifest FileId binding: {err}"))?;
-    let expected_manifest_file_id = derive_workspace_manifest_file_id(&room_secret);
-    if *manifest_file_id != expected_manifest_file_id {
-        return Err(
-            "manifest event fileId is not the room's synthetic manifest FileId".to_string(),
-        );
+    // Who published this manifest? (attn-lb7p)
+    //
+    // This check used to ask a different question — does the manifest's FileId
+    // equal one derived from the room secret — on the stated belief that
+    // "every joined/owned room persists the invite secret before starting its
+    // transport". That was never true of a v3 JOIN: the v3 key tree is
+    // one-way (room_secret -> root_key -> read_capability_key -> leaves) and a
+    // reviewer only ever holds a leaf, so no v3 reviewer could satisfy it and
+    // every one of them lost the workspace entirely.
+    //
+    // It was also the wrong question. That FileId travels inside every
+    // manifest snapshot a reviewer receives, so knowing it is not evidence of
+    // having authored anything — a secret-derived identifier is a name, not a
+    // signature. What actually needs proving is authorship, so prove it: the
+    // manifest is accepted when the OWNER signed the event carrying it,
+    // verified against the key the joiner pinned from the invite.
+    //
+    // `verify_event` is a full re-verification, not a comparison against
+    // whatever the import decided. That matters because replay
+    // (`replay_room_to_webview`) re-verifies nothing of its own — an identity
+    // check that only held on the live path would evaporate on restart.
+    let pinned_owner_key = crate::review::bootstrap::load_room_access_v3(store.root(), room_id)
+        .map_err(|err| format!("load room access for manifest authorship: {err}"))?
+        .and_then(|access| access.owner_public_signing_key);
+    match pinned_owner_key {
+        Some(encoded) => {
+            use base64::Engine as _;
+            let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(encoded.as_bytes())
+                .map_err(|err| format!("pinned owner key base64url decode: {err}"))?;
+            let bytes: [u8; 32] = bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| "pinned owner key must decode to 32 bytes".to_string())?;
+            let owner = crate::review::crypto::signing::DeviceVerifyingKey::from_bytes(&bytes)
+                .map_err(|err| format!("pinned owner key: {err}"))?;
+            crate::review::crypto::signing::verify_event(
+                &owner,
+                &manifest_event.meta,
+                &manifest_event.body,
+                &manifest_event.auth,
+            )
+            .map_err(|err| format!("workspace manifest was not signed by the room owner: {err}"))?;
+            // The synthetic FileId is deliberately NOT compared here. It is
+            // the manifest's name — reviewers match snapshots to entries by
+            // it — and a name a reviewer cannot compute, and could replay if
+            // it could, is not a credential.
+        }
+        None => {
+            // No pinned key: a v2 room, or a v3 room joined before the invite
+            // carried one. Fall back to the original check, which still works
+            // for the parties that can satisfy it (owners, v2 joiners) and
+            // still fails closed for the v3 reviewers it never worked for.
+            let room_secret = crate::review::bootstrap::load_room_secret(store.root(), room_id)
+                .map_err(|err| format!("load room secret for manifest FileId binding: {err}"))?;
+            let expected_manifest_file_id = derive_workspace_manifest_file_id(&room_secret);
+            if *manifest_file_id != expected_manifest_file_id {
+                return Err(
+                    "manifest event fileId is not the room's synthetic manifest FileId".to_string(),
+                );
+            }
+        }
     }
 
     let mut earlier_snapshots = Vec::new();
@@ -5309,6 +5360,169 @@ mod tests {
                 .expect("append manifest event")
         );
         (tmp, store, room_id, manifest_event)
+    }
+
+    // -----------------------------------------------------------------
+    // Manifest AUTHORSHIP (attn-lb7p).
+    //
+    // Everything above this point exercises the FALLBACK branch: the harness
+    // writes shares/<room>.secret and pins no owner key, which is exactly the
+    // shape an owner or a v2 joiner has. That is why the whole suite kept
+    // passing when the check was replaced — and why these tests exist. They
+    // are the only coverage of the path a v3 reviewer actually takes.
+    // -----------------------------------------------------------------
+
+    /// Re-sign an already-persisted manifest event in place.
+    ///
+    /// Safe to do after `append_event`: `validate_workspace_manifest_binding`
+    /// verifies the signature on the event it is HANDED, and uses the store
+    /// only to confirm that event_id is present and to find earlier snapshots.
+    /// meta and body are untouched, so the id still matches the stored copy.
+    fn sign_manifest_as(
+        event: &mut crate::review::model::ReviewEvent,
+        key: &crate::review::crypto::signing::DeviceSigningKey,
+    ) {
+        event.auth = crate::review::crypto::signing::sign_event(key, &event.meta, &event.body)
+            .expect("sign manifest event");
+    }
+
+    fn pin_owner_key(
+        store: &ReviewStore,
+        room_id: &RoomId,
+        key: &crate::review::crypto::signing::DeviceSigningKey,
+    ) {
+        use base64::Engine as _;
+        crate::review::bootstrap::save_room_access_v3(
+            store.root(),
+            room_id,
+            &crate::review::bootstrap::RoomAccessV3 {
+                read_capability_key: [9; 32],
+                write_admission_key: None,
+                grant_tier: None,
+                grant_signature: None,
+                owner_public_signing_key: Some(
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD
+                        .encode(key.verifying_key().to_bytes()),
+                ),
+            },
+        )
+        .expect("pin owner key");
+    }
+
+    fn signing_key(seed: u8) -> crate::review::crypto::signing::DeviceSigningKey {
+        crate::review::crypto::signing::DeviceSigningKey::from_bytes(&[seed; 32])
+            .expect("signing key from seed")
+    }
+
+    fn hydrated(
+        store: &ReviewStore,
+        room_id: &RoomId,
+        event: &mut crate::review::model::ReviewEvent,
+    ) -> bool {
+        use crate::review::model::ReviewEventBody;
+        rehydrate_snapshot_event(store, room_id, event);
+        matches!(
+            &event.body,
+            ReviewEventBody::SnapshotCreated {
+                inline_snapshot: Some(_),
+                ..
+            }
+        )
+    }
+
+    #[test]
+    fn rehydrate_manifest_accepts_owner_signed_manifest_without_any_room_secret() {
+        // The bug this epic exists for. A v3 reviewer never receives the room
+        // secret, so there is no shares/<room>.secret on their disk — and
+        // until now that alone rejected every manifest they were sent.
+        let (_tmp, store, room_id, mut event) =
+            bound_manifest_case(ManifestBindingTamper::MissingRoomSecret);
+        let owner = signing_key(0x11);
+        pin_owner_key(&store, &room_id, &owner);
+        sign_manifest_as(&mut event, &owner);
+        assert!(
+            hydrated(&store, &room_id, &mut event),
+            "an owner-signed manifest must hydrate with no room secret on disk"
+        );
+    }
+
+    #[test]
+    fn rehydrate_manifest_rejects_manifest_signed_by_a_reviewer_identity() {
+        // The forgery the check is FOR. Note the manifest carries the room's
+        // real synthetic FileId — the old check would have waved this through
+        // on any machine that could compute it. Authorship is what decides.
+        let (_tmp, store, room_id, mut event) = bound_manifest_case(ManifestBindingTamper::None);
+        let owner = signing_key(0x11);
+        let reviewer = signing_key(0x22);
+        pin_owner_key(&store, &room_id, &owner);
+        sign_manifest_as(&mut event, &reviewer);
+        assert!(
+            !hydrated(&store, &room_id, &mut event),
+            "a manifest signed by a non-owner must be rejected even with the correct FileId"
+        );
+    }
+
+    #[test]
+    fn rehydrate_manifest_rejects_a_tampered_body_under_a_valid_owner_key() {
+        // Distinguishes a real signature check from a signingKeyId string
+        // compare: the key id still matches the owner, only the bytes moved.
+        use crate::review::model::ReviewEventBody;
+        let (_tmp, store, room_id, mut event) = bound_manifest_case(ManifestBindingTamper::None);
+        let owner = signing_key(0x11);
+        pin_owner_key(&store, &room_id, &owner);
+        sign_manifest_as(&mut event, &owner);
+        if let ReviewEventBody::SnapshotCreated {
+            owner_display_path, ..
+        } = &mut event.body
+        {
+            *owner_display_path = Some("workspace.manifest.tampered".to_string());
+        }
+        assert!(
+            !hydrated(&store, &room_id, &mut event),
+            "a body edited after signing must not verify"
+        );
+    }
+
+    #[test]
+    fn rehydrate_manifest_survives_replay() {
+        // replay_room_to_webview re-verifies nothing of its own, so a check
+        // satisfiable only from live import state would evaporate on restart.
+        // Hydrating twice from disk proves this one reads only persisted data.
+        let (_tmp, store, room_id, event) =
+            bound_manifest_case(ManifestBindingTamper::MissingRoomSecret);
+        let owner = signing_key(0x11);
+        pin_owner_key(&store, &room_id, &owner);
+        let mut signed = event.clone();
+        sign_manifest_as(&mut signed, &owner);
+        let mut first = signed.clone();
+        let mut second = signed;
+        assert!(hydrated(&store, &room_id, &mut first), "first hydration");
+        assert!(
+            hydrated(&store, &room_id, &mut second),
+            "replay must hydrate identically"
+        );
+    }
+
+    #[test]
+    fn rehydrate_manifest_falls_back_to_room_secret_when_no_owner_key_is_pinned() {
+        // Owners and v2 joiners have no pinned key and DO have the secret.
+        // Their behavior must be exactly what it was before this change.
+        let (_tmp, store, room_id, mut event) = bound_manifest_case(ManifestBindingTamper::None);
+        assert!(
+            hydrated(&store, &room_id, &mut event),
+            "the pre-existing room-secret path must still accept"
+        );
+    }
+
+    #[test]
+    fn rehydrate_manifest_fails_closed_with_neither_a_pinned_key_nor_a_secret() {
+        // No way to establish authorship at all: refuse, do not fall open.
+        let (_tmp, store, room_id, mut event) =
+            bound_manifest_case(ManifestBindingTamper::MissingRoomSecret);
+        assert!(
+            !hydrated(&store, &room_id, &mut event),
+            "with no owner key and no secret the manifest must be refused"
+        );
     }
 
     #[test]

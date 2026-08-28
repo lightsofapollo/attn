@@ -51,6 +51,15 @@ export interface ParsedInviteFragmentV3 {
   writeAdmissionKey?: Uint8Array;
   /** Owner Ed25519 proof; absent for view and required for writable tiers. */
   grantSignature?: string;
+  /**
+   * The owner's public signing key, pinned from the invite (attn-lb7p).
+   *
+   * Kept as the base64url string rather than bytes: every hosted consumer of
+   * an owner key takes a 43-char string (`verifyDeviceGrantV3`), and
+   * re-encoding bytes risks a spelling that differs from what was signed.
+   * Optional so a fragment minted before the field existed still parses.
+   */
+  ownerPublicSigningKey?: string;
 }
 
 export interface ParsedInviteV3 extends ParsedInviteFragmentV3 {
@@ -239,16 +248,27 @@ export function composeInviteFragmentV3(
   readCapabilityKey: Uint8Array,
   writeAdmissionKey?: Uint8Array,
   grantSignature?: Uint8Array,
+  ownerPublicSigningKey?: Uint8Array,
 ): string {
   requireCapabilityKey(readCapabilityKey, 'read');
   if (tier !== 'view' && tier !== 'comment' && tier !== 'suggest') {
     throw new InviteParseError(`unknown v3 invite tier: ${String(tier)}`);
   }
+  // Appended LAST in every form, matching build_invite_fragment_v3 in
+  // src/review/bootstrap.rs byte for byte. Both parsers re-render through
+  // their composer and compare, so a difference in field ORDER between the two
+  // implementations is not a cosmetic drift — it makes each side reject the
+  // other's invites.
+  if (ownerPublicSigningKey !== undefined) {
+    requireCapabilityKey(ownerPublicSigningKey, 'owner');
+  }
+  const ownerSuffix =
+    ownerPublicSigningKey === undefined ? '' : `&owner=${base64UrlEncode(ownerPublicSigningKey)}`;
   if (tier === 'view') {
     if (writeAdmissionKey !== undefined || grantSignature !== undefined) {
       throw new InviteParseError('view tier must not include write capability or grant');
     }
-    return `#v=3&tier=view&read=${base64UrlEncode(readCapabilityKey)}`;
+    return `#v=3&tier=view&read=${base64UrlEncode(readCapabilityKey)}${ownerSuffix}`;
   }
   if (writeAdmissionKey === undefined) {
     throw new InviteParseError(`${tier} tier requires write capability`);
@@ -257,7 +277,7 @@ export function composeInviteFragmentV3(
   if (!(grantSignature instanceof Uint8Array) || grantSignature.length !== 64) {
     throw new InviteParseError(`${tier} tier requires a 64-byte owner grant signature`);
   }
-  return `#v=3&tier=${tier}&read=${base64UrlEncode(readCapabilityKey)}&write=${base64UrlEncode(writeAdmissionKey)}&grant=${base64UrlEncode(grantSignature)}`;
+  return `#v=3&tier=${tier}&read=${base64UrlEncode(readCapabilityKey)}&write=${base64UrlEncode(writeAdmissionKey)}&grant=${base64UrlEncode(grantSignature)}${ownerSuffix}`;
 }
 
 /** Compose a complete native or hosted v3 invite URL. */
@@ -287,7 +307,7 @@ export function parseInviteFragmentV3(fragment: string): ParsedInviteFragmentV3 
       throw new InviteParseError('malformed v3 fragment field');
     }
     const [key, value] = pair as [string, string];
-    if (!['v', 'tier', 'read', 'write', 'grant'].includes(key)) {
+    if (!['v', 'tier', 'read', 'write', 'grant', 'owner'].includes(key)) {
       throw new InviteParseError(`unknown v3 fragment field: ${key}`);
     }
     if (fields.has(key)) throw new InviteParseError(`duplicate v3 fragment field: ${key}`);
@@ -303,7 +323,15 @@ export function parseInviteFragmentV3(fragment: string): ParsedInviteFragmentV3 
   const writeAdmissionKey = write === undefined ? undefined : decodeCapability(write, 'write');
   const grant = fields.get('grant');
   const grantBytes = grant === undefined ? undefined : decodeGrant(grant);
-  const canonical = composeInviteFragmentV3(tier, readCapabilityKey, writeAdmissionKey, grantBytes);
+  const owner = fields.get('owner');
+  const ownerBytes = owner === undefined ? undefined : decodeCapability(owner, 'owner');
+  const canonical = composeInviteFragmentV3(
+    tier,
+    readCapabilityKey,
+    writeAdmissionKey,
+    grantBytes,
+    ownerBytes,
+  );
   if (canonical !== fragment) {
     throw new InviteParseError('v3 fragment is not in canonical field order or encoding');
   }
@@ -313,6 +341,7 @@ export function parseInviteFragmentV3(fragment: string): ParsedInviteFragmentV3 
     readCapabilityKey,
     ...(writeAdmissionKey === undefined ? {} : { writeAdmissionKey }),
     ...(grant === undefined ? {} : { grantSignature: grant }),
+    ...(owner === undefined ? {} : { ownerPublicSigningKey: owner }),
   };
 }
 

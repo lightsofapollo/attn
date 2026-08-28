@@ -10,8 +10,8 @@
 pub mod agent;
 pub mod agent_identity;
 pub mod anchors;
-pub mod assets;
 pub mod apply;
+pub mod assets;
 pub mod bootstrap;
 pub mod compression;
 pub mod crypto;

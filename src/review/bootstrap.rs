@@ -535,6 +535,20 @@ pub struct ParsedInviteFragmentV3 {
     pub read_capability_key: [u8; 32],
     pub write_admission_key: Option<[u8; 32]>,
     pub grant_signature: Option<[u8; 64]>,
+    /// The owner's PUBLIC signing key, pinned by the joiner (attn-lb7p).
+    ///
+    /// Carried here rather than read from the relay's device directory
+    /// because the directory is relay-controlled: a relay that could
+    /// substitute the owner's key could authorise its own manifests. The
+    /// fragment is the one channel that already carries room-opening secrets
+    /// and, being a URL fragment, is never transmitted to the relay at all.
+    ///
+    /// `Option` so a fragment minted before this field existed still parses —
+    /// the joiner then has no key to pin and manifest hydration falls back
+    /// (see `validate_workspace_manifest_binding`). The reverse skew does not
+    /// degrade: an OLD parser meets `owner=` as an unknown field and refuses
+    /// the invite outright, so owner and reviewer builds move together.
+    pub owner_public_signing_key: Option<[u8; 32]>,
 }
 
 /// Build a strict canonical v3 capability fragment, including the leading `#`.
@@ -543,15 +557,23 @@ pub fn build_invite_fragment_v3(
     read_capability_key: &[u8; 32],
     write_admission_key: Option<&[u8; 32]>,
     grant_signature: Option<&[u8; 64]>,
+    owner_public_signing_key: Option<&[u8; 32]>,
 ) -> Result<String, BootstrapError> {
     let read = URL_SAFE_NO_PAD.encode(read_capability_key);
+    // Appended LAST in every form. The position is load-bearing: several tests
+    // and the browser parity assertion pin the LEADING substring through
+    // `read=`, and the parser below re-renders through this function and
+    // compares byte-for-byte, so moving a field is a wire break.
+    let owner = owner_public_signing_key
+        .map(|key| format!("&owner={}", URL_SAFE_NO_PAD.encode(key)))
+        .unwrap_or_default();
     match (tier, write_admission_key, grant_signature) {
-        (InviteTierV3::View, None, None) => Ok(format!("#v=3&tier=view&read={read}")),
+        (InviteTierV3::View, None, None) => Ok(format!("#v=3&tier=view&read={read}{owner}")),
         (InviteTierV3::View, _, _) => Err(BootstrapError::InviteParse(
             "view tier must not include write capability or grant".into(),
         )),
         (InviteTierV3::Comment | InviteTierV3::Suggest, Some(write), Some(grant)) => Ok(format!(
-            "#v=3&tier={}&read={read}&write={}&grant={}",
+            "#v=3&tier={}&read={read}&write={}&grant={}{owner}",
             tier.as_str(),
             URL_SAFE_NO_PAD.encode(write),
             URL_SAFE_NO_PAD.encode(grant),
@@ -577,7 +599,7 @@ pub fn parse_invite_fragment_v3(fragment: &str) -> Result<ParsedInviteFragmentV3
             .split_once('=')
             .filter(|(key, value)| !key.is_empty() && !value.is_empty() && !value.contains('='))
             .ok_or_else(|| BootstrapError::InviteParse("malformed v3 fragment field".into()))?;
-        if !matches!(key, "v" | "tier" | "read" | "write" | "grant") {
+        if !matches!(key, "v" | "tier" | "read" | "write" | "grant" | "owner") {
             return Err(BootstrapError::InviteParse(format!(
                 "unknown v3 fragment field: {key}"
             )));
@@ -621,6 +643,7 @@ pub fn parse_invite_fragment_v3(fragment: &str) -> Result<ParsedInviteFragmentV3
     };
     let read_capability_key = decode("read")?;
     let write_admission_key = fields.get("write").map(|_| decode("write")).transpose()?;
+    let owner_public_signing_key = fields.get("owner").map(|_| decode("owner")).transpose()?;
     let grant_signature = fields
         .get("grant")
         .map(|encoded| {
@@ -642,6 +665,7 @@ pub fn parse_invite_fragment_v3(fragment: &str) -> Result<ParsedInviteFragmentV3
         &read_capability_key,
         write_admission_key.as_ref(),
         grant_signature.as_ref(),
+        owner_public_signing_key.as_ref(),
     )?;
     if canonical != fragment {
         return Err(BootstrapError::InviteParse(
@@ -653,6 +677,7 @@ pub fn parse_invite_fragment_v3(fragment: &str) -> Result<ParsedInviteFragmentV3
         read_capability_key,
         write_admission_key,
         grant_signature,
+        owner_public_signing_key,
     })
 }
 
@@ -729,11 +754,17 @@ pub fn build_invite_url_v3(
                 .to_bytes(),
         )
     };
+    // The owner's PUBLIC key, derived from the private key this function is
+    // already handed to sign the grant. Every tier carries it, view included:
+    // a read-only reviewer needs the workspace manifest as much as a writer,
+    // and the view tier has no grant to identify the owner by instead.
+    let owner_public = owner_signing_key.verifying_key().to_bytes();
     let fragment = build_invite_fragment_v3(
         tier,
         tree.read_keys.read_capability_key.as_bytes(),
         (tier != InviteTierV3::View).then_some(tree.write_admission_key.as_bytes()),
         grant.as_ref(),
+        Some(&owner_public),
     )?;
     Ok(format!("attn://review/{}{fragment}", room_id.as_str()))
 }
@@ -1945,6 +1976,11 @@ impl Bootstrapper {
                 write_admission_key: Some(*room_keys.write_admission_key.as_bytes()),
                 grant_tier: None,
                 grant_signature: None,
+                // The owner pins its OWN key. Without this an owner falls to
+                // the room-secret fallback, which still works for them and so
+                // would leave the new path untested on the one machine that
+                // mints manifests.
+                owner_public_signing_key: Some(identity.public_signing_key.clone()),
             },
         )?;
         // Images the selected documents reference travel WITH them (attn-udu8).
@@ -2346,6 +2382,11 @@ impl Bootstrapper {
                 write_admission_key: Some(*room_keys.write_admission_key.as_bytes()),
                 grant_tier: None,
                 grant_signature: None,
+                // The owner pins its OWN key. Without this an owner falls to
+                // the room-secret fallback, which still works for them and so
+                // would leave the new path untested on the one machine that
+                // mints manifests.
+                owner_public_signing_key: Some(identity.public_signing_key.clone()),
             },
         )?;
         record_local_share(self.store.root(), &room_id, &path, path.is_dir())?;
@@ -2779,6 +2820,16 @@ impl Bootstrapper {
         let grant = parsed.fragment.grant_signature.ok_or_else(|| {
             BootstrapError::InviteParse("writable v3 invite missing owner grant".into())
         })?;
+        // Verify the owner's grant LOCALLY against the key the invite pins,
+        // before registering anything (attn-lb7p). The relay checks this too,
+        // but the relay is the party a pinned key exists to defend against:
+        // trusting its verdict would make the whole pin decorative. An invite
+        // minted before the field existed has no key to check against and is
+        // let through unverified, exactly as it was before this change — it
+        // simply never gets manifest hydration.
+        if let Some(owner_public) = parsed.fragment.owner_public_signing_key {
+            verify_invite_grant_v3(&parsed, &owner_public)?;
+        }
         let read_keys =
             crate::review::crypto::kdf::derive_read_keys_v3(&parsed.fragment.read_capability_key);
         let wire_kind = match kind {
@@ -2900,6 +2951,10 @@ impl Bootstrapper {
                 write_admission_key: Some(write_key),
                 grant_tier: Some(grant_tier),
                 grant_signature: Some(URL_SAFE_NO_PAD.encode(grant)),
+                owner_public_signing_key: parsed
+                    .fragment
+                    .owner_public_signing_key
+                    .map(|key| URL_SAFE_NO_PAD.encode(key)),
             },
         )?;
         Ok(JoinOutcome {
@@ -4444,9 +4499,22 @@ pub struct RoomAccessV3 {
     pub write_admission_key: Option<[u8; 32]>,
     pub grant_tier: Option<crate::review::transport::inbound::GrantTier>,
     pub grant_signature: Option<String>,
+    /// The owner's public signing key as pinned from the invite (attn-lb7p),
+    /// base64url-no-pad like `grant_signature`.
+    ///
+    /// This is what `validate_workspace_manifest_binding` authenticates a
+    /// workspace manifest against. It is read off disk rather than taken from
+    /// the live import, so the check is a full local re-verification that is
+    /// equally valid on replay — replay re-verifies no signatures of its own.
+    ///
+    /// `default` + `skip_serializing_if` are deliberate rather than implicit:
+    /// `load_room_access_v3` hard-errors on any decode failure, and a decode
+    /// error there would silently downgrade a reviewer who had already joined.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_public_signing_key: Option<String>,
 }
 
-fn save_room_access_v3(
+pub(crate) fn save_room_access_v3(
     root: &std::path::Path,
     room_id: &RoomId,
     access: &RoomAccessV3,
@@ -4757,10 +4825,18 @@ fn manifest_entry_for_snapshot(
     let plaintext = snapshot
         .plaintext
         .ok_or_else(|| BootstrapError::Store("published snapshot plaintext is missing".into()))?;
+    // An asset gets a manifest entry like any other shared file (attn-udu8).
+    // It was refused here only because, before referenced images travelled
+    // with a share, nothing but a document was ever a share target — and
+    // without an entry the reviewer receives the bytes with no binding, which
+    // is indistinguishable from not receiving them.
+    //
+    // A manifest still cannot be an entry of itself.
     let kind = match plaintext.doc_type {
         DocType::Markdown => WorkspaceManifestEntryKind::Markdown,
         DocType::Html => WorkspaceManifestEntryKind::Html,
-        DocType::Asset | DocType::WorkspaceManifest => {
+        DocType::Asset => WorkspaceManifestEntryKind::Asset,
+        DocType::WorkspaceManifest => {
             return Err(BootstrapError::InvalidShare(format!(
                 "{} is not a shareable document snapshot",
                 path.display()
@@ -4775,7 +4851,17 @@ fn manifest_entry_for_snapshot(
         snapshot_id: snapshot_id.clone(),
         path: wire_path,
         kind,
-        media_type: None,
+        // Required for an asset entry and rejected on any other — see
+        // `validate_manifest_entry`. It comes from the snapshot the owner
+        // already published, so the manifest cannot disagree with the payload.
+        media_type: match kind {
+            WorkspaceManifestEntryKind::Asset => {
+                Some(plaintext.media_type.clone().ok_or_else(|| {
+                    BootstrapError::Store("asset snapshot has no media type".into())
+                })?)
+            }
+            _ => None,
+        },
         byte_length: raw.len() as u64,
         content_hash: snapshot.base_hash,
     })
@@ -5409,16 +5495,22 @@ mod tests {
         use crate::review::crypto::kdf::{derive_read_keys_v3, derive_room_key_tree_v3};
 
         let tree = derive_room_key_tree_v3(&[0x7a; 32]);
+        let owner_public = [0x5c; 32];
         let fragment = build_invite_fragment_v3(
             InviteTierV3::View,
             tree.read_keys.read_capability_key.as_bytes(),
             None,
             None,
+            Some(&owner_public),
         )
         .expect("build view fragment");
         let parsed = parse_invite_fragment_v3(&fragment).expect("parse view fragment");
         assert_eq!(parsed.tier, InviteTierV3::View);
         assert!(parsed.write_admission_key.is_none());
+        // A view-tier reviewer needs the workspace as much as a writer, and
+        // has no grant to identify the owner by, so the key must ride along
+        // on this tier too (attn-lb7p).
+        assert_eq!(parsed.owner_public_signing_key, Some(owner_public));
         let read_only = derive_read_keys_v3(&parsed.read_capability_key);
         assert_eq!(
             read_only.event_key.as_bytes(),
@@ -5485,6 +5577,7 @@ mod tests {
             write_admission_key: Some([2; 32]),
             grant_tier: Some(crate::review::transport::inbound::GrantTier::Comment),
             grant_signature: Some(URL_SAFE_NO_PAD.encode([3; 64])),
+            owner_public_signing_key: Some(URL_SAFE_NO_PAD.encode([4; 32])),
         };
         save_room_access_v3(root.path(), &room_id, &access).expect("save");
         assert_eq!(
@@ -5541,6 +5634,7 @@ mod tests {
                 write_admission_key: Some(*tree.write_admission_key.as_bytes()),
                 grant_tier: None,
                 grant_signature: None,
+                owner_public_signing_key: None,
             },
         )
         .unwrap();
@@ -5567,6 +5661,7 @@ mod tests {
     fn v3_fragment_parser_rejects_duplicates_unknown_mismatch_and_bad_lengths() {
         let read = URL_SAFE_NO_PAD.encode([1u8; 32]);
         let write = URL_SAFE_NO_PAD.encode([2u8; 32]);
+        let owner = URL_SAFE_NO_PAD.encode([4u8; 32]);
         for invalid in [
             format!("#v=3&tier=view&read={read}&read={read}"),
             format!("#v=3&tier=view&read={read}&future=x"),
@@ -5574,12 +5669,100 @@ mod tests {
             format!("#v=3&tier=comment&read={read}"),
             "#v=3&tier=view&read=AQ".to_string(),
             format!("#tier=view&v=3&read={read}"),
+            // attn-lb7p: the owner key is length-disciplined like the others,
+            // must not repeat, and must come LAST — the parser re-renders
+            // through the builder and compares, so a fragment that carries the
+            // right fields in the wrong order is still refused.
+            format!("#v=3&tier=view&read={read}&owner=AQ"),
+            format!("#v=3&tier=view&read={read}&owner={owner}&owner={owner}"),
+            format!("#v=3&tier=view&owner={owner}&read={read}"),
         ] {
             assert!(
                 parse_invite_fragment_v3(&invalid).is_err(),
                 "accepted {invalid}"
             );
         }
+    }
+
+    /// The canonical fragments that BOTH implementations must produce, byte
+    /// for byte, from the same inputs (attn-lb7p).
+    ///
+    /// Rust and TypeScript each re-render through their own composer and
+    /// compare the result to the input, so a disagreement about field ORDER or
+    /// base64 spelling is not cosmetic drift — each side would reject the
+    /// other's invites, and hosted reviewers would simply stop being able to
+    /// open native invites. Nothing else in the tree pins the two together, so
+    /// this literal is duplicated verbatim in
+    /// `web/src/lib/review/browser-invite.test.ts` and must be changed in both
+    /// places or not at all.
+    const PARITY_VIEW_FRAGMENT: &str = "#v=3&tier=view&read=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE&owner=BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ";
+    const PARITY_COMMENT_FRAGMENT: &str = "#v=3&tier=comment&read=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE&write=AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI&grant=AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw&owner=BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ";
+
+    #[test]
+    fn v3_fragment_shape_matches_the_browser_implementation_byte_for_byte() {
+        let read = [1u8; 32];
+        let write = [2u8; 32];
+        let grant = [3u8; 64];
+        let owner = [4u8; 32];
+        assert_eq!(
+            build_invite_fragment_v3(InviteTierV3::View, &read, None, None, Some(&owner))
+                .expect("view fragment"),
+            PARITY_VIEW_FRAGMENT
+        );
+        assert_eq!(
+            build_invite_fragment_v3(
+                InviteTierV3::Comment,
+                &read,
+                Some(&write),
+                Some(&grant),
+                Some(&owner)
+            )
+            .expect("comment fragment"),
+            PARITY_COMMENT_FRAGMENT
+        );
+        // And both round-trip back through our own parser.
+        for fragment in [PARITY_VIEW_FRAGMENT, PARITY_COMMENT_FRAGMENT] {
+            let parsed = parse_invite_fragment_v3(fragment).expect("parity fragment parses");
+            assert_eq!(parsed.owner_public_signing_key, Some(owner));
+        }
+    }
+
+    #[test]
+    fn v3_fragment_without_an_owner_key_still_parses() {
+        // Backward skew: an invite minted before attn-lb7p has no owner key.
+        // It must still open — the joiner simply pins nothing and falls back.
+        // (The forward skew does NOT degrade: an old parser meets `owner=` as
+        // an unknown field and refuses, which is why owner and reviewer builds
+        // have to move together.)
+        let read = URL_SAFE_NO_PAD.encode([1u8; 32]);
+        let parsed = parse_invite_fragment_v3(&format!("#v=3&tier=view&read={read}"))
+            .expect("pre-attn-lb7p fragment must still parse");
+        assert!(parsed.owner_public_signing_key.is_none());
+    }
+
+    #[test]
+    fn v3_invite_grant_verifies_against_the_key_the_fragment_pins() {
+        // The joiner checks the grant against the invite's own key rather than
+        // one the relay supplied — that substitution is the whole reason to
+        // pin. A grant minted by a different key must not verify.
+        use crate::review::crypto::signing::DeviceSigningKey;
+        let secret = [0x3b; 32];
+        let owner = DeviceSigningKey::from_bytes(&[0x11; 32]).expect("owner key");
+        let impostor = DeviceSigningKey::from_bytes(&[0x22; 32]).expect("impostor key");
+        let room_id = derive_room_id_v3(&secret);
+        let url = build_invite_url_v3(&room_id, &secret, InviteTierV3::Comment, &owner)
+            .expect("build comment invite");
+        let ParsedInviteAny::V3(parsed) = parse_invite_any(&url).expect("parse invite") else {
+            panic!("expected a v3 invite");
+        };
+        let pinned = parsed
+            .fragment
+            .owner_public_signing_key
+            .expect("invite must pin the owner key");
+        assert_eq!(pinned, owner.verifying_key().to_bytes());
+        verify_invite_grant_v3(&parsed, &pinned).expect("owner grant verifies against pinned key");
+        verify_invite_grant_v3(&parsed, &impostor.verifying_key().to_bytes())
+            .expect_err("a grant must not verify against an unrelated key");
     }
 
     #[test]

@@ -4703,27 +4703,46 @@ fn selected_share_wire_path(
     let Some(record) = all.get(room_id.as_str()) else {
         return Ok(None);
     };
-    if record.selected_paths.is_empty() {
-        return Ok(None);
-    }
-    let canonical_root = std::path::Path::new(&record.path)
-        .canonicalize()
-        .map_err(|error| {
-            BootstrapError::Store(format!(
-                "canonicalize selected share root {}: {error}",
-                record.path
-            ))
-        })?;
+    // A share with no curated file list still has a root, and every file it
+    // publishes still needs a portable name (attn-x2zq).
+    //
+    // Returning None here meant `attn review share <path>` — and the legacy
+    // share(path) wrapper, which passes an empty selection — produced a share
+    // whose images could not travel at all: publish_asset_snapshot fails
+    // without a wire path, so the bytes were scanned, approved, and then
+    // dropped with only a per-image log line. It was invisible in testing
+    // because the native Share dialog always sends a selection.
+    //
+    // The root is the shared directory, or a shared file's own parent. Files
+    // outside it are still refused, by normalized_relative_share_path below.
+    let record_root = std::path::Path::new(&record.path);
+    let root_for_wire = if record.is_dir {
+        record_root.to_path_buf()
+    } else {
+        record_root
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| record_root.to_path_buf())
+    };
+    let canonical_root = root_for_wire.canonicalize().map_err(|error| {
+        BootstrapError::Store(format!(
+            "canonicalize selected share root {}: {error}",
+            root_for_wire.display()
+        ))
+    })?;
     let canonical_path = path.canonicalize().map_err(|error| {
         BootstrapError::Store(format!(
             "canonicalize shared file {}: {error}",
             path.display()
         ))
     })?;
-    if !record
-        .selected_paths
-        .iter()
-        .any(|selected| std::path::Path::new(selected) == canonical_path)
+    // With a curated list, membership of it is what authorises a wire path.
+    // Without one, containment in the share root is.
+    if !record.selected_paths.is_empty()
+        && !record
+            .selected_paths
+            .iter()
+            .any(|selected| std::path::Path::new(selected) == canonical_path)
     {
         return Ok(None);
     }
@@ -5725,6 +5744,64 @@ mod tests {
             let parsed = parse_invite_fragment_v3(fragment).expect("parity fragment parses");
             assert_eq!(parsed.owner_public_signing_key, Some(owner));
         }
+    }
+
+    #[test]
+    fn a_share_without_a_curated_list_still_mints_wire_paths() {
+        // attn-x2zq. Returning None here meant `attn review share <path>` and
+        // the legacy share(path) wrapper published a share whose images could
+        // not travel: publish_asset_snapshot needs a portable name, so the
+        // bytes were scanned, approved, and then dropped. Invisible in testing
+        // because the native Share dialog always sends a selection.
+        let root = TempDir::new().expect("tmp");
+        let store_root = root.path().join("store");
+        std::fs::create_dir_all(&store_root).expect("store dir");
+        let docs = root.path().join("docs");
+        std::fs::create_dir_all(docs.join("nested")).expect("docs dir");
+        std::fs::write(docs.join("notes.md"), b"# hi").expect("doc");
+        std::fs::write(docs.join("chart.svg"), b"<svg/>").expect("asset");
+        std::fs::write(docs.join("nested/diagram.png"), b"\x89PNG").expect("nested asset");
+
+        let room: RoomId =
+            serde_json::from_value(serde_json::Value::String("room-no-selection".into())).unwrap();
+
+        // A FOLDER share: the root is the folder itself.
+        record_local_share(&store_root, &room, &docs, true).expect("record dir share");
+        assert_eq!(
+            selected_share_wire_path(&store_root, &room, &docs.join("chart.svg"))
+                .expect("wire path")
+                .as_deref(),
+            Some("chart.svg"),
+            "an asset beside the document gets a portable name"
+        );
+        assert_eq!(
+            selected_share_wire_path(&store_root, &room, &docs.join("nested/diagram.png"))
+                .expect("wire path")
+                .as_deref(),
+            Some("nested/diagram.png"),
+            "and keeps its subdirectory"
+        );
+
+        // A SINGLE-FILE share: the root is that file's own parent, so its
+        // siblings are still nameable.
+        let file_room: RoomId =
+            serde_json::from_value(serde_json::Value::String("room-single-file".into())).unwrap();
+        record_local_share(&store_root, &file_room, &docs.join("notes.md"), false)
+            .expect("record file share");
+        assert_eq!(
+            selected_share_wire_path(&store_root, &file_room, &docs.join("chart.svg"))
+                .expect("wire path")
+                .as_deref(),
+            Some("chart.svg"),
+            "a single-file share roots at the file's directory"
+        );
+
+        // Containment still holds: nothing above the root is nameable.
+        std::fs::write(root.path().join("outside.svg"), b"<svg/>").expect("outside");
+        assert!(
+            selected_share_wire_path(&store_root, &room, &root.path().join("outside.svg")).is_err(),
+            "a file outside the share root has no wire path"
+        );
     }
 
     #[test]

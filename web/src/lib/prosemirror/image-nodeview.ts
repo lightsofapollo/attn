@@ -62,10 +62,13 @@ export function imageFileName(src: string): string {
  *
  * @param node            the image node
  * @param resolveAssetUrl maps an authored src onto something the webview can
- *                        load, or `null` when it cannot be resolved. Omitted
- *                        by surfaces with no local document behind them, where
- *                        it means "resolve nothing": the authored src is used
- *                        as-is and, when it fails, the placeholder explains.
+ *                        load, or `null` when it cannot be resolved. Two
+ *                        resolvers exist: the local one maps a src onto the
+ *                        file beside the document on THIS disk, and the
+ *                        reviewer's maps it onto an asset that travelled with
+ *                        a share. Omitting it means "resolve nothing" — the
+ *                        authored src is used as-is and, when it fails, the
+ *                        placeholder explains.
  */
 export function imageNodeView(
   node: PmNode,

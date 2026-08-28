@@ -212,6 +212,31 @@ pub enum ReviewCommand {
 // `EventImported` carries a full `ReviewEvent` (~816B). Boxing it would churn
 // every match/construct site across the IPC + transport layers for a payload
 // that is built once and immediately consumed — not worth the indirection.
+/// One imported snapshot, shaped to the frontend `ReviewSnapshot`
+/// (`web/src/lib/types.ts`) so it deserializes straight into the store.
+///
+/// `asset_content` is the only field the document lanes never set: it is the
+/// base64url payload of a `DocType::Asset` snapshot, kept encoded because the
+/// frontend turns it into a `data:` URL and would only have to re-encode it.
+/// Documents keep using `content`, which is UTF-8 source.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewSnapshotPayload {
+    pub room_id: RoomId,
+    pub file_id: String,
+    pub snapshot_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_display_path: Option<String>,
+    pub created_at: u64,
+    pub base_hash: String,
+    pub byte_length: u64,
+    pub doc_type: crate::review::model::DocType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset_content: Option<String>,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
@@ -255,10 +280,24 @@ pub enum ReviewUpdate {
         event: crate::review::model::ReviewEvent,
     },
     /// A new `SnapshotNode` was created (owner-side) or imported (reviewer-side).
+    ///
+    /// Carries the whole snapshot rather than a pair of ids (attn-udu8). The
+    /// id-only form had no production emitter at all — it was constructed
+    /// only under `#[cfg(test)]` — so `window.__attn__.reviewSnapshot`, which
+    /// `types.ts` documents as the route by which Rust hands an imported
+    /// snapshot to the frontend, never actually fired.
+    ///
+    /// This is the sanctioned lane for asset bytes. The frontend store
+    /// deliberately refuses inline assets arriving on `applyEvent`, because
+    /// that method is shared with the hosted session where the payload is
+    /// still sender-supplied. What travels here has already been through
+    /// `rehydrate_snapshot_event`: the sender's value was discarded outright,
+    /// the blob re-read locally, and its length and content hash checked
+    /// against the signed `BlobRef`. So this admits assets by the front door
+    /// instead of widening the gate.
     SnapshotCreated {
         room_id: RoomId,
-        snapshot_id: String,
-        file_id: String,
+        snapshot: ReviewSnapshotPayload,
     },
     /// An anchor was (re)resolved against the current replica. The payload
     /// matches the frontend `ReviewAnchorResolutionUpdate` shape exactly so
@@ -3253,10 +3292,16 @@ impl ReviewManager {
                 }
             };
             rehydrate_snapshot_event(&self.store, room_id, &mut event);
+            // Replay must emit these too, or images vanish on every restart
+            // while a live join shows them.
+            let asset = asset_snapshot_update(room_id, &event);
             (self.update_tx)(ReviewUpdate::EventImported {
                 room_id: room_id.clone(),
                 event,
             });
+            if let Some(asset) = asset {
+                (self.update_tx)(asset);
+            }
             replayed += 1;
         }
         if replayed > 0 {
@@ -4173,6 +4218,55 @@ impl crate::review::transport::DeviceKeyRefresher for BootstrapKeyRefresher {
 /// sees the room; the snapshot fills in on a later replay) and we log the
 /// gap. The blob-before-event outbox ordering makes this rare: by the time
 /// the event arrives, the blob envelope has already been processed.
+/// Build a `SnapshotCreated` update for an ASSET snapshot (attn-udu8).
+///
+/// Reads only `inline_snapshot`, which `rehydrate_snapshot_event` has already
+/// filled from the locally persisted blob after discarding whatever the sender
+/// claimed and checking the blob's length and content hash against the signed
+/// `BlobRef`. So this introduces no new trust decision — it forwards a payload
+/// the daemon has already authenticated.
+///
+/// `None` for documents: they reach the frontend inside `EventImported`
+/// already, and duplicating them here would put two rows in the store for one
+/// snapshot. Assets are the only kind the frontend drops on that path.
+fn asset_snapshot_update(
+    room_id: &RoomId,
+    event: &crate::review::model::ReviewEvent,
+) -> Option<ReviewUpdate> {
+    use crate::review::model::{DocType, ReviewEventBody};
+
+    let ReviewEventBody::SnapshotCreated {
+        file_id,
+        snapshot_id,
+        owner_display_path,
+        base_hash,
+        inline_snapshot: Some(plaintext),
+        ..
+    } = &event.body
+    else {
+        return None;
+    };
+    if plaintext.doc_type != DocType::Asset {
+        return None;
+    }
+    let content = plaintext.content.clone()?;
+    Some(ReviewUpdate::SnapshotCreated {
+        room_id: room_id.clone(),
+        snapshot: ReviewSnapshotPayload {
+            room_id: room_id.clone(),
+            file_id: file_id.as_str().to_string(),
+            snapshot_id: snapshot_id.as_str().to_string(),
+            owner_display_path: owner_display_path.clone(),
+            created_at: event.meta.created_at,
+            base_hash: base_hash.as_str().to_string(),
+            byte_length: content.len() as u64,
+            doc_type: DocType::Asset,
+            media_type: plaintext.media_type.clone(),
+            asset_content: Some(content),
+        },
+    })
+}
+
 fn rehydrate_snapshot_event(
     store: &crate::review::store::ReviewStore,
     room_id: &RoomId,
@@ -4524,10 +4618,17 @@ fn forward_transport_event(
                 }
             }
             rehydrate_snapshot_event(store, &rid, &mut event);
+            // Assets ride a second update: the frontend store refuses them on
+            // the EventImported path (that method is shared with the hosted
+            // session, where the payload is still sender-supplied).
+            let asset = asset_snapshot_update(&rid, &event);
             (update_tx)(ReviewUpdate::EventImported {
                 room_id: rid,
                 event,
             });
+            if let Some(asset) = asset {
+                (update_tx)(asset);
+            }
             if is_verdict {
                 observers.verdict_revision_tx.send_modify(|revision| {
                     *revision = revision.wrapping_add(1);
@@ -5428,6 +5529,86 @@ mod tests {
                 ..
             }
         )
+    }
+
+    #[test]
+    fn asset_snapshot_update_forwards_only_authenticated_assets() {
+        use crate::review::model::{DocType, ReviewEventBody, SnapshotAssetEncoding};
+
+        let room_id: RoomId = dummy_id("room-asset-update");
+
+        fn snapshot_event_with_inline(
+            room_id: &RoomId,
+            path: &str,
+            plaintext: crate::review::model::SnapshotPlaintext,
+        ) -> crate::review::model::ReviewEvent {
+            stub_review_event(
+                room_id,
+                crate::review::model::ReviewEventBody::SnapshotCreated {
+                    file_id: dummy_id("file-1"),
+                    snapshot_id: dummy_id("snap-1"),
+                    owner_display_path: Some(path.to_string()),
+                    parent_snapshot_id: None,
+                    base_hash: dummy_id("hash-1"),
+                    encrypted_blob_ref: None,
+                    inline_snapshot: Some(plaintext),
+                },
+            )
+        }
+
+        // A document snapshot must NOT produce one: documents already reach
+        // the frontend inside EventImported, and a second row would duplicate
+        // them.
+        let markdown = crate::review::model::SnapshotPlaintext {
+            doc_type: DocType::Markdown,
+            content: Some("# hi".to_string()),
+            anchor_index: None,
+            media_type: None,
+            encoding: None,
+            manifest: None,
+            annotation: None,
+        };
+        let event = snapshot_event_with_inline(&room_id, "images.md", markdown);
+        assert!(
+            asset_snapshot_update(&room_id, &event).is_none(),
+            "a markdown snapshot must not emit an asset update"
+        );
+
+        // An asset does, carrying its bytes and media type.
+        let asset = crate::review::model::SnapshotPlaintext {
+            doc_type: DocType::Asset,
+            content: Some("PHN2Zy8-".to_string()),
+            anchor_index: None,
+            media_type: Some("image/svg+xml".to_string()),
+            encoding: Some(SnapshotAssetEncoding::Base64url),
+            manifest: None,
+            annotation: None,
+        };
+        let event = snapshot_event_with_inline(&room_id, "chart.svg", asset);
+        let Some(ReviewUpdate::SnapshotCreated { snapshot, .. }) =
+            asset_snapshot_update(&room_id, &event)
+        else {
+            panic!("an asset snapshot must emit an update");
+        };
+        assert_eq!(snapshot.doc_type, DocType::Asset);
+        assert_eq!(snapshot.owner_display_path.as_deref(), Some("chart.svg"));
+        assert_eq!(snapshot.media_type.as_deref(), Some("image/svg+xml"));
+        assert_eq!(snapshot.asset_content.as_deref(), Some("PHN2Zy8-"));
+
+        // And an event whose inline payload was never hydrated emits nothing —
+        // the only bytes this may forward are ones rehydrate_snapshot_event
+        // already re-read and hash-checked locally.
+        let mut bare = event.clone();
+        if let ReviewEventBody::SnapshotCreated {
+            inline_snapshot, ..
+        } = &mut bare.body
+        {
+            *inline_snapshot = None;
+        }
+        assert!(
+            asset_snapshot_update(&room_id, &bare).is_none(),
+            "an unhydrated event must not emit an asset update"
+        );
     }
 
     #[test]
@@ -6888,8 +7069,18 @@ mod tests {
         assert_eq!(
             ReviewUpdate::SnapshotCreated {
                 room_id: room_id.clone(),
-                snapshot_id: "s".to_string(),
-                file_id: "f".to_string()
+                snapshot: ReviewSnapshotPayload {
+                    room_id: room_id.clone(),
+                    file_id: "file-1".to_string(),
+                    snapshot_id: "snap-1".to_string(),
+                    owner_display_path: Some("chart.svg".to_string()),
+                    created_at: 0,
+                    base_hash: "hash".to_string(),
+                    byte_length: 4,
+                    doc_type: crate::review::model::DocType::Asset,
+                    media_type: Some("image/svg+xml".to_string()),
+                    asset_content: Some("PHN2Zy8+".to_string()),
+                }
             }
             .callback_name(),
             "reviewSnapshot"

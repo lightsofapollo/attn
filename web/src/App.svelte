@@ -127,6 +127,7 @@
     markdownSourceUrl,
     resolveImageSrc,
   } from './lib/markdown-layer';
+  import { buildSharedAssetResolver } from './lib/review/asset-resolution';
   import { reviewStore } from './lib/review/store.svelte';
   import { consumePendingRoomFocus } from './lib/review/pending-room-focus';
   import ReviewMargin from './lib/ReviewMargin.svelte';
@@ -284,6 +285,26 @@
   let resolveActiveAssetUrl = $derived.by(() => {
     const docPath = activePath;
     return (src: string) => resolveImageSrc(docPath, src);
+  });
+
+  // The reviewer's counterpart (attn-udu8). A reviewer has no copy of the
+  // owner's disk, so `resolveActiveAssetUrl` is precisely wrong for them — it
+  // mints `attn://localhost/<abs-path>`, which on their machine is nothing, or
+  // an unrelated file that happens to share the path. What they do have is the
+  // asset snapshots that travelled with the document, keyed by the same wire
+  // paths the document itself is published under.
+  //
+  // Same eager-read discipline as above, and for the same reason: everything
+  // the closure depends on is read WHILE the derived evaluates, so the prop
+  // identity actually changes when the viewed document or the asset set does.
+  // A separate identifier from `resolveActiveAssetUrl` on purpose — the two
+  // resolve against different worlds, and the wiring test counts the bindings
+  // of each.
+  let resolveReviewAssetUrl = $derived.by(() => {
+    const snapshots = reviewStore.snapshots;
+    const roomId = reviewStore.currentRoomId;
+    const docWirePath = reviewSnapshot?.ownerDisplayPath;
+    return buildSharedAssetResolver(snapshots, roomId, docWirePath);
   });
   let hasActiveTab = $derived(Boolean(activeTab));
   let activeFileType = $derived<FileType>(activeTab?.fileType ?? 'unsupported');
@@ -3662,6 +3683,7 @@
         bind:this={editorRef}
         markdown={collabActive ? (collabSeedMarkdown || effectiveMarkdown) : effectiveMarkdown}
         editable={false}
+        resolveAssetUrl={resolveReviewAssetUrl}
         onLinkNavigate={handleEditorLinkNavigate}
         onSuggestionClick={handleSuggestionClick}
         onSave={saveEdits}
@@ -3693,9 +3715,11 @@
         />
       {/if}
     {:else if activeFileType === 'markdown'}
-      <!-- resolveAssetUrl is bound HERE and not on the reviewer-snapshot
-           editor above: that one renders the owner's document, whose relative
-           image srcs name files on the OWNER's disk. -->
+      <!-- Both editors resolve images, against different worlds. This one
+           reads the local disk. The reviewer-snapshot editor above resolves
+           against the assets that travelled with the share (attn-udu8) — it
+           must never use this resolver, whose srcs name files on the OWNER's
+           machine. -->
       <Editor
         bind:this={editorRef}
         markdown={collabActive ? (collabSeedMarkdown || effectiveMarkdown) : effectiveMarkdown}

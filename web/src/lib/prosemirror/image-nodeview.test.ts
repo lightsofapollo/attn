@@ -383,15 +383,18 @@ defineCase('20. App passes a resolver whose identity actually changes', () => {
   );
 });
 
-defineCase('21. the reviewer snapshot editor is left unresolved', () => {
-  // That editor renders the OWNER's document; its relative srcs name files on
-  // the owner's disk. Resolving them would mint a convincing attn:// URL for a
-  // file that is not on this machine — worse than the authored src. It still
-  // MOUNTS the view (registration is unconditional), so an unloadable src
-  // there gets the card; what it must not have is a resolver.
+defineCase('21. the reviewer snapshot editor resolves against the share, not the disk', () => {
+  // This case used to assert the reviewer editor had NO resolver, because the
+  // only one available mapped srcs onto the OWNER's disk. attn-udu8 gave it a
+  // resolver of its own, over the assets that travelled with the share — so
+  // the requirement inverts: it must resolve, and must not use the local one.
+  // Binding `resolveActiveAssetUrl` here would mint a convincing attn:// URL
+  // for a file that is not on this machine.
   const app = read('../App.svelte');
-  const bound = app.match(/resolveAssetUrl=\{resolveActiveAssetUrl\}/g) ?? [];
-  assertEq(bound.length, 2, 'exactly the local markdown editor and the editor-only diagnostic');
+  const local = app.match(/resolveAssetUrl=\{resolveActiveAssetUrl\}/g) ?? [];
+  assertEq(local.length, 2, 'local resolver: the markdown editor and the editor-only diagnostic');
+  const shared = app.match(/resolveAssetUrl=\{resolveReviewAssetUrl\}/g) ?? [];
+  assertEq(shared.length, 1, 'shared resolver: exactly the reviewer-snapshot editor');
   // Anchored on `<Editor`, not on the first `/>` after the branch opener: the
   // non-greedy form stopped at `<ReviewFileNav />` 436 characters in, so the
   // fragment it checked could never have contained the prop and the case
@@ -400,9 +403,33 @@ defineCase('21. the reviewer snapshot editor is left unresolved', () => {
   assert(snapshotEditor !== null, 'could not find the reviewer-snapshot editor');
   assert(/<Editor\b/.test(snapshotEditor[0]), 'the capture must reach the Editor tag itself');
   assert(
-    !/resolveAssetUrl/.test(snapshotEditor[0]),
-    'the reviewer-snapshot editor must not resolve against a local path',
+    /resolveAssetUrl=\{resolveReviewAssetUrl\}/.test(snapshotEditor[0]),
+    'the reviewer-snapshot editor must resolve against the share',
   );
+  assert(
+    !/resolveActiveAssetUrl/.test(snapshotEditor[0]),
+    'the reviewer-snapshot editor must never resolve against the local disk',
+  );
+});
+
+defineCase('22. the reviewer resolver reads its dependencies eagerly', () => {
+  // Same trap as case 20, one derived over. Editor tracks the prop by
+  // identity, so a closure that merely CLOSES over the snapshot list would
+  // keep one identity for the editor's life and the images would stay bound
+  // to whichever document was open when it mounted.
+  const app = read('../App.svelte');
+  const derived = /let resolveReviewAssetUrl = \$derived\.by\(\(\) => \{([\s\S]*?)\}\);/.exec(app);
+  assert(derived !== null, 'App.svelte must build the reviewer resolver with $derived.by');
+  for (const dependency of [
+    'const snapshots = reviewStore.snapshots;',
+    'const roomId = reviewStore.currentRoomId;',
+    'const docWirePath = reviewSnapshot?.ownerDisplayPath;',
+  ]) {
+    assert(
+      derived[1].includes(dependency),
+      `the reviewer resolver must read \`${dependency}\` while the derived evaluates`,
+    );
+  }
 });
 
 // ---------------------------------------------------------------------------

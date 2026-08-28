@@ -837,6 +837,12 @@ export class ReviewStore {
       // manifest may be waiting for referenced R2 entries, and exposing it
       // now would bypass that binding gate. Content-less pointer events still
       // create the placeholder that a later authenticated blob replaces.
+      //
+      // This gate no longer costs the native reviewer their images (attn-udu8):
+      // the daemon emits a separate `reviewSnapshot` update for asset
+      // snapshots, which reaches `applySnapshot` below carrying bytes it has
+      // already re-read locally and checked against the signed BlobRef. Assets
+      // arrive by that door rather than by widening this one.
       if (inline != null && document === undefined) return;
       const snapshot: ReviewSnapshot = {
         roomId: event.meta.roomId,

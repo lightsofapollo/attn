@@ -1465,6 +1465,9 @@ fn build_review_dispatch_js(
     // here keeps room_id on the Rust side for manager-side observers.
     let json = match update {
         ReviewUpdate::EventImported { event, .. } => serde_json::to_string(event)?,
+        // Same reason as EventImported: `reviewSnapshot(snapshot: ReviewSnapshot)`
+        // wants a bare snapshot, not a `{kind:"snapshot_created", ...}` wrapper.
+        ReviewUpdate::SnapshotCreated { snapshot, .. } => serde_json::to_string(snapshot)?,
         _ => serde_json::to_string(update)?,
     };
     Ok(format!(
@@ -2484,7 +2487,7 @@ mod tests {
     // a unit test, so we instead pin the JS string the handler would call
     // `evaluate_script(...)` with — that string is what wry hands wkwebview.
 
-    use crate::review::manager::ReviewUpdate;
+    use crate::review::manager::{ReviewSnapshotPayload, ReviewUpdate};
     use crate::review::model::{ExactReason, PositionAnchor, ResolvedAnchor};
 
     #[test]
@@ -2579,8 +2582,18 @@ mod tests {
             (
                 ReviewUpdate::SnapshotCreated {
                     room_id: room.clone(),
-                    snapshot_id: "snap-1".to_string(),
-                    file_id: "file-1".to_string(),
+                    snapshot: ReviewSnapshotPayload {
+                        room_id: room.clone(),
+                        file_id: "file-1".to_string(),
+                        snapshot_id: "snap-1".to_string(),
+                        owner_display_path: Some("chart.svg".to_string()),
+                        created_at: 0,
+                        base_hash: "hash".to_string(),
+                        byte_length: 4,
+                        doc_type: crate::review::model::DocType::Asset,
+                        media_type: Some("image/svg+xml".to_string()),
+                        asset_content: Some("PHN2Zy8+".to_string()),
+                    },
                 },
                 "reviewSnapshot",
             ),

@@ -491,6 +491,12 @@ fn validate_invite_for_join(invite: &str) -> Result<()> {
     Ok(())
 }
 
+/// How long the CLI waits for a join to complete before giving up on the
+/// answer. Generous enough for a cold relay handshake, short enough that a
+/// wedged network does not pin a terminal open. The daemon keeps trying past
+/// this point — only the CLI stops waiting.
+const JOIN_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Hand the invite to the running attn daemon so it joins as its OWN device
 /// identity (the same device the app window presents). This keeps the CLI join
 /// consistent with the daemon — a no-`--as-agent` join shows up in the app.
@@ -501,31 +507,38 @@ fn validate_invite_for_join(invite: &str) -> Result<()> {
 fn run_join_via_daemon(invite: &str) -> Result<()> {
     validate_invite_for_join(invite)?;
     crate::daemon::replace_stale_daemon().context("check running attn daemon")?;
-    match crate::daemon::send_review_join(invite) {
-        Ok(()) => {
-            println!("join request sent to the running attn daemon");
-            println!("  invite: {invite}");
-            return Ok(());
+    // Wait for the join to actually run rather than for the socket write to
+    // succeed (attn-q8gs). The old fire-and-forget path printed "join request
+    // sent" and exited 0 for joins the daemon went on to reject, which left
+    // the reviewer window on its old document with nothing in the terminal
+    // suggesting anything was wrong — the failure was only ever visible in
+    // the daemon's own log.
+    match crate::daemon::send_review_join_wait(invite, Some(JOIN_WAIT_TIMEOUT)) {
+        Ok(room_id) => {
+            println!("joined review room {room_id}");
+            Ok(())
         }
         Err(_err) if crate::daemon::send_info().is_err() => {
+            // No daemon at all — that error is "no daemon running", not a
+            // failed join. Start one on the current directory and retry, which
+            // keeps the invite one-liner useful for a first-time reviewer.
             start_app_for_join()?;
             wait_for_daemon(Duration::from_secs(8))?;
-            crate::daemon::send_review_join(invite).map_err(|join_err| {
-                anyhow::anyhow!(
-                    "started attn, but could not send the review invite ({join_err}).\n\
-                     Invite: {invite}"
-                )
-            })?;
+            let room_id = crate::daemon::send_review_join_wait(invite, Some(JOIN_WAIT_TIMEOUT))
+                .map_err(|join_err| {
+                    anyhow::anyhow!(
+                        "started attn, but the review join failed ({join_err}).\n\
+                         Invite: {invite}"
+                    )
+                })?;
+            println!("joined review room {room_id}");
+            Ok(())
         }
-        Err(err) => {
-            return Err(anyhow::anyhow!(
-                "could not send the review invite to the running attn daemon ({err})."
-            ));
-        }
+        Err(err) => Err(anyhow::anyhow!(
+            "review join failed ({err}).\n\
+             Invite: {invite}"
+        )),
     }
-    println!("join request sent to the running attn daemon");
-    println!("  invite: {invite}");
-    Ok(())
 }
 
 fn start_app_for_join() -> Result<()> {

@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="120" height="64" viewBox="0 0 120 64">
+  <!-- Explicit width/height, not just a viewBox: an <img>-referenced SVG with
+       no intrinsic size reports naturalWidth === 0 in WebKit. -->
+  <rect width="120" height="64" fill="#f0eade"/>
+  <rect x="12" y="34" width="16" height="22" fill="#b05a3d"/>
+  <rect x="36" y="22" width="16" height="34" fill="#b05a3d"/>
+  <rect x="60" y="12" width="16" height="44" fill="#b05a3d"/>
+  <rect x="84" y="28" width="16" height="28" fill="#b05a3d"/>
+</svg>

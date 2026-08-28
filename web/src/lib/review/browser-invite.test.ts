@@ -575,6 +575,78 @@ defineCase('v3 fragments reject duplicate, unknown, mismatch, length, and noncan
 // Runner
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// attn-lb7p — the owner key the joiner pins, and Rust<->TS fragment parity.
+// ---------------------------------------------------------------------------
+
+/**
+ * The canonical fragments BOTH implementations must produce, byte for byte,
+ * from the same inputs.
+ *
+ * Each side re-renders through its own composer and compares to the input, so a
+ * disagreement about field ORDER or base64 spelling is not cosmetic drift —
+ * each would reject the other's invites and hosted reviewers would silently
+ * stop being able to open native ones. Nothing else pins the two together.
+ * These literals are duplicated verbatim in `src/review/bootstrap.rs`
+ * (`PARITY_VIEW_FRAGMENT` / `PARITY_COMMENT_FRAGMENT`) and must change in both
+ * places or not at all.
+ */
+const PARITY_VIEW_FRAGMENT =
+  '#v=3&tier=view&read=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE&owner=BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ';
+const PARITY_COMMENT_FRAGMENT =
+  '#v=3&tier=comment&read=AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE&write=AgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgI&grant=AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAw&owner=BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ';
+
+const filled = (byte: number, length: number): Uint8Array => new Uint8Array(length).fill(byte);
+
+defineCase('v3 fragment shape matches the Rust implementation byte for byte', () => {
+  assertEq(
+    composeInviteFragmentV3('view', filled(1, 32), undefined, undefined, filled(4, 32)),
+    PARITY_VIEW_FRAGMENT,
+    'view fragment',
+  );
+  assertEq(
+    composeInviteFragmentV3('comment', filled(1, 32), filled(2, 32), filled(3, 64), filled(4, 32)),
+    PARITY_COMMENT_FRAGMENT,
+    'comment fragment',
+  );
+});
+
+defineCase('v3 owner key round-trips and is exposed for grant verification', () => {
+  for (const fragment of [PARITY_VIEW_FRAGMENT, PARITY_COMMENT_FRAGMENT]) {
+    const parsed = parseInviteFragmentV3(fragment);
+    assertEq(
+      parsed.ownerPublicSigningKey,
+      'BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ',
+      'owner key surfaces as base64url for verifyDeviceGrantV3',
+    );
+  }
+});
+
+defineCase('a v3 fragment minted before the owner key still parses', () => {
+  // Backward skew: pre-attn-lb7p invites must still open, pinning nothing.
+  const fragment = composeInviteFragmentV3('view', filled(1, 32));
+  const parsed = parseInviteFragmentV3(fragment);
+  assert(parsed.ownerPublicSigningKey === undefined, 'no key pinned');
+});
+
+defineCase('v3 fragments reject a malformed or misplaced owner key', () => {
+  const read = 'AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE';
+  const owner = 'BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQ';
+  for (const invalid of [
+    `#v=3&tier=view&read=${read}&owner=AQ`,
+    `#v=3&tier=view&read=${read}&owner=${owner}&owner=${owner}`,
+    `#v=3&tier=view&owner=${owner}&read=${read}`,
+  ]) {
+    let threw = false;
+    try {
+      parseInviteFragmentV3(invalid);
+    } catch {
+      threw = true;
+    }
+    assert(threw, `accepted ${invalid}`);
+  }
+});
+
 let passed = 0;
 let failed = 0;
 for (const run of cases) {

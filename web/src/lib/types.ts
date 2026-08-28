@@ -1268,8 +1268,23 @@ export interface ReviewSnapshot {
   docType?: DocType;
   /** Raw UTF-8 source: markdown source for `markdown`, HTML for `html`. */
   content?: string;
-  /** Validated, inert metadata for binary assets. Asset bytes are never rendered here. */
+  /** Validated, inert metadata for binary assets. */
   mediaType?: string;
+  /**
+   * Asset bytes, unpadded base64url, exactly as the snapshot carried them
+   * (attn-udu8).
+   *
+   * NATIVE LANE ONLY. The daemon sets this on a `SnapshotCreated` update after
+   * `rehydrate_snapshot_event` has discarded the sender's value and
+   * re-verified the blob's length and content hash against the signed
+   * `BlobRef`. The hosted session deliberately zeroes asset bytes after
+   * hashing them and must never populate this.
+   *
+   * Kept encoded because the only consumer turns it into a `data:` URL. It is
+   * separate from `content` — which is UTF-8 source — so that filters keyed on
+   * `typeof content === 'string'` keep meaning "a document".
+   */
+  assetContent?: string;
   /** Validated, inert workspace topology. It contains no entry bodies. */
   workspaceManifest?: WorkspaceSnapshotManifest;
   anchorIndex?: AnchorIndex;

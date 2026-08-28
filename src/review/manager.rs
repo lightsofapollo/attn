@@ -212,6 +212,31 @@ pub enum ReviewCommand {
 // `EventImported` carries a full `ReviewEvent` (~816B). Boxing it would churn
 // every match/construct site across the IPC + transport layers for a payload
 // that is built once and immediately consumed — not worth the indirection.
+/// One imported snapshot, shaped to the frontend `ReviewSnapshot`
+/// (`web/src/lib/types.ts`) so it deserializes straight into the store.
+///
+/// `asset_content` is the only field the document lanes never set: it is the
+/// base64url payload of a `DocType::Asset` snapshot, kept encoded because the
+/// frontend turns it into a `data:` URL and would only have to re-encode it.
+/// Documents keep using `content`, which is UTF-8 source.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewSnapshotPayload {
+    pub room_id: RoomId,
+    pub file_id: String,
+    pub snapshot_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_display_path: Option<String>,
+    pub created_at: u64,
+    pub base_hash: String,
+    pub byte_length: u64,
+    pub doc_type: crate::review::model::DocType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub media_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub asset_content: Option<String>,
+}
+
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(
@@ -255,10 +280,24 @@ pub enum ReviewUpdate {
         event: crate::review::model::ReviewEvent,
     },
     /// A new `SnapshotNode` was created (owner-side) or imported (reviewer-side).
+    ///
+    /// Carries the whole snapshot rather than a pair of ids (attn-udu8). The
+    /// id-only form had no production emitter at all — it was constructed
+    /// only under `#[cfg(test)]` — so `window.__attn__.reviewSnapshot`, which
+    /// `types.ts` documents as the route by which Rust hands an imported
+    /// snapshot to the frontend, never actually fired.
+    ///
+    /// This is the sanctioned lane for asset bytes. The frontend store
+    /// deliberately refuses inline assets arriving on `applyEvent`, because
+    /// that method is shared with the hosted session where the payload is
+    /// still sender-supplied. What travels here has already been through
+    /// `rehydrate_snapshot_event`: the sender's value was discarded outright,
+    /// the blob re-read locally, and its length and content hash checked
+    /// against the signed `BlobRef`. So this admits assets by the front door
+    /// instead of widening the gate.
     SnapshotCreated {
         room_id: RoomId,
-        snapshot_id: String,
-        file_id: String,
+        snapshot: ReviewSnapshotPayload,
     },
     /// An anchor was (re)resolved against the current replica. The payload
     /// matches the frontend `ReviewAnchorResolutionUpdate` shape exactly so
@@ -2353,6 +2392,39 @@ impl ReviewManager {
 
     /// Translate a `JoinOutcome` (or its error) into the corresponding
     /// `ReviewUpdate` and dispatch it.
+    /// Join a room and REPORT whether it worked (attn-q8gs).
+    ///
+    /// `ReviewCommand::Join` is fire-and-forget: `submit` hands it to the
+    /// dispatch loop, the caller is told nothing, and a failure surfaces only
+    /// as a `ReviewUpdate::Error` in the window and a line in the daemon log.
+    /// That is right for the in-app path — the window is watching — and wrong
+    /// for `attn review join`, whose caller is a terminal that exits before
+    /// any update arrives and so reported success for joins that never
+    /// happened.
+    ///
+    /// This runs the SAME work as the `Join` arm of `submit` — same
+    /// bootstrapper call, same `emit_join_outcome`, so the window still
+    /// updates exactly as it would have — and additionally returns the
+    /// outcome to whoever asked. Returns the joined `RoomId` on success, or a
+    /// human-readable reason on failure.
+    pub fn join_blocking(&self, invite: String) -> Result<String, String> {
+        let (Some(bootstrap), Some(runtime)) = (self.bootstrap.as_ref(), self.runtime.as_ref())
+        else {
+            return Err("review bootstrapper unavailable (daemon started without one)".to_string());
+        };
+        let cache = self.verifying_keys.clone();
+        let result = runtime.block_on(bootstrap.join(&invite, cache));
+        // Summarise BEFORE handing ownership to the emitter, which consumes
+        // the result. The emit must still happen: it starts the room runtime
+        // and flips the window onto the shared document.
+        let summary = match &result {
+            Ok(outcome) => Ok(outcome.room_id.as_str().to_string()),
+            Err(err) => Err(format!("{err}")),
+        };
+        self.emit_join_outcome(result);
+        summary
+    }
+
     fn emit_join_outcome(
         &self,
         result: Result<JoinOutcome, crate::review::bootstrap::BootstrapError>,
@@ -3220,10 +3292,16 @@ impl ReviewManager {
                 }
             };
             rehydrate_snapshot_event(&self.store, room_id, &mut event);
+            // Replay must emit these too, or images vanish on every restart
+            // while a live join shows them.
+            let asset = asset_snapshot_update(room_id, &event);
             (self.update_tx)(ReviewUpdate::EventImported {
                 room_id: room_id.clone(),
                 event,
             });
+            if let Some(asset) = asset {
+                (self.update_tx)(asset);
+            }
             replayed += 1;
         }
         if replayed > 0 {
@@ -4140,6 +4218,55 @@ impl crate::review::transport::DeviceKeyRefresher for BootstrapKeyRefresher {
 /// sees the room; the snapshot fills in on a later replay) and we log the
 /// gap. The blob-before-event outbox ordering makes this rare: by the time
 /// the event arrives, the blob envelope has already been processed.
+/// Build a `SnapshotCreated` update for an ASSET snapshot (attn-udu8).
+///
+/// Reads only `inline_snapshot`, which `rehydrate_snapshot_event` has already
+/// filled from the locally persisted blob after discarding whatever the sender
+/// claimed and checking the blob's length and content hash against the signed
+/// `BlobRef`. So this introduces no new trust decision — it forwards a payload
+/// the daemon has already authenticated.
+///
+/// `None` for documents: they reach the frontend inside `EventImported`
+/// already, and duplicating them here would put two rows in the store for one
+/// snapshot. Assets are the only kind the frontend drops on that path.
+fn asset_snapshot_update(
+    room_id: &RoomId,
+    event: &crate::review::model::ReviewEvent,
+) -> Option<ReviewUpdate> {
+    use crate::review::model::{DocType, ReviewEventBody};
+
+    let ReviewEventBody::SnapshotCreated {
+        file_id,
+        snapshot_id,
+        owner_display_path,
+        base_hash,
+        inline_snapshot: Some(plaintext),
+        ..
+    } = &event.body
+    else {
+        return None;
+    };
+    if plaintext.doc_type != DocType::Asset {
+        return None;
+    }
+    let content = plaintext.content.clone()?;
+    Some(ReviewUpdate::SnapshotCreated {
+        room_id: room_id.clone(),
+        snapshot: ReviewSnapshotPayload {
+            room_id: room_id.clone(),
+            file_id: file_id.as_str().to_string(),
+            snapshot_id: snapshot_id.as_str().to_string(),
+            owner_display_path: owner_display_path.clone(),
+            created_at: event.meta.created_at,
+            base_hash: base_hash.as_str().to_string(),
+            byte_length: content.len() as u64,
+            doc_type: DocType::Asset,
+            media_type: plaintext.media_type.clone(),
+            asset_content: Some(content),
+        },
+    })
+}
+
 fn rehydrate_snapshot_event(
     store: &crate::review::store::ReviewStore,
     room_id: &RoomId,
@@ -4305,17 +4432,68 @@ fn validate_workspace_manifest_binding(
         .as_ref()
         .ok_or_else(|| "workspace manifest payload is missing its manifest".to_string())?;
 
-    // Every joined/owned room persists the invite secret before starting its
-    // transport. It is therefore available at this production hydration
-    // boundary and lets native receivers reject an ordinary file masquerading
-    // as the room's one synthetic manifest document.
-    let room_secret = crate::review::bootstrap::load_room_secret(store.root(), room_id)
-        .map_err(|err| format!("load room secret for manifest FileId binding: {err}"))?;
-    let expected_manifest_file_id = derive_workspace_manifest_file_id(&room_secret);
-    if *manifest_file_id != expected_manifest_file_id {
-        return Err(
-            "manifest event fileId is not the room's synthetic manifest FileId".to_string(),
-        );
+    // Who published this manifest? (attn-lb7p)
+    //
+    // This check used to ask a different question — does the manifest's FileId
+    // equal one derived from the room secret — on the stated belief that
+    // "every joined/owned room persists the invite secret before starting its
+    // transport". That was never true of a v3 JOIN: the v3 key tree is
+    // one-way (room_secret -> root_key -> read_capability_key -> leaves) and a
+    // reviewer only ever holds a leaf, so no v3 reviewer could satisfy it and
+    // every one of them lost the workspace entirely.
+    //
+    // It was also the wrong question. That FileId travels inside every
+    // manifest snapshot a reviewer receives, so knowing it is not evidence of
+    // having authored anything — a secret-derived identifier is a name, not a
+    // signature. What actually needs proving is authorship, so prove it: the
+    // manifest is accepted when the OWNER signed the event carrying it,
+    // verified against the key the joiner pinned from the invite.
+    //
+    // `verify_event` is a full re-verification, not a comparison against
+    // whatever the import decided. That matters because replay
+    // (`replay_room_to_webview`) re-verifies nothing of its own — an identity
+    // check that only held on the live path would evaporate on restart.
+    let pinned_owner_key = crate::review::bootstrap::load_room_access_v3(store.root(), room_id)
+        .map_err(|err| format!("load room access for manifest authorship: {err}"))?
+        .and_then(|access| access.owner_public_signing_key);
+    match pinned_owner_key {
+        Some(encoded) => {
+            use base64::Engine as _;
+            let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+                .decode(encoded.as_bytes())
+                .map_err(|err| format!("pinned owner key base64url decode: {err}"))?;
+            let bytes: [u8; 32] = bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| "pinned owner key must decode to 32 bytes".to_string())?;
+            let owner = crate::review::crypto::signing::DeviceVerifyingKey::from_bytes(&bytes)
+                .map_err(|err| format!("pinned owner key: {err}"))?;
+            crate::review::crypto::signing::verify_event(
+                &owner,
+                &manifest_event.meta,
+                &manifest_event.body,
+                &manifest_event.auth,
+            )
+            .map_err(|err| format!("workspace manifest was not signed by the room owner: {err}"))?;
+            // The synthetic FileId is deliberately NOT compared here. It is
+            // the manifest's name — reviewers match snapshots to entries by
+            // it — and a name a reviewer cannot compute, and could replay if
+            // it could, is not a credential.
+        }
+        None => {
+            // No pinned key: a v2 room, or a v3 room joined before the invite
+            // carried one. Fall back to the original check, which still works
+            // for the parties that can satisfy it (owners, v2 joiners) and
+            // still fails closed for the v3 reviewers it never worked for.
+            let room_secret = crate::review::bootstrap::load_room_secret(store.root(), room_id)
+                .map_err(|err| format!("load room secret for manifest FileId binding: {err}"))?;
+            let expected_manifest_file_id = derive_workspace_manifest_file_id(&room_secret);
+            if *manifest_file_id != expected_manifest_file_id {
+                return Err(
+                    "manifest event fileId is not the room's synthetic manifest FileId".to_string(),
+                );
+            }
+        }
     }
 
     let mut earlier_snapshots = Vec::new();
@@ -4440,10 +4618,17 @@ fn forward_transport_event(
                 }
             }
             rehydrate_snapshot_event(store, &rid, &mut event);
+            // Assets ride a second update: the frontend store refuses them on
+            // the EventImported path (that method is shared with the hosted
+            // session, where the payload is still sender-supplied).
+            let asset = asset_snapshot_update(&rid, &event);
             (update_tx)(ReviewUpdate::EventImported {
                 room_id: rid,
                 event,
             });
+            if let Some(asset) = asset {
+                (update_tx)(asset);
+            }
             if is_verdict {
                 observers.verdict_revision_tx.send_modify(|revision| {
                     *revision = revision.wrapping_add(1);
@@ -5276,6 +5461,249 @@ mod tests {
                 .expect("append manifest event")
         );
         (tmp, store, room_id, manifest_event)
+    }
+
+    // -----------------------------------------------------------------
+    // Manifest AUTHORSHIP (attn-lb7p).
+    //
+    // Everything above this point exercises the FALLBACK branch: the harness
+    // writes shares/<room>.secret and pins no owner key, which is exactly the
+    // shape an owner or a v2 joiner has. That is why the whole suite kept
+    // passing when the check was replaced — and why these tests exist. They
+    // are the only coverage of the path a v3 reviewer actually takes.
+    // -----------------------------------------------------------------
+
+    /// Re-sign an already-persisted manifest event in place.
+    ///
+    /// Safe to do after `append_event`: `validate_workspace_manifest_binding`
+    /// verifies the signature on the event it is HANDED, and uses the store
+    /// only to confirm that event_id is present and to find earlier snapshots.
+    /// meta and body are untouched, so the id still matches the stored copy.
+    fn sign_manifest_as(
+        event: &mut crate::review::model::ReviewEvent,
+        key: &crate::review::crypto::signing::DeviceSigningKey,
+    ) {
+        event.auth = crate::review::crypto::signing::sign_event(key, &event.meta, &event.body)
+            .expect("sign manifest event");
+    }
+
+    fn pin_owner_key(
+        store: &ReviewStore,
+        room_id: &RoomId,
+        key: &crate::review::crypto::signing::DeviceSigningKey,
+    ) {
+        use base64::Engine as _;
+        crate::review::bootstrap::save_room_access_v3(
+            store.root(),
+            room_id,
+            &crate::review::bootstrap::RoomAccessV3 {
+                read_capability_key: [9; 32],
+                write_admission_key: None,
+                grant_tier: None,
+                grant_signature: None,
+                owner_public_signing_key: Some(
+                    base64::engine::general_purpose::URL_SAFE_NO_PAD
+                        .encode(key.verifying_key().to_bytes()),
+                ),
+            },
+        )
+        .expect("pin owner key");
+    }
+
+    fn signing_key(seed: u8) -> crate::review::crypto::signing::DeviceSigningKey {
+        crate::review::crypto::signing::DeviceSigningKey::from_bytes(&[seed; 32])
+            .expect("signing key from seed")
+    }
+
+    fn hydrated(
+        store: &ReviewStore,
+        room_id: &RoomId,
+        event: &mut crate::review::model::ReviewEvent,
+    ) -> bool {
+        use crate::review::model::ReviewEventBody;
+        rehydrate_snapshot_event(store, room_id, event);
+        matches!(
+            &event.body,
+            ReviewEventBody::SnapshotCreated {
+                inline_snapshot: Some(_),
+                ..
+            }
+        )
+    }
+
+    #[test]
+    fn asset_snapshot_update_forwards_only_authenticated_assets() {
+        use crate::review::model::{DocType, ReviewEventBody, SnapshotAssetEncoding};
+
+        let room_id: RoomId = dummy_id("room-asset-update");
+
+        fn snapshot_event_with_inline(
+            room_id: &RoomId,
+            path: &str,
+            plaintext: crate::review::model::SnapshotPlaintext,
+        ) -> crate::review::model::ReviewEvent {
+            stub_review_event(
+                room_id,
+                crate::review::model::ReviewEventBody::SnapshotCreated {
+                    file_id: dummy_id("file-1"),
+                    snapshot_id: dummy_id("snap-1"),
+                    owner_display_path: Some(path.to_string()),
+                    parent_snapshot_id: None,
+                    base_hash: dummy_id("hash-1"),
+                    encrypted_blob_ref: None,
+                    inline_snapshot: Some(plaintext),
+                },
+            )
+        }
+
+        // A document snapshot must NOT produce one: documents already reach
+        // the frontend inside EventImported, and a second row would duplicate
+        // them.
+        let markdown = crate::review::model::SnapshotPlaintext {
+            doc_type: DocType::Markdown,
+            content: Some("# hi".to_string()),
+            anchor_index: None,
+            media_type: None,
+            encoding: None,
+            manifest: None,
+            annotation: None,
+        };
+        let event = snapshot_event_with_inline(&room_id, "images.md", markdown);
+        assert!(
+            asset_snapshot_update(&room_id, &event).is_none(),
+            "a markdown snapshot must not emit an asset update"
+        );
+
+        // An asset does, carrying its bytes and media type.
+        let asset = crate::review::model::SnapshotPlaintext {
+            doc_type: DocType::Asset,
+            content: Some("PHN2Zy8-".to_string()),
+            anchor_index: None,
+            media_type: Some("image/svg+xml".to_string()),
+            encoding: Some(SnapshotAssetEncoding::Base64url),
+            manifest: None,
+            annotation: None,
+        };
+        let event = snapshot_event_with_inline(&room_id, "chart.svg", asset);
+        let Some(ReviewUpdate::SnapshotCreated { snapshot, .. }) =
+            asset_snapshot_update(&room_id, &event)
+        else {
+            panic!("an asset snapshot must emit an update");
+        };
+        assert_eq!(snapshot.doc_type, DocType::Asset);
+        assert_eq!(snapshot.owner_display_path.as_deref(), Some("chart.svg"));
+        assert_eq!(snapshot.media_type.as_deref(), Some("image/svg+xml"));
+        assert_eq!(snapshot.asset_content.as_deref(), Some("PHN2Zy8-"));
+
+        // And an event whose inline payload was never hydrated emits nothing —
+        // the only bytes this may forward are ones rehydrate_snapshot_event
+        // already re-read and hash-checked locally.
+        let mut bare = event.clone();
+        if let ReviewEventBody::SnapshotCreated {
+            inline_snapshot, ..
+        } = &mut bare.body
+        {
+            *inline_snapshot = None;
+        }
+        assert!(
+            asset_snapshot_update(&room_id, &bare).is_none(),
+            "an unhydrated event must not emit an asset update"
+        );
+    }
+
+    #[test]
+    fn rehydrate_manifest_accepts_owner_signed_manifest_without_any_room_secret() {
+        // The bug this epic exists for. A v3 reviewer never receives the room
+        // secret, so there is no shares/<room>.secret on their disk — and
+        // until now that alone rejected every manifest they were sent.
+        let (_tmp, store, room_id, mut event) =
+            bound_manifest_case(ManifestBindingTamper::MissingRoomSecret);
+        let owner = signing_key(0x11);
+        pin_owner_key(&store, &room_id, &owner);
+        sign_manifest_as(&mut event, &owner);
+        assert!(
+            hydrated(&store, &room_id, &mut event),
+            "an owner-signed manifest must hydrate with no room secret on disk"
+        );
+    }
+
+    #[test]
+    fn rehydrate_manifest_rejects_manifest_signed_by_a_reviewer_identity() {
+        // The forgery the check is FOR. Note the manifest carries the room's
+        // real synthetic FileId — the old check would have waved this through
+        // on any machine that could compute it. Authorship is what decides.
+        let (_tmp, store, room_id, mut event) = bound_manifest_case(ManifestBindingTamper::None);
+        let owner = signing_key(0x11);
+        let reviewer = signing_key(0x22);
+        pin_owner_key(&store, &room_id, &owner);
+        sign_manifest_as(&mut event, &reviewer);
+        assert!(
+            !hydrated(&store, &room_id, &mut event),
+            "a manifest signed by a non-owner must be rejected even with the correct FileId"
+        );
+    }
+
+    #[test]
+    fn rehydrate_manifest_rejects_a_tampered_body_under_a_valid_owner_key() {
+        // Distinguishes a real signature check from a signingKeyId string
+        // compare: the key id still matches the owner, only the bytes moved.
+        use crate::review::model::ReviewEventBody;
+        let (_tmp, store, room_id, mut event) = bound_manifest_case(ManifestBindingTamper::None);
+        let owner = signing_key(0x11);
+        pin_owner_key(&store, &room_id, &owner);
+        sign_manifest_as(&mut event, &owner);
+        if let ReviewEventBody::SnapshotCreated {
+            owner_display_path, ..
+        } = &mut event.body
+        {
+            *owner_display_path = Some("workspace.manifest.tampered".to_string());
+        }
+        assert!(
+            !hydrated(&store, &room_id, &mut event),
+            "a body edited after signing must not verify"
+        );
+    }
+
+    #[test]
+    fn rehydrate_manifest_survives_replay() {
+        // replay_room_to_webview re-verifies nothing of its own, so a check
+        // satisfiable only from live import state would evaporate on restart.
+        // Hydrating twice from disk proves this one reads only persisted data.
+        let (_tmp, store, room_id, event) =
+            bound_manifest_case(ManifestBindingTamper::MissingRoomSecret);
+        let owner = signing_key(0x11);
+        pin_owner_key(&store, &room_id, &owner);
+        let mut signed = event.clone();
+        sign_manifest_as(&mut signed, &owner);
+        let mut first = signed.clone();
+        let mut second = signed;
+        assert!(hydrated(&store, &room_id, &mut first), "first hydration");
+        assert!(
+            hydrated(&store, &room_id, &mut second),
+            "replay must hydrate identically"
+        );
+    }
+
+    #[test]
+    fn rehydrate_manifest_falls_back_to_room_secret_when_no_owner_key_is_pinned() {
+        // Owners and v2 joiners have no pinned key and DO have the secret.
+        // Their behavior must be exactly what it was before this change.
+        let (_tmp, store, room_id, mut event) = bound_manifest_case(ManifestBindingTamper::None);
+        assert!(
+            hydrated(&store, &room_id, &mut event),
+            "the pre-existing room-secret path must still accept"
+        );
+    }
+
+    #[test]
+    fn rehydrate_manifest_fails_closed_with_neither_a_pinned_key_nor_a_secret() {
+        // No way to establish authorship at all: refuse, do not fall open.
+        let (_tmp, store, room_id, mut event) =
+            bound_manifest_case(ManifestBindingTamper::MissingRoomSecret);
+        assert!(
+            !hydrated(&store, &room_id, &mut event),
+            "with no owner key and no secret the manifest must be refused"
+        );
     }
 
     #[test]
@@ -6641,8 +7069,18 @@ mod tests {
         assert_eq!(
             ReviewUpdate::SnapshotCreated {
                 room_id: room_id.clone(),
-                snapshot_id: "s".to_string(),
-                file_id: "f".to_string()
+                snapshot: ReviewSnapshotPayload {
+                    room_id: room_id.clone(),
+                    file_id: "file-1".to_string(),
+                    snapshot_id: "snap-1".to_string(),
+                    owner_display_path: Some("chart.svg".to_string()),
+                    created_at: 0,
+                    base_hash: "hash".to_string(),
+                    byte_length: 4,
+                    doc_type: crate::review::model::DocType::Asset,
+                    media_type: Some("image/svg+xml".to_string()),
+                    asset_content: Some("PHN2Zy8+".to_string()),
+                }
             }
             .callback_name(),
             "reviewSnapshot"

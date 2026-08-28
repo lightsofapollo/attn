@@ -1112,8 +1112,24 @@ pub async fn resolve_public_share_to_room_invite(
         ShareLinkTier::Comment => InviteTierV3::Comment,
         ShareLinkTier::Suggest => InviteTierV3::Suggest,
     };
-    let fragment = build_invite_fragment_v3(invite_tier, &read, write.as_ref(), grant.as_ref())
-        .map_err(|error| ShareLifecycleError::Invalid(error.to_string()))?;
+    // The bundle has carried the owner's public key all along (share.rs
+    // `ShareCapabilityBundle::owner_signing_key`, validated as canonical 32
+    // bytes when the bundle is opened); this resolver simply discarded it.
+    // It has to reach the fragment here too, or a hosted share mints an
+    // invite whose joiner has no key to pin while a native share's does.
+    let owner_public: [u8; 32] = URL_SAFE_NO_PAD
+        .decode(opened.owner_signing_key.as_bytes())
+        .map_err(|_| ShareLifecycleError::Invalid("bundle owner key is invalid".into()))?
+        .try_into()
+        .map_err(|_| ShareLifecycleError::Invalid("bundle owner key length is invalid".into()))?;
+    let fragment = build_invite_fragment_v3(
+        invite_tier,
+        &read,
+        write.as_ref(),
+        grant.as_ref(),
+        Some(&owner_public),
+    )
+    .map_err(|error| ShareLifecycleError::Invalid(error.to_string()))?;
     Ok(format!("attn://review/{current_room}{fragment}"))
 }
 
@@ -3919,9 +3935,19 @@ mod tests {
         )
         .await
         .expect("resolve comment link");
-        let fragment =
-            build_invite_fragment_v3(InviteTierV3::Comment, &read, Some(&write), Some(&grant))
-                .expect("comment fragment");
+        // The resolver must carry the bundle's owner key into the fragment
+        // (attn-lb7p); rebuilding without it here would assert the old shape
+        // and hide exactly the omission this pins.
+        // Same key the mock bundle at the top of this test carries.
+        let owner_public = [0x55_u8; 32];
+        let fragment = build_invite_fragment_v3(
+            InviteTierV3::Comment,
+            &read,
+            Some(&write),
+            Some(&grant),
+            Some(&owner_public),
+        )
+        .expect("comment fragment");
         assert_eq!(invite, format!("attn://review/{room_id}{fragment}"));
     }
 

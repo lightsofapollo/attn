@@ -90,6 +90,20 @@ pub enum SocketMessage {
     #[serde(rename = "review_join")]
     ReviewJoin { invite: String },
 
+    /// Join a review room and WAIT for the outcome (attn-q8gs).
+    ///
+    /// `ReviewJoin` above is fire-and-forget: the daemon Oks the write and
+    /// joins afterwards, so a CLI caller cannot tell a completed join from
+    /// one the daemon rejected. This variant blocks the socket reply until
+    /// the join has actually run, so `attn review join` can exit non-zero
+    /// when it failed.
+    #[serde(rename = "review_join_wait", rename_all = "camelCase")]
+    ReviewJoinWait {
+        invite: String,
+        #[serde(default)]
+        timeout_ms: Option<u64>,
+    },
+
     /// Share the current path as a review room. CLI agents call this to
     /// host a review without going through the UI. Real handling lives in
     /// `ReviewManager` (issue attn-nnj.2.8); for now the daemon logs and
@@ -199,6 +213,9 @@ pub enum SocketResponse {
     },
     #[serde(rename = "review_verdicts_wait")]
     ReviewVerdictsWait { outcome: VerdictWaitOutcome },
+    /// Outcome of a `ReviewJoinWait` — the room actually joined.
+    #[serde(rename_all = "camelCase")]
+    ReviewJoinWait { room_id: String },
     #[serde(rename = "review_suggestions_submitted", rename_all = "camelCase")]
     ReviewSuggestionsSubmitted { submitted_count: usize },
     #[serde(rename = "durable_shares", rename_all = "camelCase")]
@@ -476,6 +493,26 @@ pub fn send_review_join(invite: &str) -> Result<()> {
     match send_command(&msg)? {
         Some(SocketResponse::Ok) => Ok(()),
         Some(SocketResponse::Error { message }) => bail!("review_join failed: {message}"),
+        Some(other) => bail!("unexpected response: {other:?}"),
+        None => bail!("no daemon running"),
+    }
+}
+
+/// Send a `ReviewJoinWait` and report the room actually joined (attn-q8gs).
+///
+/// The waiting counterpart to `send_review_join`: the daemon replies only once
+/// the join has run, so an `Err` here means the join genuinely failed rather
+/// than merely that the socket write did.
+pub fn send_review_join_wait(invite: &str, timeout: Option<Duration>) -> Result<String> {
+    let timeout_ms =
+        timeout.map(|duration| u64::try_from(duration.as_millis()).unwrap_or(u64::MAX));
+    let msg = SocketMessage::ReviewJoinWait {
+        invite: invite.to_string(),
+        timeout_ms,
+    };
+    match send_command(&msg)? {
+        Some(SocketResponse::ReviewJoinWait { room_id }) => Ok(room_id),
+        Some(SocketResponse::Error { message }) => bail!("{message}"),
         Some(other) => bail!("unexpected response: {other:?}"),
         None => bail!("no daemon running"),
     }
@@ -796,6 +833,44 @@ fn query_review_verdicts(
     }
 }
 
+/// Run a join to completion and report what happened (attn-q8gs).
+///
+/// Unlike `wait_review_verdicts` there is no polling to do: the manager's join
+/// is synchronous once driven, so the whole wait is the call itself. The
+/// timeout exists so a wedged network cannot pin a CLI caller open forever;
+/// it is enforced by running the join on a worker thread and giving up on the
+/// RESULT, not on the join — the daemon keeps going and the window still
+/// updates if it lands late.
+fn wait_review_join(
+    review_manager: Option<&Arc<ReviewManager>>,
+    invite: String,
+    timeout_ms: Option<u64>,
+) -> SocketResponse {
+    let Some(manager) = review_manager else {
+        return SocketResponse::Error {
+            message: "ReviewManager unavailable".to_string(),
+        };
+    };
+    let manager = Arc::clone(manager);
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(manager.join_blocking(invite));
+    });
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(30_000));
+    match rx.recv_timeout(timeout) {
+        Ok(Ok(room_id)) => SocketResponse::ReviewJoinWait { room_id },
+        Ok(Err(message)) => SocketResponse::Error {
+            message: format!("join failed: {message}"),
+        },
+        Err(_) => SocketResponse::Error {
+            message: format!(
+                "join did not complete within {}s — the daemon is still trying; see its log",
+                timeout.as_secs()
+            ),
+        },
+    }
+}
+
 fn wait_review_verdicts(
     review_manager: Option<&Arc<ReviewManager>>,
     participant_id: &crate::review::ids::ParticipantId,
@@ -1106,6 +1181,15 @@ fn handle_client(
                 log_review_join_intent(&invite);
                 submit_review_socket_command(review_manager, ReviewCommand::Join { invite });
                 let resp = SocketResponse::Ok;
+                let _ = writeln!(
+                    stream,
+                    "{}",
+                    serde_json::to_string(&resp).unwrap_or_default()
+                );
+            }
+            Ok(SocketMessage::ReviewJoinWait { invite, timeout_ms }) => {
+                log_review_join_intent(&invite);
+                let resp = wait_review_join(review_manager, invite, timeout_ms);
                 let _ = writeln!(
                     stream,
                     "{}",
@@ -1591,6 +1675,67 @@ mod tests {
         // the command rather than panic.
         submit_review_socket_command(None, ReviewCommand::Inbox);
         // Pass = no panic.
+    }
+
+    #[test]
+    fn review_join_wait_round_trips_over_the_socket_protocol() {
+        // The whole point of attn-q8gs is that the CLI learns the outcome, so
+        // the request must carry the timeout and the response must carry the
+        // room — a silently-dropped field here would put us back to a caller
+        // that cannot tell a join from a write.
+        let json = serde_json::to_string(&SocketMessage::ReviewJoinWait {
+            invite: "attn://review/abc#v=3".to_string(),
+            timeout_ms: Some(30_000),
+        })
+        .expect("serialize join-wait");
+        assert_eq!(
+            json,
+            r#"{"type":"review_join_wait","invite":"attn://review/abc#v=3","timeoutMs":30000}"#
+        );
+        let decoded: SocketMessage = serde_json::from_str(&json).expect("deserialize join-wait");
+        match decoded {
+            SocketMessage::ReviewJoinWait { invite, timeout_ms } => {
+                assert_eq!(invite, "attn://review/abc#v=3");
+                assert_eq!(timeout_ms, Some(30_000));
+            }
+            other => panic!("unexpected message: {other:?}"),
+        }
+
+        // Omitted timeout is legal — the daemon supplies the default.
+        let decoded: SocketMessage =
+            serde_json::from_str(r#"{"type":"review_join_wait","invite":"attn://review/abc"}"#)
+                .expect("deserialize without timeout");
+        match decoded {
+            SocketMessage::ReviewJoinWait { timeout_ms, .. } => assert_eq!(timeout_ms, None),
+            other => panic!("unexpected message: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn review_join_wait_response_carries_the_room() {
+        let json = serde_json::to_string(&SocketResponse::ReviewJoinWait {
+            room_id: "room-1".to_string(),
+        })
+        .expect("serialize response");
+        assert!(
+            json.contains("\"roomId\":\"room-1\""),
+            "response must name the joined room, got {json}"
+        );
+    }
+
+    #[test]
+    fn wait_review_join_without_a_manager_is_an_error_not_a_success() {
+        // A daemon that failed to open its review store hands `None` here.
+        // Reporting Ok would recreate exactly the bug this fixes.
+        match wait_review_join(None, "attn://review/abc".to_string(), Some(10)) {
+            SocketResponse::Error { message } => {
+                assert!(
+                    message.contains("ReviewManager unavailable"),
+                    "unexpected message: {message}"
+                );
+            }
+            other => panic!("expected an error, got {other:?}"),
+        }
     }
 
     #[test]

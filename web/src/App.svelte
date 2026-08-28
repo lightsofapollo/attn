@@ -125,7 +125,9 @@
     extractStructureFromMarkdown,
     loadMarkdownFromPath,
     markdownSourceUrl,
+    resolveImageSrc,
   } from './lib/markdown-layer';
+  import { buildSharedAssetResolver } from './lib/review/asset-resolution';
   import { reviewStore } from './lib/review/store.svelte';
   import { consumePendingRoomFocus } from './lib/review/pending-room-focus';
   import ReviewMargin from './lib/ReviewMargin.svelte';
@@ -271,6 +273,39 @@
 
   let activeTab = $derived(tabs.find((t) => t.id === activeTabId));
   let activePath = $derived(activeTab?.path ?? '');
+
+  // Rebuilt whenever the active file changes, and deliberately NOT written as
+  // an inline arrow at the call site: Editor's nodeView reactor tracks this
+  // prop by identity, and an arrow that merely CLOSES over `activePath` keeps
+  // one identity forever, so every image NodeView would stay bound to the
+  // directory of whatever file was open when the editor mounted. `$derived.by`
+  // with the path read eagerly is what makes the dependency real — a plain
+  // `$derived((src) => …)` would never re-run either, since the body that
+  // reads `activePath` is not evaluated while the derived is.
+  let resolveActiveAssetUrl = $derived.by(() => {
+    const docPath = activePath;
+    return (src: string) => resolveImageSrc(docPath, src);
+  });
+
+  // The reviewer's counterpart (attn-udu8). A reviewer has no copy of the
+  // owner's disk, so `resolveActiveAssetUrl` is precisely wrong for them — it
+  // mints `attn://localhost/<abs-path>`, which on their machine is nothing, or
+  // an unrelated file that happens to share the path. What they do have is the
+  // asset snapshots that travelled with the document, keyed by the same wire
+  // paths the document itself is published under.
+  //
+  // Same eager-read discipline as above, and for the same reason: everything
+  // the closure depends on is read WHILE the derived evaluates, so the prop
+  // identity actually changes when the viewed document or the asset set does.
+  // A separate identifier from `resolveActiveAssetUrl` on purpose — the two
+  // resolve against different worlds, and the wiring test counts the bindings
+  // of each.
+  let resolveReviewAssetUrl = $derived.by(() => {
+    const snapshots = reviewStore.snapshots;
+    const roomId = reviewStore.currentRoomId;
+    const docWirePath = reviewSnapshot?.ownerDisplayPath;
+    return buildSharedAssetResolver(snapshots, roomId, docWirePath);
+  });
   let hasActiveTab = $derived(Boolean(activeTab));
   let activeFileType = $derived<FileType>(activeTab?.fileType ?? 'unsupported');
 
@@ -3648,6 +3683,7 @@
         bind:this={editorRef}
         markdown={collabActive ? (collabSeedMarkdown || effectiveMarkdown) : effectiveMarkdown}
         editable={false}
+        resolveAssetUrl={resolveReviewAssetUrl}
         onLinkNavigate={handleEditorLinkNavigate}
         onSuggestionClick={handleSuggestionClick}
         onSave={saveEdits}
@@ -3679,10 +3715,16 @@
         />
       {/if}
     {:else if activeFileType === 'markdown'}
+      <!-- Both editors resolve images, against different worlds. This one
+           reads the local disk. The reviewer-snapshot editor above resolves
+           against the assets that travelled with the share (attn-udu8) — it
+           must never use this resolver, whose srcs name files on the OWNER's
+           machine. -->
       <Editor
         bind:this={editorRef}
         markdown={collabActive ? (collabSeedMarkdown || effectiveMarkdown) : effectiveMarkdown}
         editable={(collabActive && collabRole === 'owner') || mode === 'edit'}
+        resolveAssetUrl={resolveActiveAssetUrl}
         onLinkNavigate={handleEditorLinkNavigate}
         onSuggestionClick={handleSuggestionClick}
         onSave={saveEdits}
@@ -3970,6 +4012,7 @@
         bind:this={editorRef}
         markdown={rawMarkdown}
         editable={mode === 'edit'}
+        resolveAssetUrl={resolveActiveAssetUrl}
         onLinkNavigate={handleEditorLinkNavigate}
         onSuggestionClick={handleSuggestionClick}
         onSave={saveEdits}

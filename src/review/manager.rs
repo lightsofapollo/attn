@@ -4267,6 +4267,49 @@ fn asset_snapshot_update(
     })
 }
 
+/// Whether a room could establish who signed a snapshot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnerSignature {
+    /// The room pins an owner key and this event verified against it.
+    Verified,
+    /// No key is pinned — a v2 room, or a v3 room joined before invites
+    /// carried one. The caller decides what to do instead.
+    NoPinnedKey,
+}
+
+/// Verify that the room owner signed `event`, against the key pinned at join
+/// (attn-lb7p, generalised by attn-1n67).
+///
+/// A full `verify_event` rather than a `signing_key_id` comparison: replay
+/// re-verifies nothing of its own, so a check that merely trusted what the
+/// live import recorded would evaporate on restart.
+fn verify_snapshot_owner_signature(
+    store: &crate::review::store::ReviewStore,
+    room_id: &RoomId,
+    event: &crate::review::model::ReviewEvent,
+) -> Result<OwnerSignature, String> {
+    use base64::Engine as _;
+
+    let Some(encoded) = crate::review::bootstrap::load_room_access_v3(store.root(), room_id)
+        .map_err(|err| format!("load room access for snapshot authorship: {err}"))?
+        .and_then(|access| access.owner_public_signing_key)
+    else {
+        return Ok(OwnerSignature::NoPinnedKey);
+    };
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(encoded.as_bytes())
+        .map_err(|err| format!("pinned owner key base64url decode: {err}"))?;
+    let bytes: [u8; 32] = bytes
+        .as_slice()
+        .try_into()
+        .map_err(|_| "pinned owner key must decode to 32 bytes".to_string())?;
+    let owner = crate::review::crypto::signing::DeviceVerifyingKey::from_bytes(&bytes)
+        .map_err(|err| format!("pinned owner key: {err}"))?;
+    crate::review::crypto::signing::verify_event(&owner, &event.meta, &event.body, &event.auth)
+        .map_err(|err| format!("not signed by the room owner: {err}"))?;
+    Ok(OwnerSignature::Verified)
+}
+
 fn rehydrate_snapshot_event(
     store: &crate::review::store::ReviewStore,
     room_id: &RoomId,
@@ -4292,6 +4335,34 @@ fn rehydrate_snapshot_event(
             return;
         }
     };
+    // Who published this? (attn-1n67)
+    //
+    // Until now the manifest was the ONLY snapshot whose authorship was ever
+    // checked. Every other one — the documents a reviewer reads, and the image
+    // assets attn-udu8 added — was accepted on a signature from ANY device in
+    // the room directory, because that is all InboundPipeline establishes. A
+    // reviewer holding a comment- or suggest-tier grant is such a device, so
+    // nothing stopped one minting a SnapshotCreated for an arbitrary fileId
+    // and having every other reviewer render it as the owner's document.
+    //
+    // Snapshots are structurally owner-published: both republish paths go
+    // through `find_room_for_path`, which needs a local share record that only
+    // the sharing machine has. So requiring the owner's signature refuses
+    // exactly the events that had no business existing.
+    if plaintext.doc_type != crate::review::model::DocType::WorkspaceManifest {
+        match verify_snapshot_owner_signature(store, room_id, event) {
+            Ok(OwnerSignature::Verified) => {}
+            // No pinned key: a v2 room, or a v3 room joined before invites
+            // carried one. Unchanged from before this check existed — those
+            // rooms have no way to establish authorship and must not lose
+            // their documents over it.
+            Ok(OwnerSignature::NoPinnedKey) => {}
+            Err(err) => {
+                tracing::warn!("snapshot hydration rejected: {err}");
+                return;
+            }
+        }
+    }
     if plaintext.doc_type == crate::review::model::DocType::WorkspaceManifest
         && let Err(err) = validate_workspace_manifest_binding(store, room_id, event, &plaintext)
     {
@@ -4453,34 +4524,14 @@ fn validate_workspace_manifest_binding(
     // whatever the import decided. That matters because replay
     // (`replay_room_to_webview`) re-verifies nothing of its own — an identity
     // check that only held on the live path would evaporate on restart.
-    let pinned_owner_key = crate::review::bootstrap::load_room_access_v3(store.root(), room_id)
-        .map_err(|err| format!("load room access for manifest authorship: {err}"))?
-        .and_then(|access| access.owner_public_signing_key);
-    match pinned_owner_key {
-        Some(encoded) => {
-            use base64::Engine as _;
-            let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-                .decode(encoded.as_bytes())
-                .map_err(|err| format!("pinned owner key base64url decode: {err}"))?;
-            let bytes: [u8; 32] = bytes
-                .as_slice()
-                .try_into()
-                .map_err(|_| "pinned owner key must decode to 32 bytes".to_string())?;
-            let owner = crate::review::crypto::signing::DeviceVerifyingKey::from_bytes(&bytes)
-                .map_err(|err| format!("pinned owner key: {err}"))?;
-            crate::review::crypto::signing::verify_event(
-                &owner,
-                &manifest_event.meta,
-                &manifest_event.body,
-                &manifest_event.auth,
-            )
-            .map_err(|err| format!("workspace manifest was not signed by the room owner: {err}"))?;
+    match verify_snapshot_owner_signature(store, room_id, manifest_event)? {
+        OwnerSignature::Verified => {
             // The synthetic FileId is deliberately NOT compared here. It is
             // the manifest's name — reviewers match snapshots to entries by
             // it — and a name a reviewer cannot compute, and could replay if
             // it could, is not a credential.
         }
-        None => {
+        OwnerSignature::NoPinnedKey => {
             // No pinned key: a v2 room, or a v3 room joined before the invite
             // carried one. Fall back to the original check, which still works
             // for the parties that can satisfy it (owners, v2 joiners) and
@@ -5529,6 +5580,128 @@ mod tests {
                 ..
             }
         )
+    }
+
+    /// A store + room holding one persisted markdown snapshot, for the
+    /// authorship cases below. Deliberately NOT bound_manifest_case: that one
+    /// builds a manifest, and the point here is the ORDINARY document path
+    /// that had no authorship check at all (attn-1n67).
+    fn document_snapshot_case() -> (
+        TempDir,
+        ReviewStore,
+        RoomId,
+        crate::review::model::ReviewEvent,
+    ) {
+        use crate::review::crypto::ids::derive_room_id;
+        use crate::review::model::{DocType, SnapshotPlaintext};
+
+        let tmp = TempDir::new().expect("tempdir");
+        let store = ReviewStore::open_at(tmp.path().join("reviews")).expect("open store");
+        let room_id = derive_room_id(&[0x44; 32]);
+        let payload = SnapshotPlaintext {
+            doc_type: DocType::Markdown,
+            content: Some("# Shared\n\nHello.\n".to_string()),
+            anchor_index: None,
+            media_type: None,
+            encoding: None,
+            manifest: None,
+            annotation: None,
+        };
+        let event = persist_snapshot_event(
+            &store,
+            &room_id,
+            "document",
+            dummy_id("CQkJCQkJCQkJCQkJCQkJCQ"),
+            dummy_id("CgoKCgoKCgoKCgoKCgoKCg"),
+            "shared.md",
+            &payload,
+        );
+        assert!(
+            store
+                .append_event(&room_id, &event)
+                .expect("append document event")
+        );
+        (tmp, store, room_id, event)
+    }
+
+    #[test]
+    fn a_document_snapshot_signed_by_the_owner_hydrates() {
+        let (_tmp, store, room_id, mut event) = document_snapshot_case();
+        let owner = signing_key(0x11);
+        pin_owner_key(&store, &room_id, &owner);
+        sign_manifest_as(&mut event, &owner);
+        assert!(
+            hydrated(&store, &room_id, &mut event),
+            "the owner's own document must still render"
+        );
+    }
+
+    #[test]
+    fn a_document_snapshot_signed_by_a_reviewer_is_rejected() {
+        // The hole attn-1n67 closes. Before this, ANY device in the room
+        // directory could mint a SnapshotCreated for an arbitrary fileId and
+        // every other reviewer would render it as the owner's document — a
+        // valid signature from a registered participant was the whole check.
+        let (_tmp, store, room_id, mut event) = document_snapshot_case();
+        let owner = signing_key(0x11);
+        let reviewer = signing_key(0x22);
+        pin_owner_key(&store, &room_id, &owner);
+        sign_manifest_as(&mut event, &reviewer);
+        assert!(
+            !hydrated(&store, &room_id, &mut event),
+            "a document signed by a non-owner must not render"
+        );
+    }
+
+    #[test]
+    fn an_asset_snapshot_signed_by_a_reviewer_is_rejected() {
+        // Same hole, reached through the images attn-udu8 added: a forged
+        // asset would otherwise be rendered inside the owner's document.
+        use crate::review::crypto::ids::derive_room_id;
+        use crate::review::model::{DocType, SnapshotAssetEncoding, SnapshotPlaintext};
+
+        let tmp = TempDir::new().expect("tempdir");
+        let store = ReviewStore::open_at(tmp.path().join("reviews")).expect("open store");
+        let room_id = derive_room_id(&[0x55; 32]);
+        let payload = SnapshotPlaintext {
+            doc_type: DocType::Asset,
+            content: Some("PHN2Zy8-".to_string()),
+            anchor_index: None,
+            media_type: Some("image/svg+xml".to_string()),
+            encoding: Some(SnapshotAssetEncoding::Base64url),
+            manifest: None,
+            annotation: None,
+        };
+        let mut event = persist_snapshot_event(
+            &store,
+            &room_id,
+            "asset",
+            dummy_id("CwsLCwsLCwsLCwsLCwsLCw"),
+            dummy_id("DAwMDAwMDAwMDAwMDAwMDA"),
+            "chart.svg",
+            &payload,
+        );
+        assert!(store.append_event(&room_id, &event).expect("append asset"));
+        let owner = signing_key(0x11);
+        pin_owner_key(&store, &room_id, &owner);
+        sign_manifest_as(&mut event, &signing_key(0x22));
+        assert!(
+            !hydrated(&store, &room_id, &mut event),
+            "a forged asset must not render inside the owner's document"
+        );
+        drop(tmp);
+    }
+
+    #[test]
+    fn a_document_snapshot_in_a_room_with_no_pinned_key_is_unchanged() {
+        // v2 rooms and v3 rooms joined before invites carried an owner key
+        // have no way to establish authorship. They must keep working rather
+        // than lose their documents to a check they cannot satisfy.
+        let (_tmp, store, room_id, mut event) = document_snapshot_case();
+        assert!(
+            hydrated(&store, &room_id, &mut event),
+            "a room with no pinned key must behave as it did before"
+        );
     }
 
     #[test]

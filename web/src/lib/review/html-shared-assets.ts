@@ -1,9 +1,10 @@
 import { UNRESOLVED_SHARED_IMAGE_SRC } from './shared-image-policy';
 
 /**
- * Rewrites only share-bound HTML image URLs. The source remains inside a
- * sandboxed opaque-origin iframe; remote, data, and absent local references
- * become a non-decodable local fallback, so they cannot create a network path.
+ * Rewrites HTML image URLs through the caller's policy. The source remains
+ * inside a sandboxed opaque-origin iframe; rejected sources become a
+ * non-decodable local fallback. Reviewers may explicitly approve HTTPS images
+ * for a session, but that must never make data or unsafe schemes fetchable.
  */
 export function rewriteSharedHtmlImageSources(
   content: string,
@@ -11,9 +12,13 @@ export function rewriteSharedHtmlImageSources(
 ): string {
   if (!resolveAssetUrl || typeof DOMParser === 'undefined') return content;
   const document = new DOMParser().parseFromString(content, 'text/html');
-  for (const image of document.querySelectorAll<HTMLImageElement>('img[src]')) {
-    const resolved = resolveAssetUrl(image.getAttribute('src') ?? '');
-    image.setAttribute('src', resolved ?? UNRESOLVED_SHARED_IMAGE_SRC);
+  for (const image of document.querySelectorAll<HTMLImageElement>('img')) {
+    const src = image.getAttribute('src');
+    if (src !== null) {
+      const resolved = resolveAssetUrl(src);
+      image.setAttribute('src', resolved ?? UNRESOLVED_SHARED_IMAGE_SRC);
+    }
+    image.setAttribute('referrerpolicy', 'no-referrer');
   }
   for (const source of document.querySelectorAll<HTMLSourceElement>('img[srcset], source[srcset]')) {
     const srcset = source.getAttribute('srcset');

@@ -79,6 +79,10 @@ export function imageNodeView(
   dom.className = 'md-image';
 
   const img = document.createElement('img');
+  // The owner workspace may render an authored HTTPS image, and a reviewer
+  // can explicitly enable one for this tab. Either way, the image host must
+  // not learn which document or share URL sent the reader there.
+  img.setAttribute('referrerpolicy', 'no-referrer');
 
   // Built once and only ever re-texted, so `update()` never has to remove
   // children — and so the placeholder occupies no space until it is needed.
@@ -146,11 +150,10 @@ export function imageNodeView(
     const title = typeof current.attrs.title === 'string' ? current.attrs.title : '';
 
     const resolved = resolveAssetUrl ? resolveAssetUrl(src) : null;
-    // A share resolver declining a source is a policy decision, not an
-    // invitation for the browser to try the authored URL. In particular,
-    // remote/data URLs and missing local assets must retain the image fallback
-    // without receiving an ambient network fetch capability. Editors with no
-    // resolver retain the historical authored-src behavior.
+    // A resolver declining a source is a policy decision, not an invitation
+    // for the browser to try the authored URL. Missing local assets and every
+    // non-HTTPS remote shape retain the fallback; a caller can return an
+    // approved HTTPS URL only after applying its own owner/reviewer policy.
     const display = resolveAssetUrl ? (resolved ?? UNRESOLVED_SHARED_IMAGE_SRC) : src;
 
     // Set only when there is one, matching the `title` handling below and the

@@ -17,5 +17,10 @@ assertEqual(
   ` ${UNRESOLVED_SHARED_IMAGE_SRC} 1x`,
   'unresolved data source becomes a no-network fallback',
 );
+assertEqual(
+  rewriteSrcset('https://images.example.test/chart.png 1x', (src) => src.startsWith('https://') ? src : null),
+  'https://images.example.test/chart.png 1x',
+  'a caller-approved HTTPS source stays intact',
+);
 
-console.log('html-shared-assets: 2 passed, 0 failed');
+console.log('html-shared-assets: 3 passed, 0 failed');

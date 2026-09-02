@@ -178,7 +178,37 @@ async function expectBlockedRemoteImage(page: Page, label: string): Promise<void
   }
 }
 
-async function expectResolvedSharedHtmlImages(page: Page, label: string): Promise<void> {
+async function expectAttemptedExternalImage(page: Page, label: string): Promise<void> {
+  const image = page.locator(`.md-image[data-src="${remoteImageSource}"] img`);
+  await image.waitFor({ state: 'attached', timeout: 60_000 });
+  await page.waitForFunction(
+    (source) => {
+      const imageElement = document.querySelector(`.md-image[data-src="${source}"] img`);
+      return imageElement?.getAttribute('src') === source
+        && imageElement.parentElement?.getAttribute('data-broken') === 'true';
+    },
+    remoteImageSource,
+    { timeout: 60_000 },
+  );
+  const detail = await image.evaluate((element) => ({
+    src: element.getAttribute('src'),
+    referrerPolicy: element.getAttribute('referrerpolicy'),
+    broken: element.parentElement?.getAttribute('data-broken'),
+  }));
+  if (
+    detail.src !== remoteImageSource
+    || detail.referrerPolicy !== 'no-referrer'
+    || detail.broken !== 'true'
+  ) {
+    throw new Error(`${label} did not attempt the approved HTTPS image safely: ${JSON.stringify(detail)}`);
+  }
+}
+
+async function expectResolvedSharedHtmlImages(
+  page: Page,
+  label: string,
+  externalImagesEnabled = false,
+): Promise<void> {
   const frame = page.frameLocator('[data-slot="html-viewer"] iframe');
   const verified = frame.locator('#verified-html-image');
   await expect(verified).toBeVisible({ timeout: 60_000 });
@@ -191,13 +221,19 @@ async function expectResolvedSharedHtmlImages(page: Page, label: string): Promis
   await expect(pictureImage).toHaveJSProperty('naturalWidth', 1, { timeout: 60_000 });
   const source = frame.locator('#verified-html-source');
   const srcset = await source.getAttribute('srcset');
-  if (!srcset?.includes('data:image/png;base64,') || !srcset.includes(unresolvedImageSource)) {
+  const expectedRemoteSrcset = externalImagesEnabled ? remoteImageSource : unresolvedImageSource;
+  if (!srcset?.includes('data:image/png;base64,') || !srcset.includes(expectedRemoteSrcset)) {
     throw new Error(`${label} did not rewrite picture srcset safely: ${JSON.stringify(srcset)}`);
   }
 
   const remote = frame.locator('#remote-html-image');
-  await expect(remote).toHaveAttribute('src', unresolvedImageSource, { timeout: 60_000 });
+  await expect(remote).toHaveAttribute(
+    'src',
+    externalImagesEnabled ? remoteImageSource : unresolvedImageSource,
+    { timeout: 60_000 },
+  );
   await expect(remote).toHaveJSProperty('naturalWidth', 0, { timeout: 60_000 });
+  await expect(remote).toHaveAttribute('referrerpolicy', 'no-referrer');
   const sandbox = await page.locator('[data-slot="html-viewer"] iframe').getAttribute('sandbox');
   if (sandbox?.includes('allow-same-origin')) {
     throw new Error(`${label} weakened the opaque-origin HTML sandbox: ${sandbox}`);
@@ -241,7 +277,28 @@ async function createInvite(owner: Page, options: { selectAll?: boolean } = {}):
   await dialog.waitFor({ state: 'visible' });
   if (options.selectAll) await dialog.getByRole('button', { name: 'Select all' }).click();
   await dialog.getByRole('button', { name: /Create review link/u }).click();
-  await dialog.locator('select[aria-label="What this link allows"]').selectOption('suggest');
+  const tierPicker = dialog.locator('select[aria-label="What this link allows"]');
+  try {
+    await tierPicker.selectOption('suggest', { timeout: 30_000 });
+  } catch (error) {
+    const resume = dialog.getByRole('button', { name: 'Resume publishing' });
+    if (await resume.isVisible().catch(() => false)) {
+      // A fresh browser workspace can race its writer lease on the first
+      // publish. Exercise the product's recoverable resume action rather
+      // than turning that transient fence into a false image-test failure.
+      await resume.click();
+      await tierPicker.selectOption('suggest', { timeout: 60_000 });
+      return finishInvite(owner, dialog);
+    }
+    throw new Error(
+      `review link did not become ready: ${JSON.stringify((await dialog.textContent() ?? '').trim())}`,
+      { cause: error },
+    );
+  }
+  return finishInvite(owner, dialog);
+}
+
+async function finishInvite(owner: Page, dialog: ReturnType<Page['getByRole']>): Promise<string> {
   const chip = dialog.locator('.share-link-chip');
   await chip.click();
   const invite = await chip.locator('code').textContent();
@@ -473,12 +530,12 @@ async function main(): Promise<void> {
   ]);
   await imageOwner.getByRole('button', { name: 'review.md', exact: true }).waitFor({ state: 'visible' });
   await expectResolvedSharedImage(imageOwner, 'local owner');
-  await expectBlockedRemoteImage(imageOwner, 'local owner');
+  await expectAttemptedExternalImage(imageOwner, 'local owner');
   await imageOwner.getByRole('button', { name: 'preview.html', exact: true }).click();
-  await expectResolvedSharedHtmlImages(imageOwner, 'local owner HTML document');
+  await expectResolvedSharedHtmlImages(imageOwner, 'local owner HTML document', true);
   await imageOwner.getByRole('button', { name: 'review.md', exact: true }).click();
-  if (remoteRequests.length > 0) {
-    throw new Error(`local owner fetched a blocked remote image: ${JSON.stringify(remoteRequests)}`);
+  if (remoteRequests.length === 0) {
+    throw new Error('local owner did not request the approved remote image');
   }
   const imageInvite = await createInvite(imageOwner, { selectAll: true });
 
@@ -492,8 +549,12 @@ async function main(): Promise<void> {
   await imageReviewer.getByRole('button', { name: /review\.md/u }).click();
   await expectResolvedSharedImage(imageReviewer, 'live invited reviewer');
   await expectBlockedRemoteImage(imageReviewer, 'live invited reviewer');
+  const loadExternalImages = imageReviewer.getByRole('button', { name: 'Load external images for this review' });
+  await loadExternalImages.waitFor({ state: 'visible' });
+  await loadExternalImages.click();
+  await expectAttemptedExternalImage(imageReviewer, 'opted-in invited reviewer');
   await imageReviewer.getByRole('button', { name: /preview\.html/u }).click();
-  await expectResolvedSharedHtmlImages(imageReviewer, 'live invited reviewer HTML document');
+  await expectResolvedSharedHtmlImages(imageReviewer, 'opted-in invited reviewer HTML document', true);
 
   // A second reviewer tab owns a distinct in-memory Blob registry.
   const follower = await reviewerContext.newPage();
@@ -547,13 +608,12 @@ async function main(): Promise<void> {
   if (diagnostics.some((line) => /\[attn drift\]/u.test(line))) {
     throw new Error(`projection drift detected:\n${diagnostics.filter((line) => /\[attn drift\]/u.test(line)).join('\n')}`);
   }
-  // The blocked image source intentionally uses a malformed local data URL so
-  // the existing image fallback card appears without issuing a network fetch.
-  // Chromium reports that parse failure on the console; the DOM assertions
-  // above prove it is exactly this policy fallback, not a failed shared asset.
+  // The blocked sources use a malformed local data URL, while the approved
+  // HTTPS fixture intentionally cannot resolve. The DOM assertions above
+  // distinguish a local policy fallback from an attempted external request.
   const browserErrors = diagnostics.filter((line) => (
     /(?:page error:|console error:)/u.test(line)
-    && !/console error: Failed to load resource: net::ERR_(?:INVALID_URL|FILE_NOT_FOUND)/u.test(line)
+    && !/console error: Failed to load resource: net::ERR_(?:INVALID_URL|FILE_NOT_FOUND|NAME_NOT_RESOLVED)/u.test(line)
   ));
   if (browserErrors.length > 0) {
     throw new Error(`browser errors detected:\n${browserErrors.join('\n')}`);

@@ -61,7 +61,9 @@
   import { deriveFileEntries, latestRenderableSnapshotId } from './lib/review/file-nav';
   import { reviewerStatusPresentation } from './lib/review/reviewer-status-model';
   import { buildSharedAssetResolver } from './lib/review/asset-resolution';
+  import { approvedExternalImageUrl } from './lib/review/external-image-policy';
   import { browserAssetRegistry } from './lib/review/browser-asset-registry';
+  import { htmlImageSources, markdownImageSources } from './lib/review/document-image-sources';
   import { reviewStore } from './lib/review/store.svelte';
   import {
     applyReviewHoverHighlight,
@@ -163,6 +165,9 @@
     canRemember: true,
   });
   let collabSetupError = $state<string | null>(null);
+  // This consent is deliberately tab/session-only. A shared document must not
+  // retain a choice that makes a later reader contact a third-party host.
+  let externalImagesEnabled = $state(false);
   const authenticatedOwnerDeviceIds = new Set<string>();
   const reviewerCollabGate = new BrowserReviewerCollabGate((error) => {
     collabSetupError = error.message;
@@ -645,6 +650,13 @@
       ? sessionState.snapshotDocType
       : 'markdown';
   });
+  const reviewHasExternalImages = $derived.by(() => {
+    const content = displayedContent ?? '';
+    const sources = displayedDocType === 'html'
+      ? htmlImageSources(content)
+      : markdownImageSources(content);
+    return sources.some((src) => approvedExternalImageUrl(src) !== null);
+  });
   // The session only puts verified asset metadata in reviewStore; the
   // tab-local asset registry behind this resolver owns the decrypted bytes and
   // their Blob URL lifetime. Read dependencies eagerly so a newly activated
@@ -653,16 +665,28 @@
     const snapshots = reviewStore.snapshots;
     const roomId = sessionState.roomId;
     const docWirePath = displayedSnapshot?.ownerDisplayPath;
-    return buildSharedAssetResolver(snapshots, roomId, docWirePath);
+    const local = buildSharedAssetResolver(snapshots, roomId, docWirePath);
+    const allowExternalImages = externalImagesEnabled;
+    return (src: string): string | null => {
+      const external = approvedExternalImageUrl(src);
+      if (allowExternalImages && external !== null) return external;
+      return local(src);
+    };
   });
   const resolveReviewHtmlAssetUrl = $derived.by(() => {
-    return buildSharedAssetResolver(
+    const local = buildSharedAssetResolver(
       reviewStore.snapshots,
       sessionState.roomId,
       displayedSnapshot?.ownerDisplayPath,
       browserAssetRegistry,
       'opaque-sandbox',
     );
+    const allowExternalImages = externalImagesEnabled;
+    return (src: string): string | null => {
+      const external = approvedExternalImageUrl(src);
+      if (allowExternalImages && external !== null) return external;
+      return local(src);
+    };
   });
 
   $effect(() => {
@@ -1627,6 +1651,23 @@
             {currentFileName}
           </span>
           <div class="ml-auto flex shrink-0 items-center gap-1.5">
+            {#if reviewHasExternalImages}
+              <button
+                type="button"
+                class="inline-flex h-7 items-center rounded-md border px-1.5 font-sans text-label font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50 {externalImagesEnabled
+                  ? 'border-primary/35 bg-primary/10 text-primary hover:bg-primary/15'
+                  : 'border-transparent text-muted-foreground hover:bg-accent hover:text-foreground'}"
+                data-slot="browser-review-external-images"
+                aria-pressed={externalImagesEnabled}
+                aria-label={externalImagesEnabled ? 'External images are on for this review' : 'Load external images for this review'}
+                title={externalImagesEnabled
+                  ? 'External images are on for this review session'
+                  : 'Load HTTPS images directly from their hosts. Those hosts may see your IP address.'}
+                onclick={() => (externalImagesEnabled = !externalImagesEnabled)}
+              >
+                {externalImagesEnabled ? 'External images on' : 'Load images'}
+              </button>
+            {/if}
             <PeerStrip {localParticipantId} onJumpTo={handleJumpToPeer} />
             <ReviewerStatusChip
               presentation={statusPresentation}

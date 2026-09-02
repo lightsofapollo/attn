@@ -28,12 +28,12 @@ blocks written inline in the markdown source.
 
 ## Remote source
 
-Imported workspaces and encrypted shares resolve only files that arrived with
-the workspace. A remote URL is not fetched by a reader&rsquo;s browser, so it cannot
-silently contact an address chosen by the document author.
+An HTTPS image is a normal Markdown source. The workspace owner may load one
+directly; an invited reader chooses whether to load external images for that
+review session, so the image host cannot silently observe a reader&rsquo;s request.
 
 This source is deliberately unavailable. **Expect a placeholder card here** —
-the test is the safe fallback, not remote pixels.
+that proves a network failure, not a blocked remote-image policy.
 
 ![A remote pixel](https://example.com/pixel.png)
 

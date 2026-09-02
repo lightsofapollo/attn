@@ -57,6 +57,7 @@
   import { peerJumpPosition } from '../../lib/peer-strip-format';
   import { attachCollabPresenceSinks } from '../../lib/prosemirror/collab-presence-sinks';
   import { sharedAssetPathFor } from '../../lib/review/asset-resolution';
+  import { approvedExternalImageUrl } from '../../lib/review/external-image-policy';
   import { sharedImageDataUrl } from '../../lib/review/image-data-url';
   import { htmlImageSources, markdownImageSources } from '../../lib/review/document-image-sources';
   import { isSupportedSharedImageMediaType } from '../../lib/review/shared-image-policy';
@@ -393,8 +394,10 @@
   const resolveLocalAssetUrl = $derived.by(() => {
     const documentPath = activeEntry?.path;
     const urls = localAssetUrls;
-    if (!documentPath) return () => null;
     return (src: string): string | null => {
+      const external = approvedExternalImageUrl(src);
+      if (external !== null) return external;
+      if (!documentPath) return null;
       const path = sharedAssetPathFor(documentPath, src);
       return path === null ? null : urls[path] ?? null;
     };
@@ -402,8 +405,10 @@
   const resolveLocalHtmlAssetUrl = $derived.by(() => {
     const documentPath = activeEntry?.path;
     const urls = localHtmlAssetUrls;
-    if (!documentPath) return () => null;
     return (src: string): string | null => {
+      const external = approvedExternalImageUrl(src);
+      if (external !== null) return external;
+      if (!documentPath) return null;
       const path = sharedAssetPathFor(documentPath, src);
       return path === null ? null : urls[path] ?? null;
     };

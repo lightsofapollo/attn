@@ -115,6 +115,7 @@ defineCase('1. the DOM gets the resolved src', () =>
       'displayed src',
     );
     assertEq(img.getAttribute('alt'), 'A diagram', 'alt is carried through');
+    assertEq(img.getAttribute('referrerpolicy'), 'no-referrer', 'image requests send no referrer');
   }),
 );
 

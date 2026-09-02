@@ -29,6 +29,11 @@ assertEq(
   true,
   'script-src permits only WebAssembly compilation',
 );
+assertEq(
+  staging.includes("img-src 'self' blob: data: https:"),
+  true,
+  'HTTPS images are the only remote render capability',
+);
 
 // The theme-preflight hash and the script it admits must never drift. If they
 // do, the browser silently blocks the inline stamp and the ~1.2s paper-white

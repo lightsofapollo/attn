@@ -403,8 +403,11 @@ test('asset entries render inline previews and download-only placeholders', asyn
   // Safe rasters render inline from (mock-)decrypted bytes.
   await expect(page.locator('.asset-image')).toBeVisible();
   await page.goto('/app/w/ws-product/data/notes.json?shell=demo');
-  await expect(page.locator('.hosted-native-document .eyebrow')).toHaveText('Download only');
-  await expect(page.locator('.asset-preview')).toContainText('never executed');
+  await expect(page.locator('.hosted-native-document > .eyebrow')).toHaveCount(0);
+  await expect(page.locator('.download-only-card h1')).toHaveText('notes.json');
+  await expect(page.locator('.download-only-path')).toHaveText('data/notes.json');
+  await expect(page.locator('.download-only-card h2')).toHaveCount(0);
+  await expect(page.locator('.download-only-card')).toContainText('This file stays inert in the browser');
   await expect(page.locator('.hosted-native-document').getByRole('button', { name: 'Download' })).toBeVisible();
 });
 

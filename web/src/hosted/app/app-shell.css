@@ -979,7 +979,7 @@
    useful action dominant without turning the entire reading sheet into an
    empty dashed drop zone. */
 .download-only-path {
-  margin: -0.75rem 0 0;
+  margin: 0.35rem 0 0;
   color: var(--hosted-muted);
   font: 0.78rem/1.45 var(--mono);
   overflow-wrap: anywhere;
@@ -1016,11 +1016,19 @@
   font: 600 1.25rem/1 var(--serif);
 }
 
-.download-only-card h2 {
+.download-only-card h1 {
   margin: 0;
   font-size: 1.25rem;
   line-height: 1.2;
   letter-spacing: -0.015em;
+}
+
+.download-only-title {
+  overflow-wrap: anywhere;
+}
+
+.download-only-intro .download-only-path {
+  margin-top: 0.35rem;
 }
 
 .download-only-intro p {

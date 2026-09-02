@@ -32,10 +32,10 @@ An HTTPS image is a normal Markdown source. The workspace owner may load one
 directly; an invited reader chooses whether to load external images for that
 review session, so the image host cannot silently observe a reader&rsquo;s request.
 
-This source is deliberately unavailable. **Expect a placeholder card here** —
-that proves a network failure, not a blocked remote-image policy.
+This image is hosted remotely. The owner workspace should request it directly;
+an invited reader should see the placeholder until they choose **Load images**.
 
-![A remote pixel](https://example.com/pixel.png)
+![A remote landscape](https://images.pexels.com/photos/35227957/pexels-photo-35227957.jpeg)
 
 ## Missing file
 

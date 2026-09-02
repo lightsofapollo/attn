@@ -3403,14 +3403,12 @@
       {/if}
     {:else if activeEntry && activeEntry.presentation !== 'editable'}
       {#if activeEntry.presentation === 'download-only'}
-        <div class="eyebrow">Download only</div>
-        <h1>{entryBasename(activeEntry)}</h1>
-        <p class="download-only-path">{activeEntry.path}</p>
         <section class="download-only-card" aria-labelledby="download-only-heading">
           <div class="download-only-intro">
             <span class="download-only-mark" aria-hidden="true">↓</span>
             <div>
-              <h2 id="download-only-heading">Ready for a local copy</h2>
+              <h1 id="download-only-heading" class="download-only-title">{entryBasename(activeEntry)}</h1>
+              <p class="download-only-path">{activeEntry.path}</p>
               <p>This file stays inert in the browser. Download it to use it in the right tool.</p>
             </div>
           </div>

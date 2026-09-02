@@ -5,6 +5,7 @@ import {
   MAX_SHARED_IMAGE_BYTES,
   MAX_SHARED_IMAGE_COUNT,
   MAX_SHARED_IMAGE_TOTAL_BYTES,
+  UNRESOLVED_SHARED_IMAGE_SRC,
 } from './shared-image-policy';
 
 function assert(value: unknown, message: string): asserts value {
@@ -27,5 +28,6 @@ assert(!hasSafeSharedImageDimensions(png, 'image/png'), 'oversized raster dimens
 assert(!hasSafeSharedImageDimensions(new Uint8Array(8), 'image/png'), 'unknown raster dimensions fail closed');
 assert(MAX_SHARED_IMAGE_BYTES === 3 * 1024 * 1024, 'single-image cap preserves encrypted-envelope headroom');
 assert(MAX_SHARED_IMAGE_COUNT === 64 && MAX_SHARED_IMAGE_TOTAL_BYTES === 16 * 1024 * 1024, 'aggregate image budgets are bounded');
+assert(UNRESOLVED_SHARED_IMAGE_SRC === 'data:;base64,', 'rejected image sources remain local and non-decodable');
 
 console.log('shared-image-policy: 12 passed, 0 failed');

@@ -40,6 +40,10 @@ registry.stage({
 });
 registry.activateManifest('room-a', [assetEntry()]);
 assert(registry.urlFor('room-a', 'snapshot-a') === 'blob:test-1', 'bound asset receives a Blob URL');
+assert(
+  registry.dataUrlFor('room-a', 'snapshot-a')?.startsWith('data:image/png;base64,iVBORw0KGgo') === true,
+  'bound asset also has a sandbox-safe data URL',
+);
 assert(source.every((byte) => byte === 0), 'source bytes are zeroed after the Blob takes a copy');
 
 const unbound = pngBytes();
@@ -71,7 +75,8 @@ assert(revoked.includes('blob:test-1'), 'replaced URLs are revoked');
 
 registry.clearRoom('room-a');
 assert(registry.urlFor('room-a', 'snapshot-c') === null, 'room teardown clears active URLs');
+assert(registry.dataUrlFor('room-a', 'snapshot-c') === null, 'room teardown clears active data URLs');
 assert(revoked.includes('blob:test-2'), 'room teardown revokes active URLs');
 assert(unbound.every((byte) => byte === 0), 'room teardown zeroes pending bytes');
 
-console.log('browser-asset-registry: 10 passed, 0 failed');
+console.log('browser-asset-registry: 12 passed, 0 failed');

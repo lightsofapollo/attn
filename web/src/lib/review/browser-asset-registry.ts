@@ -15,6 +15,7 @@ import {
   MAX_SHARED_IMAGE_COUNT,
   MAX_SHARED_IMAGE_TOTAL_BYTES,
 } from './shared-image-policy';
+import { sharedImageDataUrl } from './image-data-url';
 
 export interface VerifiedBrowserAsset {
   roomId: string;
@@ -30,6 +31,10 @@ interface ActiveAsset {
   snapshotId: string;
   path: string;
   url: string;
+  // Opaque sandboxed HTML frames cannot fetch a parent-origin Blob URL. This
+  // transient representation is therefore only used by HtmlViewer; Markdown
+  // continues to use `url` and gets Blob lifetime management.
+  htmlDataUrl: string;
   byteLength: number;
 }
 
@@ -113,6 +118,7 @@ export class BrowserAssetRegistry {
           snapshotId: pending.snapshotId,
           path: pending.path,
           url,
+          htmlDataUrl: sharedImageDataUrl(pending.mediaType, pending.bytes),
           byteLength: pending.bytes.length,
         };
         this.activeBySnapshot.set(key, active);
@@ -128,6 +134,11 @@ export class BrowserAssetRegistry {
 
   urlFor(roomId: string, snapshotId: string): string | null {
     return this.activeBySnapshot.get(snapshotKey(roomId, snapshotId))?.url ?? null;
+  }
+
+  /** A runtime-only data URL for an image inside an opaque sandboxed iframe. */
+  dataUrlFor(roomId: string, snapshotId: string): string | null {
+    return this.activeBySnapshot.get(snapshotKey(roomId, snapshotId))?.htmlDataUrl ?? null;
   }
 
   clearRoom(roomId: string): void {

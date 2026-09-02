@@ -142,10 +142,10 @@ defineCase('3. with no resolver the authored src is used verbatim', () =>
   }),
 );
 
-defineCase('4. a src the resolver declines falls back to the authored string', () =>
+defineCase('4. a src the resolver declines becomes a no-network fallback', () =>
   withFakeDocument(() => {
     const { img } = mount(imageNode('![a](./diagram.png)'), () => null);
-    assertEq(img.getAttribute('src'), './diagram.png', 'null means "leave it alone"');
+    assertEq(img.getAttribute('src'), 'data:;base64,', 'blocked source');
   }),
 );
 

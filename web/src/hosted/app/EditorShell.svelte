@@ -57,6 +57,7 @@
   import { peerJumpPosition } from '../../lib/peer-strip-format';
   import { attachCollabPresenceSinks } from '../../lib/prosemirror/collab-presence-sinks';
   import { sharedAssetPathFor } from '../../lib/review/asset-resolution';
+  import { sharedImageDataUrl } from '../../lib/review/image-data-url';
   import { htmlImageSources, markdownImageSources } from '../../lib/review/document-image-sources';
   import { isSupportedSharedImageMediaType } from '../../lib/review/shared-image-policy';
   import LoadingLine from './LoadingLine.svelte';
@@ -381,10 +382,24 @@
   // remain the source of truth and a missing/rejected asset keeps the normal
   // image fallback.
   let localAssetUrls = $state<Record<string, string>>({});
-  let ownedAssetUrls = new Map<string, string>();
+  let localHtmlAssetUrls = $state<Record<string, string>>({});
+  interface LocalAssetUrl {
+    blobUrl: string;
+    htmlDataUrl: string;
+  }
+  let ownedAssetUrls = new Map<string, LocalAssetUrl>();
   const resolveLocalAssetUrl = $derived.by(() => {
     const documentPath = activeEntry?.path;
     const urls = localAssetUrls;
+    if (!documentPath) return () => null;
+    return (src: string): string | null => {
+      const path = sharedAssetPathFor(documentPath, src);
+      return path === null ? null : urls[path] ?? null;
+    };
+  });
+  const resolveLocalHtmlAssetUrl = $derived.by(() => {
+    const documentPath = activeEntry?.path;
+    const urls = localHtmlAssetUrls;
     if (!documentPath) return () => null;
     return (src: string): string | null => {
       const path = sharedAssetPathFor(documentPath, src);
@@ -834,17 +849,22 @@
   });
 
   // Resolve local image dependencies through OPFS into short-lived Blob URLs
-  // for the hosted owner surface. This is intentionally separate from the
-  // encrypted-share registry: local images are never staged as share
-  // snapshots, and share viewers never receive an OPFS-derived URL.
+  // for Markdown and data URLs for the opaque HTML sandbox. This is
+  // intentionally separate from the encrypted-share registry: local images
+  // are never staged as share snapshots, and share viewers never receive an
+  // OPFS-derived URL.
   $effect(() => {
     const entry = activeEntry;
-    const content = bodyText ?? displayText ?? '';
+    // `displayText` is the editor's current buffer while `bodyText` is the
+    // last route/load snapshot. Prefer the live value so a newly authored
+    // relative image resolves before the debounce commits and reloads it.
+    const content = displayText ?? bodyText ?? '';
     const liveAssets = new Map(workspace.entries.map((candidate) => [candidate.path, candidate]));
     if (!entry || (entry.kind !== 'markdown' && entry.kind !== 'html')) {
-      for (const url of ownedAssetUrls.values()) URL.revokeObjectURL(url);
+      for (const asset of ownedAssetUrls.values()) URL.revokeObjectURL(asset.blobUrl);
       ownedAssetUrls = new Map();
       localAssetUrls = {};
+      localHtmlAssetUrls = {};
       return;
     }
     const sources = entry.kind === 'markdown' ? markdownImageSources(content) : htmlImageSources(content);
@@ -858,8 +878,8 @@
     }
     let cancelled = false;
     void (async () => {
-      const next = new Map<string, string>();
-      const created: string[] = [];
+      const next = new Map<string, LocalAssetUrl>();
+      const created: LocalAssetUrl[] = [];
       try {
         for (const path of paths) {
           const retained = ownedAssetUrls.get(path);
@@ -872,33 +892,41 @@
           const bytes = new Uint8Array(result.bytes);
           try {
             const mediaType = result.mediaType;
-            if (!isSupportedSharedImageMediaType(mediaType)) continue;
+            if (!mediaType || !isSupportedSharedImageMediaType(mediaType)) continue;
             const blob = new Blob([bytes.buffer as ArrayBuffer], { type: mediaType });
-            const url = URL.createObjectURL(blob);
-            created.push(url);
-            next.set(path, url);
+            const asset = {
+              blobUrl: URL.createObjectURL(blob),
+              htmlDataUrl: sharedImageDataUrl(mediaType, bytes),
+            };
+            created.push(asset);
+            next.set(path, asset);
           } finally {
             bytes.fill(0);
           }
         }
         if (cancelled) {
-          for (const url of created) URL.revokeObjectURL(url);
+          for (const asset of created) URL.revokeObjectURL(asset.blobUrl);
           return;
         }
-        for (const [path, url] of ownedAssetUrls) {
-          if (!next.has(path)) URL.revokeObjectURL(url);
+        for (const [path, asset] of ownedAssetUrls) {
+          if (!next.has(path)) URL.revokeObjectURL(asset.blobUrl);
         }
         ownedAssetUrls = next;
-        localAssetUrls = Object.fromEntries(next);
+        localAssetUrls = Object.fromEntries(
+          [...next].map(([path, asset]) => [path, asset.blobUrl]),
+        );
+        localHtmlAssetUrls = Object.fromEntries(
+          [...next].map(([path, asset]) => [path, asset.htmlDataUrl]),
+        );
       } catch {
-        for (const url of created) URL.revokeObjectURL(url);
+        for (const asset of created) URL.revokeObjectURL(asset.blobUrl);
       }
     })();
     return () => { cancelled = true; };
   });
 
   $effect(() => () => {
-    for (const url of ownedAssetUrls.values()) URL.revokeObjectURL(url);
+    for (const asset of ownedAssetUrls.values()) URL.revokeObjectURL(asset.blobUrl);
     ownedAssetUrls.clear();
   });
 
@@ -3330,7 +3358,7 @@
         <HtmlViewer
           content={bodyText ?? displayText ?? ''}
           allowScripts={false}
-          resolveAssetUrl={resolveLocalAssetUrl}
+          resolveAssetUrl={resolveLocalHtmlAssetUrl}
           annotate={htmlAnnotatable}
           annotationEvents={htmlAnnotationEvents}
           onBridge={(bridge) => (htmlBridge = bridge)}

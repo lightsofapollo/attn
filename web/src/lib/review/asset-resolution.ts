@@ -18,7 +18,13 @@
 // existing base64 bridge as a backwards-compatible rendering fallback.
 
 import type { ReviewSnapshot } from '../types';
-import { browserAssetRegistry, type BrowserAssetRegistry } from './browser-asset-registry';
+import { browserAssetRegistry } from './browser-asset-registry';
+
+/** The narrow runtime capability a shared-image resolver needs from a tab. */
+export interface SharedAssetUrlRegistry {
+  urlFor(roomId: string, snapshotId: string): string | null;
+  dataUrlFor(roomId: string, snapshotId: string): string | null;
+}
 
 /** `scheme:` — 2+ chars so a `C:` drive letter is not mistaken for one.
  *  Mirrors `is_non_local` in src/review/assets.rs. */
@@ -127,7 +133,8 @@ export function buildSharedAssetResolver(
   snapshots: readonly ReviewSnapshot[],
   roomId: string | null,
   docWirePath: string | null | undefined,
-  registry: BrowserAssetRegistry = browserAssetRegistry,
+  registry: SharedAssetUrlRegistry = browserAssetRegistry,
+  renderTarget: 'document' | 'opaque-sandbox' = 'document',
 ): (src: string) => string | null {
   if (!roomId || !docWirePath) return () => null;
 
@@ -157,7 +164,9 @@ export function buildSharedAssetResolver(
     // Browser sessions intentionally do not put asset payloads on a
     // ReviewSnapshot. Their hash- and manifest-bound bytes live only in the
     // tab-local registry; native keeps its existing `assetContent` bridge.
-    const url = registry.urlFor(roomId, snapshot.snapshotId)
+    const url = (renderTarget === 'opaque-sandbox'
+      ? registry.dataUrlFor(roomId, snapshot.snapshotId)
+      : registry.urlFor(roomId, snapshot.snapshotId))
       ?? assetDataUrl(snapshot.mediaType, snapshot.assetContent);
     urls.set(snapshot.snapshotId, url);
     return url;

@@ -61,6 +61,7 @@
   import { deriveFileEntries, latestRenderableSnapshotId } from './lib/review/file-nav';
   import { reviewerStatusPresentation } from './lib/review/reviewer-status-model';
   import { buildSharedAssetResolver } from './lib/review/asset-resolution';
+  import { browserAssetRegistry } from './lib/review/browser-asset-registry';
   import { reviewStore } from './lib/review/store.svelte';
   import {
     applyReviewHoverHighlight,
@@ -653,6 +654,15 @@
     const roomId = sessionState.roomId;
     const docWirePath = displayedSnapshot?.ownerDisplayPath;
     return buildSharedAssetResolver(snapshots, roomId, docWirePath);
+  });
+  const resolveReviewHtmlAssetUrl = $derived.by(() => {
+    return buildSharedAssetResolver(
+      reviewStore.snapshots,
+      sessionState.roomId,
+      displayedSnapshot?.ownerDisplayPath,
+      browserAssetRegistry,
+      'opaque-sandbox',
+    );
   });
 
   $effect(() => {
@@ -1706,7 +1716,7 @@
                 <HtmlViewer
                   content={displayedContent ?? ''}
                   allowScripts={false}
-                  resolveAssetUrl={resolveReviewAssetUrl}
+                  resolveAssetUrl={resolveReviewHtmlAssetUrl}
                   annotate={htmlAnnotatable}
                   annotationEvents={htmlAnnotationEvents}
                   onBridge={(bridge) => (htmlBridge = bridge)}

@@ -43,6 +43,7 @@
 
 import type { Node as PmNode } from 'prosemirror-model';
 import type { NodeView } from 'prosemirror-view';
+import { UNRESOLVED_SHARED_IMAGE_SRC } from '../review/shared-image-policy';
 
 /** Last path segment of an authored src, decoded for display. Used only in the
  *  placeholder — a reader recognises `diagram.png`, not the whole URL. */
@@ -145,10 +146,12 @@ export function imageNodeView(
     const title = typeof current.attrs.title === 'string' ? current.attrs.title : '';
 
     const resolved = resolveAssetUrl ? resolveAssetUrl(src) : null;
-    // A src the resolver declines stays as authored: it may still be a URL the
-    // webview understands, and a wrong-but-plausible attn:// URL would be a
-    // worse answer than the authored one.
-    const display = resolved ?? src;
+    // A share resolver declining a source is a policy decision, not an
+    // invitation for the browser to try the authored URL. In particular,
+    // remote/data URLs and missing local assets must retain the image fallback
+    // without receiving an ambient network fetch capability. Editors with no
+    // resolver retain the historical authored-src behavior.
+    const display = resolveAssetUrl ? (resolved ?? UNRESOLVED_SHARED_IMAGE_SRC) : src;
 
     // Set only when there is one, matching the `title` handling below and the
     // stock spec: prosemirror-markdown declares `alt: { default: null }` and

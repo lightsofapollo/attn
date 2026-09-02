@@ -7,6 +7,12 @@ export const MAX_SHARED_IMAGE_COUNT = 64;
 export const MAX_SHARED_IMAGE_TOTAL_BYTES = 16 * 1024 * 1024;
 export const MAX_SHARED_IMAGE_PIXELS = 40_000_000;
 
+/** A local, deliberately non-decodable image source. Renderers use this when
+ * a share resolver cannot bind an authored src to verified asset bytes: it
+ * produces the existing image fallback without giving untrusted HTML or
+ * Markdown an ambient network request capability. */
+export const UNRESOLVED_SHARED_IMAGE_SRC = 'data:;base64,';
+
 const IMAGE_MEDIA_TYPES = new Set([
   'image/png',
   'image/jpeg',

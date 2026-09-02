@@ -1,7 +1,9 @@
+import { UNRESOLVED_SHARED_IMAGE_SRC } from './shared-image-policy';
+
 /**
  * Rewrites only share-bound HTML image URLs. The source remains inside a
  * sandboxed opaque-origin iframe; remote, data, and absent local references
- * remain untouched so no new network capability is introduced here.
+ * become a non-decodable local fallback, so they cannot create a network path.
  */
 export function rewriteSharedHtmlImageSources(
   content: string,
@@ -11,7 +13,7 @@ export function rewriteSharedHtmlImageSources(
   const document = new DOMParser().parseFromString(content, 'text/html');
   for (const image of document.querySelectorAll<HTMLImageElement>('img[src]')) {
     const resolved = resolveAssetUrl(image.getAttribute('src') ?? '');
-    if (resolved !== null) image.setAttribute('src', resolved);
+    image.setAttribute('src', resolved ?? UNRESOLVED_SHARED_IMAGE_SRC);
   }
   for (const source of document.querySelectorAll<HTMLSourceElement>('img[srcset], source[srcset]')) {
     const srcset = source.getAttribute('srcset');
@@ -25,10 +27,33 @@ export function rewriteSrcset(
   srcset: string,
   resolveAssetUrl: (src: string) => string | null,
 ): string {
-  return srcset.split(',').map((candidate) => {
+  return splitSrcsetCandidates(srcset).map((candidate) => {
     const match = /^(\s*)(\S+)([\s\S]*)$/u.exec(candidate);
     if (!match) return candidate;
     const resolved = resolveAssetUrl(match[2]!);
-    return resolved === null ? candidate : `${match[1]}${resolved}${match[3]}`;
+    return `${match[1]}${resolved ?? UNRESOLVED_SHARED_IMAGE_SRC}${match[3]}`;
   }).join(',');
+}
+
+/** A comma separates srcset candidates, except for the one literal comma in
+ * a data URL's metadata/payload boundary. We reject data URLs during rewrite,
+ * but must keep that boundary intact long enough to replace it as one source
+ * rather than accidentally minting two fallback candidates. */
+function splitSrcsetCandidates(srcset: string): string[] {
+  const candidates: string[] = [];
+  let start = 0;
+  let dataBoundarySeen = false;
+  for (let index = 0; index < srcset.length; index += 1) {
+    if (srcset[index] !== ',') continue;
+    const isData = srcset.slice(start).trimStart().toLowerCase().startsWith('data:');
+    if (isData && !dataBoundarySeen) {
+      dataBoundarySeen = true;
+      continue;
+    }
+    candidates.push(srcset.slice(start, index));
+    start = index + 1;
+    dataBoundarySeen = false;
+  }
+  candidates.push(srcset.slice(start));
+  return candidates;
 }

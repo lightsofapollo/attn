@@ -216,6 +216,22 @@
   padding: clamp(2rem, 6vw, 6rem) clamp(1rem, 4vw, 6rem);
 }
 
+/* The loading desk reserves the exact same masthead and content region as the
+   ready desk. Only its content changes, which keeps the first paint still
+   instead of dropping the page when the header arrives. */
+.desk-loading {
+  display: grid;
+  min-height: 0;
+  place-items: center;
+}
+
+.desk-loading-status {
+  color: var(--foreground);
+  font: 600 1.5rem/1.35 var(--serif);
+  letter-spacing: -0.02em;
+  text-align: center;
+}
+
 /* No rule under the title. The eyebrow above it and the whitespace below it
    already separate the head from the page, and a hairline stretched the full
    1300px desk was the loudest line on a page whose own content carries none. */
@@ -958,6 +974,120 @@
   overflow-wrap: anywhere;
 }
 
+/* A download-only file is a real document, not a failed preview. Its card
+   states the boundary plainly, names the file metadata, and makes the one
+   useful action dominant without turning the entire reading sheet into an
+   empty dashed drop zone. */
+.download-only-path {
+  margin: -0.75rem 0 0;
+  color: var(--hosted-muted);
+  font: 0.78rem/1.45 var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.download-only-card {
+  margin-top: 2.25rem;
+  overflow: hidden;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-lg);
+  background: var(--sheet-raised);
+  box-shadow: var(--shadow-soft);
+  font-family: var(--sans);
+}
+
+.download-only-intro {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 1rem;
+  align-items: start;
+  padding: 1.5rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+.download-only-mark {
+  display: grid;
+  width: 2.75rem;
+  height: 2.75rem;
+  place-items: center;
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
+  background: var(--sheet);
+  color: var(--rust);
+  font: 600 1.25rem/1 var(--serif);
+}
+
+.download-only-card h2 {
+  margin: 0;
+  font-size: 1.25rem;
+  line-height: 1.2;
+  letter-spacing: -0.015em;
+}
+
+.download-only-intro p {
+  margin: 0.45rem 0 0;
+  color: var(--hosted-muted);
+  font-size: 0.95rem;
+  line-height: 1.55;
+}
+
+.download-only-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin: 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.download-only-meta > div {
+  min-width: 0;
+  padding: 1rem 1.5rem;
+}
+
+.download-only-meta > div + div {
+  border-left: 1px solid var(--rule);
+}
+
+.download-only-meta dt {
+  color: var(--hosted-muted);
+  font: 600 0.7rem/1.2 var(--sans);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.download-only-meta dd {
+  margin: 0.38rem 0 0;
+  color: var(--ink);
+  font: 0.85rem/1.35 var(--mono);
+  overflow-wrap: anywhere;
+}
+
+.download-only-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 1rem;
+  padding: 1.25rem 1.5rem;
+  background: color-mix(in oklch, var(--sheet) 58%, transparent);
+}
+
+.download-native-link {
+  color: var(--ink);
+  font: 650 0.85rem var(--sans);
+  text-underline-offset: 0.2em;
+}
+
+.download-native-link:hover {
+  color: var(--rust);
+}
+
+.download-only-error {
+  margin: 0;
+  padding: 0.85rem 1.5rem;
+  border-top: 1px solid var(--rule);
+  color: var(--danger-ink);
+  background: color-mix(in oklch, var(--danger-ink) 10%, var(--sheet-raised));
+  font: 0.85rem/1.45 var(--sans);
+}
+
 .review-rail {
   border-left: 1px solid var(--rule);
   background: var(--paper);
@@ -1075,9 +1205,9 @@
   text-align: center;
 }
 
-/* The shell's two loading views have no header row to reserve, so the single
-   centred child owns the whole viewport rather than the 64px masthead band. */
-.app-shell[data-app-view='loading'],
+/* A document-shell chunk still has no header of its own to reserve. The desk
+   loader above deliberately does reserve its masthead, so it uses the normal
+   two-row shell. */
 .app-shell[data-app-view='editor-loading'] {
   grid-template-rows: 1fr;
 }

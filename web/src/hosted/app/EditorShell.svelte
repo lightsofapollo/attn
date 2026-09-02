@@ -374,6 +374,8 @@
   // no-op instead of renaming/deleting whichever file became active.
   let entryActionPath = $state<string | null>(null);
   let railError = $state<string | null>(null);
+  let downloadingActiveEntry = $state(false);
+  let activeEntryDownloadError = $state<string | null>(null);
   let assetInput = $state<HTMLInputElement | undefined>();
   let assetFolderInput = $state<HTMLInputElement | undefined>();
   let previewUrl = $state<string | null>(null);
@@ -1067,11 +1069,22 @@
 
   async function downloadActiveEntry(): Promise<void> {
     const entry = activeEntry;
-    if (!entry) return;
-    const result = await service.readEntryBytes(workspace.id, entry.path);
-    if (!result) return;
-    const basename = entry.path.split('/').pop() ?? entry.path;
-    triggerDownload(document, basename, result.bytes, result.mediaType);
+    if (!entry || downloadingActiveEntry) return;
+    downloadingActiveEntry = true;
+    activeEntryDownloadError = null;
+    try {
+      const result = await service.readEntryBytes(workspace.id, entry.path);
+      if (!result) {
+        activeEntryDownloadError = 'The file could not be read. Please try downloading it again.';
+        return;
+      }
+      const basename = entry.path.split('/').pop() ?? entry.path;
+      triggerDownload(document, basename, result.bytes, result.mediaType);
+    } catch {
+      activeEntryDownloadError = 'The download could not be prepared. Please try again.';
+    } finally {
+      downloadingActiveEntry = false;
+    }
   }
 
   async function exportZip(): Promise<void> {
@@ -2773,6 +2786,19 @@
   function entryBasename(entry: WorkspaceEntry): string {
     return entry.path.split('/').pop() ?? entry.path;
   }
+  function downloadOnlyFormat(entry: WorkspaceEntry): string {
+    const extension = entryBasename(entry).split('.').pop()?.toLowerCase();
+    const names: Record<string, string> = {
+      csv: 'Comma-separated data',
+      json: 'JSON data',
+      pdf: 'PDF document',
+      rs: 'Rust source',
+      zip: 'ZIP archive',
+    };
+    if (extension && names[extension]) return names[extension];
+    if (extension) return `${extension.toUpperCase()} file`;
+    return 'File';
+  }
   function entrySubtitle(entry: WorkspaceEntry): string {
     if (entry.presentation === 'preview') return 'Preview inline';
     if (entry.presentation === 'download-only') return 'Download only';
@@ -3371,34 +3397,61 @@
         <p class="placeholder">Tap to start writing…</p>
       {/if}
     {:else if activeEntry && activeEntry.presentation !== 'editable'}
-      <div class="eyebrow">
-        {activeEntry.presentation === 'preview' ? 'Asset preview' : 'Download only'}
-      </div>
-      <h1>{activeEntry.path}</h1>
-      {#if activeEntry.presentation === 'preview' && previewUrl}
-        <button
-          class="asset-image-button"
-          type="button"
-          aria-label={`View ${activeEntry.path} full screen`}
-          onclick={openLightbox}
-        >
-          <img class="asset-image" src={previewUrl} alt={activeEntry.path} />
-        </button>
-      {:else}
-        <div class="asset-preview">
-          <strong>{activeEntry.path}</strong>
-          {#if activeEntry.presentation === 'preview'}
-            Decrypting preview… · {activeEntry.sizeLabel}
-          {:else}
-            This format is never executed here. Download it or open it in native attn ·
-            {activeEntry.sizeLabel}
+      {#if activeEntry.presentation === 'download-only'}
+        <div class="eyebrow">Download only</div>
+        <h1>{entryBasename(activeEntry)}</h1>
+        <p class="download-only-path">{activeEntry.path}</p>
+        <section class="download-only-card" aria-labelledby="download-only-heading">
+          <div class="download-only-intro">
+            <span class="download-only-mark" aria-hidden="true">↓</span>
+            <div>
+              <h2 id="download-only-heading">Ready for a local copy</h2>
+              <p>This file stays inert in the browser. Download it to use it in the right tool.</p>
+            </div>
+          </div>
+          <dl class="download-only-meta">
+            <div>
+              <dt>Format</dt>
+              <dd>{downloadOnlyFormat(activeEntry)}</dd>
+            </div>
+            <div>
+              <dt>Size</dt>
+              <dd>{activeEntry.sizeLabel}</dd>
+            </div>
+          </dl>
+          <div class="download-only-actions">
+            <button
+              class="button primary"
+              type="button"
+              disabled={downloadingActiveEntry}
+              onclick={() => void downloadActiveEntry()}
+            >
+              {downloadingActiveEntry ? 'Preparing download…' : 'Download file'}
+            </button>
+            <a class="download-native-link" href="/#native">Open in native attn <span aria-hidden="true">↗</span></a>
+          </div>
+          {#if activeEntryDownloadError}
+            <p class="download-only-error" role="alert">{activeEntryDownloadError}</p>
           {/if}
-        </div>
-        <div class="storage-actions">
-          <button class="button" type="button" onclick={() => void downloadActiveEntry()}>
-            Download
+        </section>
+      {:else}
+        <div class="eyebrow">Asset preview</div>
+        <h1>{activeEntry.path}</h1>
+        {#if previewUrl}
+          <button
+            class="asset-image-button"
+            type="button"
+            aria-label={`View ${activeEntry.path} full screen`}
+            onclick={openLightbox}
+          >
+            <img class="asset-image" src={previewUrl} alt={activeEntry.path} />
           </button>
-        </div>
+        {:else}
+          <div class="asset-preview">
+            <strong>{activeEntry.path}</strong>
+            Decrypting preview… · {activeEntry.sizeLabel}
+          </div>
+        {/if}
       {/if}
     {:else}
       <div class="eyebrow">Working draft</div>

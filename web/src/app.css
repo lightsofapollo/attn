@@ -286,8 +286,10 @@ ul.sidebar-tree-menu[data-sidebar] {
     min-height: 34px;
     max-height: 34px;
     margin-bottom: 2px;
+    margin-inline-start: calc(var(--tree-depth, 0) * 20px);
+    width: calc(100% - var(--tree-depth, 0) * 20px);
     padding-right: 10px;
-    padding-left: calc(var(--tree-depth, 0) * 20px + 10px);
+    padding-left: 10px;
     border: 1px solid transparent;
     border-radius: 8px;
     background: color-mix(in oklch, var(--foreground) 19%, transparent);
@@ -923,8 +925,12 @@ ul.sidebar-tree-menu[data-sidebar] {
     min-height: 34px;
     max-height: 34px;
     margin-bottom: 2px;
+    /* Nested disclosure guides belong to the parent branch. Keep the row's
+       fill and active tick inside that guide instead of painting over it. */
+    margin-inline-start: calc(var(--tree-depth, 0) * 20px);
+    width: calc(100% - var(--tree-depth, 0) * 20px);
     padding-right: 10px !important;
-    padding-left: calc(var(--tree-depth, 0) * 20px + 10px) !important;
+    padding-left: 10px !important;
     font-size: 0.875rem;
     line-height: 1;
     border: 1px solid transparent;
@@ -1009,6 +1015,26 @@ ul.sidebar-tree-menu[data-sidebar] {
 
   .sidebar-tree-chevron {
     color: color-mix(in oklch, var(--sidebar-foreground) 72%, transparent);
+    transition: transform var(--t) var(--ease);
+  }
+
+  .sidebar-tree-chevron--open {
+    transform: rotate(90deg);
+  }
+
+  .review-tree-chevron {
+    transition: transform var(--t) var(--ease);
+  }
+
+  .review-tree-chevron--open {
+    transform: rotate(90deg);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .sidebar-tree-chevron,
+    .review-tree-chevron {
+      transition: none;
+    }
   }
 
   .sidebar-tree-icon {

@@ -32,6 +32,7 @@ const appUrl = `http://127.0.0.1:${appPort}`;
 const commentMarker = 'LOCAL-OWNER-REVIEW-COMMENT-9173';
 const suggestionMarker = 'LOCAL-OWNER-REVIEW-SUGGESTION-9173';
 const sharedImageSource = '../images/pixel.png';
+const workingRemoteImageSource = 'https://images.pexels.com/photos/35227957/pexels-photo-35227957.jpeg';
 const remoteImageSource = 'https://images.attn.invalid/remote-share-image.png';
 const unresolvedImageSource = 'data:;base64,';
 const sharedPng = Buffer.from(
@@ -178,6 +179,75 @@ async function expectBlockedRemoteImage(page: Page, label: string): Promise<void
   }
 }
 
+async function expectBlockedApprovedImage(page: Page, label: string): Promise<void> {
+  const image = page.locator(`.md-image[data-src="${workingRemoteImageSource}"] img`);
+  await image.waitFor({ state: 'attached', timeout: 60_000 });
+  await image.waitFor({ state: 'hidden', timeout: 60_000 });
+  const detail = await image.evaluate((element) => ({
+    src: element.getAttribute('src'),
+    broken: element.parentElement?.getAttribute('data-broken'),
+  }));
+  if (detail.src !== unresolvedImageSource || detail.broken !== 'true') {
+    throw new Error(`${label} did not gate the approved remote image before opt-in: ${JSON.stringify(detail)}`);
+  }
+}
+
+async function expectResolvedExternalImage(page: Page, label: string): Promise<void> {
+  const wrapper = page.locator(`.md-image[data-src="${workingRemoteImageSource}"]`);
+  await wrapper.waitFor({ state: 'attached', timeout: 60_000 });
+  await page.waitForFunction(
+    (source) => document.querySelector(`.md-image[data-src="${source}"]`)?.getAttribute('data-loaded') === 'true',
+    workingRemoteImageSource,
+    { timeout: 60_000 },
+  );
+  const image = wrapper.locator('img');
+  const detail = await image.evaluate((element) => {
+    const imageElement = element as HTMLImageElement;
+    return {
+      src: imageElement.getAttribute('src'),
+      width: imageElement.naturalWidth,
+      height: imageElement.naturalHeight,
+      referrerPolicy: imageElement.getAttribute('referrerpolicy'),
+      loaded: imageElement.parentElement?.getAttribute('data-loaded'),
+    };
+  });
+  if (
+    detail.loaded !== 'true'
+    || detail.width !== 1
+    || detail.height !== 1
+    || detail.src !== workingRemoteImageSource
+    || detail.referrerPolicy !== 'no-referrer'
+  ) {
+    throw new Error(`${label} did not render the approved remote image: ${JSON.stringify(detail)}`);
+  }
+}
+
+async function chooseVisibleImport(
+  page: Page,
+  choice: 'Files' | 'Folder',
+  files: { name: string; mimeType: string; buffer: Buffer }[] | string,
+): Promise<void> {
+  await page.getByRole('button', { name: 'Add files', exact: true }).click();
+  const menuItem = page.getByRole('menuitem', { name: new RegExp(`^${choice}\\b`, 'u') });
+  await menuItem.waitFor({ state: 'visible' });
+  const fileChooser = page.waitForEvent('filechooser');
+  await menuItem.click();
+  await (await fileChooser).setFiles(files);
+}
+
+async function routeWorkingRemoteImage(context: BrowserContext): Promise<void> {
+  // Keep the success assertion deterministic in CI while preserving the exact
+  // authored HTTPS URL in the DOM. A manual smoke run against the app itself
+  // still exercises the real Pexels response; this route only avoids making the
+  // lifecycle gate depend on a third-party CDN.
+  await context.route(`${workingRemoteImageSource}**`, (route) => route.fulfill({
+    status: 200,
+    contentType: 'image/png',
+    body: sharedPng,
+    headers: { 'cache-control': 'no-store' },
+  }));
+}
+
 async function expectAttemptedExternalImage(page: Page, label: string): Promise<void> {
   const image = page.locator(`.md-image[data-src="${remoteImageSource}"] img`);
   await image.waitFor({ state: 'attached', timeout: 60_000 });
@@ -234,6 +304,18 @@ async function expectResolvedSharedHtmlImages(
   );
   await expect(remote).toHaveJSProperty('naturalWidth', 0, { timeout: 60_000 });
   await expect(remote).toHaveAttribute('referrerpolicy', 'no-referrer');
+  const approvedRemote = frame.locator('#working-remote-html-image');
+  await expect(approvedRemote).toHaveAttribute(
+    'src',
+    externalImagesEnabled ? workingRemoteImageSource : unresolvedImageSource,
+    { timeout: 60_000 },
+  );
+  if (externalImagesEnabled) {
+    await expect(approvedRemote).toHaveJSProperty('naturalWidth', 1, { timeout: 60_000 });
+    await expect(approvedRemote).toHaveJSProperty('naturalHeight', 1, { timeout: 60_000 });
+  } else {
+    await expect(approvedRemote).toHaveJSProperty('naturalWidth', 0, { timeout: 60_000 });
+  }
   const sandbox = await page.locator('[data-slot="html-viewer"] iframe').getAttribute('sandbox');
   if (sandbox?.includes('allow-same-origin')) {
     throw new Error(`${label} weakened the opaque-origin HTML sandbox: ${sandbox}`);
@@ -349,6 +431,7 @@ async function main(): Promise<void> {
 
   browser = await chromium.launch({ headless: true });
   ownerContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  await routeWorkingRemoteImage(ownerContext);
   // The product correctly asks a first-time owner to choose a display name
   // after a room becomes active. This lifecycle gate is about durable review
   // convergence, so provide that ordinary prerequisite before navigation.
@@ -509,7 +592,7 @@ async function main(): Promise<void> {
       name: 'docs/review.md',
       mimeType: 'text/markdown',
       buffer: Buffer.from(
-        `# Hosted image share\n\n![Verified chart](${sharedImageSource})\n\n![Remote fallback](${remoteImageSource})\n\n`,
+        `# Hosted image share\n\n![Verified chart](${sharedImageSource})\n\n![Remote landscape](${workingRemoteImageSource})\n\n![Remote fallback](${remoteImageSource})\n\n`,
       ),
     },
     {
@@ -522,6 +605,7 @@ async function main(): Promise<void> {
             <source id="verified-html-source" srcset="${sharedImageSource} 1x, ${remoteImageSource} 2x">
             <img id="picture-html-image" src="${sharedImageSource}" alt="Picture chart">
           </picture>
+          <img id="working-remote-html-image" src="${workingRemoteImageSource}" alt="Remote landscape">
           <img id="remote-html-image" src="${remoteImageSource}" alt="Remote fallback">
         </body></html>`,
       ),
@@ -530,7 +614,62 @@ async function main(): Promise<void> {
   ]);
   await imageOwner.getByRole('button', { name: 'review.md', exact: true }).waitFor({ state: 'visible' });
   await expectResolvedSharedImage(imageOwner, 'local owner');
+  await expectResolvedExternalImage(imageOwner, 'local owner');
   await expectAttemptedExternalImage(imageOwner, 'local owner');
+
+  // The visible rail affordance is one trigger with two explicit picker
+  // branches. Exercise both native inputs and retain a nested folder path so
+  // the tree geometry assertion below has a real branch to measure.
+  await chooseVisibleImport(imageOwner, 'Files', [{
+    name: 'chooser-file.md',
+    mimeType: 'text/markdown',
+    buffer: Buffer.from('# Files chooser\n'),
+  }]);
+  try {
+    await imageOwner.locator('[data-path$="/chooser-file.md"]').waitFor({ state: 'visible', timeout: 60_000 });
+  } catch (error) {
+    const debug = await imageOwner.evaluate(() => ({
+      paths: [...document.querySelectorAll('[data-path]')].map((element) => element.getAttribute('data-path')),
+      rail: document.querySelector('.hosted-sidebar-error')?.textContent ?? null,
+      inputs: [...document.querySelectorAll('input[type="file"]')].map((element) => ({
+        multiple: element.hasAttribute('multiple'),
+        directory: element.hasAttribute('webkitdirectory'),
+        files: (element as HTMLInputElement).files?.length ?? 0,
+      })),
+    }));
+    throw new Error(`files chooser import did not land: ${JSON.stringify(debug)}`, { cause: error });
+  }
+  await chooseVisibleImport(
+    imageOwner,
+    'Folder',
+    path.resolve(webRoot, '..', 'tests', 'fixtures', 'chooser-folder'),
+  );
+  const nestedRow = imageOwner.locator('[data-path$="/chooser-folder/chooser-folder.md"]');
+  await nestedRow.waitFor({ state: 'visible', timeout: 60_000 });
+  const folderRow = imageOwner.locator('[data-path$="/chooser-folder"]');
+  await folderRow.waitFor({ state: 'visible', timeout: 60_000 });
+  const deepFolderRow = imageOwner.locator('[data-path$="/chooser-folder/deep"]');
+  await deepFolderRow.waitFor({ state: 'visible', timeout: 60_000 });
+  await expect(deepFolderRow).toHaveAttribute('aria-expanded', 'false');
+  await expect(deepFolderRow.locator('.sidebar-tree-chevron')).not.toHaveClass(/sidebar-tree-chevron--open/u);
+  await expect(folderRow).toHaveAttribute('aria-expanded', 'true');
+  await expect(folderRow.locator('.sidebar-tree-chevron')).toHaveClass(/sidebar-tree-chevron--open/u);
+  const nestedGeometry = await nestedRow.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { marginInlineStart: style.marginInlineStart, width: style.width };
+  });
+  if (nestedGeometry.marginInlineStart === '0px' || nestedGeometry.width === '100%') {
+    throw new Error(`nested file row was not inset from its folder guide: ${JSON.stringify(nestedGeometry)}`);
+  }
+  await folderRow.click();
+  await expect(folderRow).toHaveAttribute('aria-expanded', 'false');
+  await expect(folderRow.locator('.sidebar-tree-chevron')).not.toHaveClass(/sidebar-tree-chevron--open/u);
+  await folderRow.click();
+  await expect(folderRow).toHaveAttribute('aria-expanded', 'true');
+  await deepFolderRow.click();
+  await expect(deepFolderRow).toHaveAttribute('aria-expanded', 'true');
+  await expect(deepFolderRow.locator('.sidebar-tree-chevron')).toHaveClass(/sidebar-tree-chevron--open/u);
+  await expect(folderRow).toHaveAttribute('aria-expanded', 'true');
   await imageOwner.getByRole('button', { name: 'preview.html', exact: true }).click();
   await expectResolvedSharedHtmlImages(imageOwner, 'local owner HTML document', true);
   await imageOwner.getByRole('button', { name: 'review.md', exact: true }).click();
@@ -540,6 +679,7 @@ async function main(): Promise<void> {
   const imageInvite = await createInvite(imageOwner, { selectAll: true });
 
   reviewerContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  await routeWorkingRemoteImage(reviewerContext);
   await reviewerContext.addInitScript(seedProfileDisplayName, { displayName: 'Image review agent' });
   const imageReviewer = await reviewerContext.newPage();
   captureBrowserFailures(imageReviewer, 'image reviewer');
@@ -548,10 +688,12 @@ async function main(): Promise<void> {
   await imageReviewer.waitForFunction(() => document.querySelector('[data-slot="browser-review"]')?.getAttribute('data-authoring-ready') === 'true');
   await imageReviewer.getByRole('button', { name: /review\.md/u }).click();
   await expectResolvedSharedImage(imageReviewer, 'live invited reviewer');
+  await expectBlockedApprovedImage(imageReviewer, 'live invited reviewer');
   await expectBlockedRemoteImage(imageReviewer, 'live invited reviewer');
   const loadExternalImages = imageReviewer.getByRole('button', { name: 'Load external images for this review' });
   await loadExternalImages.waitFor({ state: 'visible' });
   await loadExternalImages.click();
+  await expectResolvedExternalImage(imageReviewer, 'opted-in invited reviewer');
   await expectAttemptedExternalImage(imageReviewer, 'opted-in invited reviewer');
   await imageReviewer.getByRole('button', { name: /preview\.html/u }).click();
   await expectResolvedSharedHtmlImages(imageReviewer, 'opted-in invited reviewer HTML document', true);
@@ -563,6 +705,7 @@ async function main(): Promise<void> {
   await follower.locator('[data-slot="browser-review"]').waitFor({ state: 'visible' });
   await follower.getByRole('button', { name: /review\.md/u }).click();
   await expectResolvedSharedImage(follower, 'follower reviewer tab');
+  await expectBlockedApprovedImage(follower, 'follower reviewer tab');
   await expectBlockedRemoteImage(follower, 'follower reviewer tab');
   await follower.close();
 
@@ -574,6 +717,7 @@ async function main(): Promise<void> {
   await expectResolvedSharedHtmlImages(imageReviewer, 'reloaded invited reviewer HTML document');
   await imageReviewer.getByRole('button', { name: /review\.md/u }).click();
   await expectResolvedSharedImage(imageReviewer, 'reloaded invited reviewer');
+  await expectBlockedApprovedImage(imageReviewer, 'reloaded invited reviewer');
   await expectBlockedRemoteImage(imageReviewer, 'reloaded invited reviewer');
   await reviewerContext.close();
   reviewerContext = null;
@@ -585,6 +729,7 @@ async function main(): Promise<void> {
   await ownerContext.close();
   ownerContext = null;
   offlineReviewerContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  await routeWorkingRemoteImage(offlineReviewerContext);
   await offlineReviewerContext.addInitScript(seedProfileDisplayName, { displayName: 'Offline review agent' });
   const offlineReviewer = await offlineReviewerContext.newPage();
   captureBrowserFailures(offlineReviewer, 'offline reviewer');
@@ -597,11 +742,13 @@ async function main(): Promise<void> {
   await expectResolvedSharedHtmlImages(offlineReviewer, 'owner-offline durable reviewer HTML document');
   await offlineReviewer.getByRole('button', { name: /review\.md/u }).click();
   await expectResolvedSharedImage(offlineReviewer, 'owner-offline durable reviewer');
+  await expectBlockedApprovedImage(offlineReviewer, 'owner-offline durable reviewer');
   await expectBlockedRemoteImage(offlineReviewer, 'owner-offline durable reviewer');
   await offlineReviewer.reload({ waitUntil: 'domcontentloaded' });
   await offlineReviewer.locator('[data-slot="browser-review"]').waitFor({ state: 'visible' });
   await offlineReviewer.waitForFunction(() => document.querySelector('[data-slot="browser-review"]')?.getAttribute('data-owner-online') === 'false');
   await expectResolvedSharedImage(offlineReviewer, 'reloaded owner-offline durable reviewer');
+  await expectBlockedApprovedImage(offlineReviewer, 'reloaded owner-offline durable reviewer');
   await expectBlockedRemoteImage(offlineReviewer, 'reloaded owner-offline durable reviewer');
   step('hosted image share survived follower, reload, and owner-offline durable review');
 

@@ -1354,6 +1354,107 @@
   pointer-events: auto;
 }
 
+/* One import affordance, two explicit choices. The trigger keeps the existing
+   drop-well footprint in the rail while the menu prevents "files" and
+   "folder" from reading as competing actions. */
+.import-chooser-trigger {
+  cursor: pointer;
+}
+
+.import-chooser-trigger--sidebar {
+  display: grid;
+  width: 100%;
+  justify-items: center;
+  align-content: center;
+  gap: 0.15rem;
+  min-height: 74px;
+  padding: 0.7rem 0.55rem;
+  border: 1px dashed color-mix(in oklch, var(--sidebar-foreground) 18%, transparent);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--sidebar-foreground);
+  font: 500 0.7rem var(--sans);
+  text-align: center;
+  transition: background-color 120ms var(--ease), border-color 120ms var(--ease);
+}
+
+.import-chooser-trigger--sidebar:hover {
+  border-color: color-mix(in oklch, var(--sidebar-foreground) 14%, transparent);
+  background: var(--sidebar-accent);
+}
+
+.import-chooser-trigger--sidebar:focus-visible {
+  outline: 2px solid var(--sidebar-ring);
+  outline-offset: 1px;
+}
+
+.import-chooser-trigger--canvas {
+  min-height: 2.25rem;
+  padding: 0.55rem 0.85rem;
+  border: 1px solid color-mix(in oklch, var(--ink) 24%, transparent);
+  border-radius: var(--radius-md);
+  background: var(--sheet-raised);
+  color: var(--ink);
+  font: 650 0.85rem var(--sans);
+  transition: background-color var(--t) var(--ease), border-color var(--t) var(--ease);
+}
+
+.import-chooser-trigger--canvas:hover,
+.import-chooser-trigger--canvas:focus-visible {
+  border-color: var(--rust);
+  background: color-mix(in oklch, var(--sheet-raised) 76%, var(--rust));
+}
+
+.import-chooser-trigger--sheet {
+  width: 100%;
+  min-height: 48px;
+  margin-top: 0.5rem;
+  border: 1px dashed var(--rule);
+  border-radius: var(--radius-md);
+  background: transparent;
+  color: var(--hosted-muted);
+  font: 650 0.85rem var(--sans);
+  transition: border-color var(--t) var(--ease), color var(--t) var(--ease);
+}
+
+.import-chooser-trigger--sheet:hover {
+  border-color: var(--rust);
+  color: var(--ink);
+}
+
+.import-chooser-trigger:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.import-chooser-menu {
+  min-width: 15rem;
+}
+
+.import-chooser-item-copy {
+  display: grid;
+  gap: 0.12rem;
+  min-width: 0;
+}
+
+.import-chooser-item-copy strong {
+  font-weight: 650;
+}
+
+.import-chooser-item-copy small {
+  color: var(--muted-foreground);
+  font-size: 0.7rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .import-chooser-trigger,
+  .import-chooser-trigger--sidebar,
+  .import-chooser-trigger--canvas,
+  .import-chooser-trigger--sheet {
+    transition: none;
+  }
+}
+
 /* One hint, not two. The invitation's own lede already says "or just start
    typing", so the ProseMirror placeholder underneath would say it again — two
    sentences of first-run copy stacked on one empty page. */
@@ -1736,10 +1837,17 @@
 }
 
 .hosted-sidebar-add-group {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.4rem;
+  display: block;
   width: 100%;
+}
+
+.hosted-sidebar-error-action {
+  display: inline-block;
+  margin-top: 0.2rem;
+  color: var(--sidebar-primary);
+  font: 650 0.7rem var(--sans);
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 .hosted-sidebar-add-folder {

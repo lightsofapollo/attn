@@ -45,7 +45,7 @@
         onclick={() => toggle(node.path)}
       >
         <ChevronRight
-          class="review-tree-chevron size-3.5 shrink-0 transition-transform {collapsed.has(node.path) ? '' : 'rotate-90'}"
+          class={`review-tree-chevron size-3.5 shrink-0${collapsed.has(node.path) ? '' : ' review-tree-chevron--open'}`}
           aria-hidden="true"
         />
         <span class="truncate">{node.name}</span>
@@ -105,7 +105,7 @@
     line-height: 1.1;
     text-align: left;
     color: var(--muted-foreground);
-    transition: background-color 0.12s ease, color 0.12s ease;
+    transition: background-color var(--t) var(--ease), color var(--t) var(--ease);
   }
 
   .review-tree-row:hover {
@@ -122,5 +122,11 @@
   .review-tree-folder {
     font-weight: 500;
     color: var(--foreground, inherit);
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .review-tree-row {
+      transition: none;
+    }
   }
 </style>

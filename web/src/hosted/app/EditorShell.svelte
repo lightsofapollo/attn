@@ -62,6 +62,7 @@
   import { htmlImageSources, markdownImageSources } from '../../lib/review/document-image-sources';
   import { isSupportedSharedImageMediaType } from '../../lib/review/shared-image-policy';
   import LoadingLine from './LoadingLine.svelte';
+  import ImportChooser from './ImportChooser.svelte';
   import HtmlViewer from '../../lib/HtmlViewer.svelte';
   import HtmlCommentComposer from '../../lib/HtmlCommentComposer.svelte';
   import type {
@@ -375,6 +376,7 @@
   // no-op instead of renaming/deleting whichever file became active.
   let entryActionPath = $state<string | null>(null);
   let railError = $state<string | null>(null);
+  let importConflict = $state(false);
   let downloadingActiveEntry = $state(false);
   let activeEntryDownloadError = $state<string | null>(null);
   let assetInput = $state<HTMLInputElement | undefined>();
@@ -1004,6 +1006,7 @@
     const wsId = workspace.id;
     const onScreen = (): boolean => workspace.id === wsId;
     railError = null;
+    importConflict = false;
     try {
       await importIntoWorkspace({
         workspaceId: wsId,
@@ -1023,7 +1026,13 @@
     } catch (error) {
       // The rail belongs to whatever is on screen now; an error about a
       // workspace the user has left would read as a failure of this one.
-      if (onScreen()) railError = error instanceof Error ? error.message : String(error);
+      if (onScreen()) {
+        const message = error instanceof Error ? error.message : String(error);
+        importConflict = /entry already exists/iu.test(message);
+        railError = importConflict
+          ? 'That path already exists in this workspace. Open a fresh import to use the current folder contents.'
+          : message;
+      }
     } finally {
       if (assetInput) assetInput.value = '';
     }
@@ -3468,10 +3477,10 @@
       {/if}
     {/if}
       {#if showCanvasInvite}
-        <!-- Not aria-hidden. It holds two buttons and the only visible route
-             back to the desk, and aria-hidden over focusable controls is the
-             "hidden but tabbable" defect, not a fix — assistive tech would be
-             handed a page whose every control it must not describe. -->
+        <!-- Not aria-hidden. It holds the import trigger and the only visible
+             route back to the desk, and aria-hidden over focusable controls is
+             the "hidden but tabbable" defect, not a fix — assistive tech would
+             be handed a page whose controls it must not describe. -->
         <div class="canvas-invite" data-slot="canvas-invite">
           <div class="canvas-invite-card">
             <BrandMark size={40} />
@@ -3485,12 +3494,12 @@
                 : 'Drop a Markdown file or a folder here, or choose one.'}
             </p>
             <div class="canvas-invite-actions">
-              <button class="button primary" type="button" onclick={() => assetInput?.click()}>
-                Choose files
-              </button>
-              <button class="button" type="button" onclick={() => assetFolderInput?.click()}>
-                Choose folder
-              </button>
+              <ImportChooser
+                variant="canvas"
+                label="Choose files or folder"
+                onChooseFiles={() => assetInput?.click()}
+                onChooseFolder={() => assetFolderInput?.click()}
+              />
             </div>
             <p class="canvas-invite-privacy">
               Files stay in this browser profile — nothing is uploaded.
@@ -3697,34 +3706,20 @@
            It is still one real <button>, so the keyboard and pointer paths are
            unchanged; the button is simply the size and shape of the target. -->
       <div class="hosted-sidebar-add-group">
-        <button
-          class="hosted-sidebar-add"
-          type="button"
-          data-action="add-assets"
-          onclick={() => assetInput?.click()}
-        >
-          <svg class="hosted-sidebar-add-glyph" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M12 5v14M5 12h14" />
-          </svg>
-          <span class="hosted-sidebar-add-label">Add files</span>
-          <span class="hosted-sidebar-add-hint">or drop them here</span>
-        </button>
-        <button
-          class="hosted-sidebar-add hosted-sidebar-add-folder"
-          type="button"
-          data-action="add-folder"
-          onclick={() => assetFolderInput?.click()}
-        >
-          <svg class="hosted-sidebar-add-glyph" viewBox="0 0 24 24" aria-hidden="true">
-            <path d="M3.75 7.25h6l1.6 1.8h8.9v8.7a1 1 0 0 1-1 1h-14.5a1 1 0 0 1-1-1z" />
-          </svg>
-          <span class="hosted-sidebar-add-label">Add folder</span>
-          <span class="hosted-sidebar-add-hint">choose a folder</span>
-        </button>
+        <ImportChooser
+          variant="sidebar"
+          label="Add files"
+          hint="or drop them here"
+          onChooseFiles={() => assetInput?.click()}
+          onChooseFolder={() => assetFolderInput?.click()}
+        />
       </div>
     {/if}
     {#if railError}
       <p class="hosted-sidebar-error" role="alert">{railError}</p>
+      {#if importConflict}
+        <a class="hosted-sidebar-error-action" href="/open">Open fresh import</a>
+      {/if}
     {/if}
   </div>
 {/snippet}
@@ -4123,9 +4118,12 @@
         </div>
       {/if}
     {/each}
-    <button class="file-add-row" type="button" onclick={() => assetInput?.click()}>
-      ＋ Add file or asset
-    </button>
+    <ImportChooser
+      variant="sheet"
+      label="＋ Add file or asset"
+      onChooseFiles={() => assetInput?.click()}
+      onChooseFolder={() => assetFolderInput?.click()}
+    />
   </BottomSheet>
 {/if}
 

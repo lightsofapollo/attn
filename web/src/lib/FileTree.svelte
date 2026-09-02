@@ -281,7 +281,10 @@
                     data-path={node.path}
                     style={`--tree-depth: ${depth};`}
                   >
-                    <ChevronRight class="sidebar-tree-chevron size-3.5 shrink-0 transition-transform duration-150 group-data-[state=open]/collapsible:rotate-90" />
+                    <ChevronRight
+                      class={`sidebar-tree-chevron size-3.5 shrink-0${exp ? ' sidebar-tree-chevron--open' : ''}`}
+                      aria-hidden="true"
+                    />
                     {#if folderIcon}
                       <img src={folderIcon} alt="" aria-hidden="true" class="sidebar-tree-icon-image size-3.5 shrink-0" />
                     {:else}

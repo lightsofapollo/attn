@@ -3,6 +3,7 @@
   import { expandPicked, prepareImport } from './import-files';
   import { fileDrop, filesToPicked, type DroppedFile } from './file-drop';
   import type { ImportFileInput, StorageHealth } from './types';
+  import ImportChooser from './ImportChooser.svelte';
 
   interface Props {
     health: StorageHealth;
@@ -12,6 +13,7 @@
   const { health, onImport }: Props = $props();
 
   let fileInput = $state<HTMLInputElement | undefined>();
+  let folderInput = $state<HTMLInputElement | undefined>();
   let importError = $state<string | null>(null);
 
   async function importFiles(files: Iterable<File | DroppedFile>): Promise<void> {
@@ -29,6 +31,12 @@
   function onFilesPicked(): void {
     const files = fileInput?.files;
     if (files && files.length > 0) void importFiles(Array.from(files));
+  }
+
+  function onFolderPicked(): void {
+    const files = folderInput?.files;
+    if (files && files.length > 0) void importFiles(Array.from(files));
+    if (folderInput) folderInput.value = '';
   }
 </script>
 
@@ -76,9 +84,12 @@
       <li><code>.zip</code></li>
     </ul>
     <div class="storage-actions drop-zone-actions">
-      <button class="button primary" type="button" onclick={() => fileInput?.click()}>
-        Choose files
-      </button>
+      <ImportChooser
+        variant="canvas"
+        label="Choose files or folder"
+        onChooseFiles={() => fileInput?.click()}
+        onChooseFolder={() => folderInput?.click()}
+      />
     </div>
     <input
       bind:this={fileInput}
@@ -89,6 +100,15 @@
       aria-hidden="true"
       tabindex="-1"
       onchange={onFilesPicked}
+    />
+    <input
+      bind:this={folderInput}
+      type="file"
+      webkitdirectory
+      class="visually-removed"
+      aria-hidden="true"
+      tabindex="-1"
+      onchange={onFolderPicked}
     />
     {#if importError}
       <!-- Title, next step, then the raw message as evidence — the same shape

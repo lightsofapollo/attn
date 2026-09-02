@@ -3409,7 +3409,7 @@
             <div>
               <h1 id="download-only-heading" class="download-only-title">{entryBasename(activeEntry)}</h1>
               <p class="download-only-path">{activeEntry.path}</p>
-              <p>This file stays inert in the browser. Download it to use it in the right tool.</p>
+              <p class="download-only-note"><strong>Note:</strong> This file stays inert in the browser. Download it to use it in the right tool.</p>
             </div>
           </div>
           <dl class="download-only-meta">
@@ -3696,18 +3696,32 @@
            thing a drag is actually aimed at — you cannot drop onto a word.
            It is still one real <button>, so the keyboard and pointer paths are
            unchanged; the button is simply the size and shape of the target. -->
-      <button
-        class="hosted-sidebar-add"
-        type="button"
-        data-action="add-assets"
-        onclick={() => assetInput?.click()}
-      >
-        <svg class="hosted-sidebar-add-glyph" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M12 5v14M5 12h14" />
-        </svg>
-        <span class="hosted-sidebar-add-label">Add files</span>
-        <span class="hosted-sidebar-add-hint">or drop them here</span>
-      </button>
+      <div class="hosted-sidebar-add-group">
+        <button
+          class="hosted-sidebar-add"
+          type="button"
+          data-action="add-assets"
+          onclick={() => assetInput?.click()}
+        >
+          <svg class="hosted-sidebar-add-glyph" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 5v14M5 12h14" />
+          </svg>
+          <span class="hosted-sidebar-add-label">Add files</span>
+          <span class="hosted-sidebar-add-hint">or drop them here</span>
+        </button>
+        <button
+          class="hosted-sidebar-add hosted-sidebar-add-folder"
+          type="button"
+          data-action="add-folder"
+          onclick={() => assetFolderInput?.click()}
+        >
+          <svg class="hosted-sidebar-add-glyph" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M3.75 7.25h6l1.6 1.8h8.9v8.7a1 1 0 0 1-1 1h-14.5a1 1 0 0 1-1-1z" />
+          </svg>
+          <span class="hosted-sidebar-add-label">Add folder</span>
+          <span class="hosted-sidebar-add-hint">choose a folder</span>
+        </button>
+      </div>
     {/if}
     {#if railError}
       <p class="hosted-sidebar-error" role="alert">{railError}</p>

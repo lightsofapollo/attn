@@ -1038,6 +1038,18 @@
   line-height: 1.55;
 }
 
+.download-only-intro .download-only-note {
+  margin-top: 0.6rem;
+  color: var(--rust);
+  font-size: 0.85rem;
+  font-style: italic;
+  line-height: 1.45;
+}
+
+.download-only-note strong {
+  font-weight: 700;
+}
+
 .download-only-meta {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1721,6 +1733,17 @@
   text-align: center;
   cursor: pointer;
   transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.hosted-sidebar-add-group {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.4rem;
+  width: 100%;
+}
+
+.hosted-sidebar-add-folder {
+  color: color-mix(in oklch, var(--sidebar-foreground) 82%, transparent);
 }
 
 .hosted-sidebar-add-label {

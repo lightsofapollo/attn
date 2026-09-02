@@ -203,8 +203,9 @@ export interface SealDurableSnapshotInput {
   epoch: number;
   fileId: string;
   snapshotId: string;
-  docType: 'markdown' | 'html';
+  docType: 'markdown' | 'html' | 'asset';
   content: string;
+  mediaType?: string;
   metadata?: unknown;
   snapshotKey: Uint8Array;
   nonce?: Uint8Array;
@@ -233,6 +234,7 @@ export async function sealDurableShareSnapshot(input: SealDurableSnapshotInput):
     snapshotId: input.snapshotId,
     docType: input.docType,
     content: input.content,
+    ...(input.mediaType === undefined ? {} : { mediaType: input.mediaType }),
     ...(input.metadata === undefined ? {} : { metadata: input.metadata }),
   });
   let ciphertext: Uint8Array | null = null;

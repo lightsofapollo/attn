@@ -61,9 +61,6 @@ export function validateWorkspaceManifest(value: unknown): WorkspaceSnapshotMani
   if (!Array.isArray(value.entries) || value.entries.length === 0) {
     throw new Error('workspace manifest must contain at least one entry');
   }
-  if (value.scope === 'file' && value.entries.length !== 1) {
-    throw new Error('file-scoped workspace manifest must contain exactly one entry');
-  }
   const entries: WorkspaceManifestEntry[] = [];
   let previousPath: string | undefined;
   const fileIds = new Set<string>();
@@ -85,6 +82,13 @@ export function validateWorkspaceManifest(value: unknown): WorkspaceSnapshotMani
     snapshotIds.add(entry.snapshotId);
     previousPath = entry.path;
     entries.push(entry);
+  }
+  if (
+    value.scope === 'file'
+    && (entries.filter((entry) => entry.kind === 'markdown' || entry.kind === 'html').length !== 1
+      || entries.some((entry) => entry.kind === 'asset' && !isValidSnapshotMediaType(entry.mediaType)))
+  ) {
+    throw new Error('file-scoped workspace manifest must contain one document and its asset dependencies');
   }
   return {
     v: 1,

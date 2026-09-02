@@ -2745,7 +2745,7 @@ defineCase('snapshot parser accepts inert binary/manifest metadata and rejects a
   const manifest = parseBrowserSnapshotPlaintext(toCanonicalBytes({
     docType: 'workspace_manifest',
     manifest: {
-      v: 1, kind: 'attn_workspace_snapshot', scope: 'file',
+      v: 1, kind: 'attn_workspace_snapshot', scope: 'entries',
       entries: [{
         fileId: id(16, 1), snapshotId: id(16, 2), path: 'safe/file.bin', kind: 'asset',
         mediaType: 'application/octet-stream', byteLength: 5, contentHash: id(32, 3),
@@ -2839,7 +2839,7 @@ defineCase('manifest waits for an out-of-order recovered R2 entry, then validate
     manifest: {
       v: 1,
       kind: 'attn_workspace_snapshot',
-      scope: 'file',
+      scope: 'entries',
       entries: [{
         fileId: assetFileId,
         snapshotId: assetSnapshotId,
@@ -2908,7 +2908,7 @@ defineCase('manifest rejects a hydrated entry whose signed binding differs', asy
   const manifest: Extract<SnapshotPlaintext, { docType: 'workspace_manifest' }> = {
     docType: 'workspace_manifest',
     manifest: {
-      v: 1, kind: 'attn_workspace_snapshot', scope: 'file', entries: [{
+      v: 1, kind: 'attn_workspace_snapshot', scope: 'entries', entries: [{
         fileId: assetFileId, snapshotId: assetSnapshotId, path: 'forged.png', kind: 'asset',
         mediaType: 'image/png', byteLength: raw.length, contentHash: contentHash(raw),
       }],

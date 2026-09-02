@@ -253,6 +253,32 @@ test('publishes one dark ShareDO projection, retained snapshot, then stable tier
   } finally { storage.close(); }
 });
 
+test('a current-file share closes over a verified local image and retains it for offline review', async () => {
+  const storage = await openStorage();
+  try {
+    const workspaceId = 'ws-v3-file-image'; await seedWorkspace(storage, workspaceId);
+    const png = new Uint8Array(24);
+    png.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+    png.set([0, 0, 0, 2, 0, 0, 0, 2], 16);
+    await storage.workspaces.commitRevision({ workspaceId, path: 'assets/image.png', body: png });
+    await storage.workspaces.commitRevision({ workspaceId, path: 'notes/main.md',
+      body: new TextEncoder().encode('# Main\n\n![Diagram](../assets/image.png)\n') });
+    const fence = await acquireFence(storage, workspaceId); let relay: MemoryShareRelay | null = null;
+    const coordinator = new BrowserWorkspaceSharingCoordinator(storage, workspaceId, fence, {
+      now: () => NOW, randomBytes: deterministicRandom(), createRoom: async options => bootstrapFromOptions(options),
+      publish: options => publishBrowserSnapshots({ ...options, indexBuilder }), indexBuilder,
+      outboxFactory: ({ storage: db, credentials }) => new AckingOutbox(db, credentials.roomId),
+      shareRelayFactory: options => (relay ??= new MemoryShareRelay(options.shareId)),
+    });
+    const view = await coordinator.ensurePublished(request('file', ['notes/main.md']));
+    const rootKey = await storage.getWorkspaceRootKey(workspaceId); assert(rootKey, 'workspace key');
+    const capability = await storage.shares.openShare(rootKey, workspaceId, view.capId);
+    equal(capability.sharePaths, ['assets/image.png', 'notes/main.md'], 'file scope contains its image dependency');
+    assert(required<MemoryShareRelay>(relay, 'share relay').record?.snapshots.length === 2,
+      'durable projection retains both document and image');
+  } finally { storage.close(); }
+});
+
 test('commits on the first attempt when a deployed relay advances snapshot upload revisions', async () => {
   const storage = await openStorage();
   try {

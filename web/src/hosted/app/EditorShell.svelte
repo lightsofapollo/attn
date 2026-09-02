@@ -56,6 +56,9 @@
   import { scrollViewToPos } from '../../lib/scroll-viewport';
   import { peerJumpPosition } from '../../lib/peer-strip-format';
   import { attachCollabPresenceSinks } from '../../lib/prosemirror/collab-presence-sinks';
+  import { sharedAssetPathFor } from '../../lib/review/asset-resolution';
+  import { htmlImageSources, markdownImageSources } from '../../lib/review/document-image-sources';
+  import { isSupportedSharedImageMediaType } from '../../lib/review/shared-image-policy';
   import LoadingLine from './LoadingLine.svelte';
   import HtmlViewer from '../../lib/HtmlViewer.svelte';
   import HtmlCommentComposer from '../../lib/HtmlCommentComposer.svelte';
@@ -373,6 +376,21 @@
   let assetInput = $state<HTMLInputElement | undefined>();
   let assetFolderInput = $state<HTMLInputElement | undefined>();
   let previewUrl = $state<string | null>(null);
+  // Blob URLs stay only in this tab's live component state. Neither the
+  // document nor the workspace store is rewritten: authored relative srcs
+  // remain the source of truth and a missing/rejected asset keeps the normal
+  // image fallback.
+  let localAssetUrls = $state<Record<string, string>>({});
+  let ownedAssetUrls = new Map<string, string>();
+  const resolveLocalAssetUrl = $derived.by(() => {
+    const documentPath = activeEntry?.path;
+    const urls = localAssetUrls;
+    if (!documentPath) return () => null;
+    return (src: string): string | null => {
+      const path = sharedAssetPathFor(documentPath, src);
+      return path === null ? null : urls[path] ?? null;
+    };
+  });
 
   /* The empty-canvas invitation (attn-mkmz.5). A brand-new workspace lands on a
      blank untitled.md, and the only standing offer to bring a real document in
@@ -813,6 +831,75 @@
       if (url) URL.revokeObjectURL(url);
       previewUrl = null;
     };
+  });
+
+  // Resolve local image dependencies through OPFS into short-lived Blob URLs
+  // for the hosted owner surface. This is intentionally separate from the
+  // encrypted-share registry: local images are never staged as share
+  // snapshots, and share viewers never receive an OPFS-derived URL.
+  $effect(() => {
+    const entry = activeEntry;
+    const content = bodyText ?? displayText ?? '';
+    const liveAssets = new Map(workspace.entries.map((candidate) => [candidate.path, candidate]));
+    if (!entry || (entry.kind !== 'markdown' && entry.kind !== 'html')) {
+      for (const url of ownedAssetUrls.values()) URL.revokeObjectURL(url);
+      ownedAssetUrls = new Map();
+      localAssetUrls = {};
+      return;
+    }
+    const sources = entry.kind === 'markdown' ? markdownImageSources(content) : htmlImageSources(content);
+    const paths = new Set<string>();
+    for (const src of sources) {
+      const path = sharedAssetPathFor(entry.path, src);
+      const asset = path === null ? undefined : liveAssets.get(path);
+      if (path !== null && asset?.kind === 'asset' && isSupportedSharedImageMediaType(asset.mediaType)) {
+        paths.add(path);
+      }
+    }
+    let cancelled = false;
+    void (async () => {
+      const next = new Map<string, string>();
+      const created: string[] = [];
+      try {
+        for (const path of paths) {
+          const retained = ownedAssetUrls.get(path);
+          if (retained) {
+            next.set(path, retained);
+            continue;
+          }
+          const result = await service.readEntryBytes(workspace.id, path);
+          if (!result) continue;
+          const bytes = new Uint8Array(result.bytes);
+          try {
+            const mediaType = result.mediaType;
+            if (!isSupportedSharedImageMediaType(mediaType)) continue;
+            const blob = new Blob([bytes.buffer as ArrayBuffer], { type: mediaType });
+            const url = URL.createObjectURL(blob);
+            created.push(url);
+            next.set(path, url);
+          } finally {
+            bytes.fill(0);
+          }
+        }
+        if (cancelled) {
+          for (const url of created) URL.revokeObjectURL(url);
+          return;
+        }
+        for (const [path, url] of ownedAssetUrls) {
+          if (!next.has(path)) URL.revokeObjectURL(url);
+        }
+        ownedAssetUrls = next;
+        localAssetUrls = Object.fromEntries(next);
+      } catch {
+        for (const url of created) URL.revokeObjectURL(url);
+      }
+    })();
+    return () => { cancelled = true; };
+  });
+
+  $effect(() => () => {
+    for (const url of ownedAssetUrls.values()) URL.revokeObjectURL(url);
+    ownedAssetUrls.clear();
   });
 
   async function createMarkdownFile(): Promise<void> {
@@ -3226,6 +3313,7 @@
             onCollabDocChange={handleCollabDocChange}
             onCollabSelectionChange={handleCollabSelectionChange}
             onCollabViewportChange={handleCollabViewportChange}
+            resolveAssetUrl={resolveLocalAssetUrl}
           />
         {/key}
       </div>
@@ -3242,6 +3330,7 @@
         <HtmlViewer
           content={bodyText ?? displayText ?? ''}
           allowScripts={false}
+          resolveAssetUrl={resolveLocalAssetUrl}
           annotate={htmlAnnotatable}
           annotationEvents={htmlAnnotationEvents}
           onBridge={(bridge) => (htmlBridge = bridge)}

@@ -2,6 +2,8 @@ import { sanitizeParticipantColor } from '../participant-color';
 import { decompressSnapshotIfNeeded } from './snapshot-compression';
 import { boundFetch } from './bound-fetch';
 import { compareManifestPathsUtf8 } from './browser-workspace-manifest';
+import { decodeCanonicalBase64Url, isValidSnapshotMediaType } from './browser-workspace-manifest';
+import { browserAssetRegistry } from './browser-asset-registry';
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
 import { sha256 } from '@noble/hashes/sha2.js';
 import {
@@ -62,7 +64,15 @@ import {
   replacePushBinding,
   type PushBindingRecord,
 } from './browser-push-worker';
-import type { Anchor, Capability, ReviewEvent, ReviewEventBody, ReviewSnapshot, SuggestionDraft } from '../types';
+import type {
+  Anchor,
+  Capability,
+  ReviewEvent,
+  ReviewEventBody,
+  ReviewSnapshot,
+  SuggestionDraft,
+  WorkspaceManifestEntry,
+} from '../types';
 
 const DB_NAME = 'attn-browser-durable-shares';
 const DB_VERSION = 1;
@@ -448,7 +458,10 @@ export class DurableShareBrowserSessionFacade {
   }
   close(): void { if (this.closed) return; this.closed = true; ++this.generation; this.startAbort?.abort(); this.startAbort = null;
     this.options.invite.linkSecret.fill(0); this.linkSecretForRemember.fill(0);
-    this.session?.pushConsent.close(); this.session?.close(); this.session = null; }
+    const roomId = this.state.roomId;
+    this.session?.pushConsent.close(); this.session?.close(); this.session = null;
+    if (roomId) browserAssetRegistry.clearRoom(roomId);
+  }
   async createComment(anchor: Anchor, body: string, threadId?: string): Promise<ReviewEvent> {
     const event = await this.requireSession().createComment(anchor, body, threadId);
     if (!event) throw new Error('comment was queued without an optimistic event');
@@ -530,7 +543,7 @@ export class DurableShareBrowserSessionFacade {
       this.observer?.(this.state);
       return;
     }
-    const snapshot = next.snapshots[0];
+    const snapshot = next.snapshots.find((candidate) => candidate.docType !== 'asset');
     this.state = { ...this.state,
       status: next.status === 'ready' ? 'connected' : next.status === 'error' ? 'error' : 'connecting',
       ownerOnline: next.ownerOnline, liveEditingAvailable: false,
@@ -548,6 +561,7 @@ export class DurableShareBrowserSessionFacade {
     const { reviewStore } = await import('./store.svelte.js'); reviewStore.applyEvent(event);
   }
   private async installSnapshot(snapshot: DurableShareSnapshot, roomId: string): Promise<void> {
+    if (snapshot.docType === 'asset') stageDurableAsset(snapshot, roomId);
     const value = reviewSnapshotFromDurable(snapshot, roomId);
     const { reviewStore } = await import('./store.svelte.js');
     reviewStore.currentRoomId = value.roomId; reviewStore.applySnapshot(value);
@@ -555,12 +569,58 @@ export class DurableShareBrowserSessionFacade {
     // so unconditionally selecting made the LAST restored file win on every
     // reload (and clobbered the URL-requested file). Claim only an empty
     // selection; refresh the snapshot pick when the restored file IS selected.
+    if (value.docType === 'asset') return;
     if (reviewStore.currentFileId === null) {
       reviewStore.setCurrentFile(value.fileId); reviewStore.setCurrentSnapshot(value.snapshotId);
     } else if (reviewStore.currentFileId === value.fileId) {
       reviewStore.setCurrentSnapshot(value.snapshotId);
     }
   }
+}
+
+/** Activate one authenticated durable image only when its sealed metadata
+ * restates an exact manifest entry. The outer ShareDO manifest authenticates
+ * the ciphertext ref; this second check pins the plaintext's path/type/size
+ * before a Blob URL is ever minted. */
+export function stageDurableAsset(snapshot: DurableShareSnapshot, roomId: string): void {
+  const metadata = isRecord(snapshot.metadata) ? snapshot.metadata : null;
+  const rawEntry = metadata?.manifestEntry;
+  if (!isRecord(rawEntry) || !isValidDurableAssetEntry(rawEntry, snapshot)) {
+    throw new Error('durable image snapshot is missing its manifest binding');
+  }
+  const entry = rawEntry as unknown as WorkspaceManifestEntry;
+  const bytes = decodeCanonicalBase64Url(snapshot.content);
+  if (
+    digest(bytes) !== entry.contentHash
+    || metadata?.baseHash !== entry.contentHash
+    || bytes.length !== entry.byteLength
+  ) {
+    bytes.fill(0);
+    throw new Error('durable image snapshot does not match its manifest binding');
+  }
+  browserAssetRegistry.stage({
+    roomId,
+    fileId: snapshot.fileId,
+    snapshotId: snapshot.snapshotId,
+    path: entry.path,
+    mediaType: snapshot.mediaType!,
+    bytes,
+  });
+  browserAssetRegistry.activateManifest(roomId, [entry]);
+}
+
+function isValidDurableAssetEntry(value: Record<string, unknown>, snapshot: DurableShareSnapshot): boolean {
+  return (
+    value.fileId === snapshot.fileId
+    && value.snapshotId === snapshot.snapshotId
+    && typeof value.path === 'string'
+    && value.kind === 'asset'
+    && value.mediaType === snapshot.mediaType
+    && isValidSnapshotMediaType(value.mediaType)
+    && Number.isSafeInteger(value.byteLength)
+    && (value.byteLength as number) >= 0
+    && typeof value.contentHash === 'string'
+  );
 }
 
 /** Fragmentless notification-click recovery from a locally remembered, non-extractable binding. */
@@ -591,25 +651,33 @@ export class RememberedPushShareSessionFacade {
       }
       const snapshots = await this.loadSnapshots(binding, abort.signal);
       if (this.closed) return;
-      const first = snapshots[0];
       const store = this.options.store ?? (await import('./store.svelte.js')).reviewStore;
       store.currentRoomId = binding.roomId;
-      for (const snapshot of snapshots) store.applySnapshot(reviewSnapshotFromDurable(snapshot, binding.roomId));
-      if (first && store.currentFileId === null) {
-        store.setCurrentFile(first.fileId); store.setCurrentSnapshot(first.snapshotId);
+      for (const snapshot of snapshots) {
+        if (snapshot.docType === 'asset') stageDurableAsset(snapshot, binding.roomId);
+        store.applySnapshot(reviewSnapshotFromDurable(snapshot, binding.roomId));
+      }
+      const firstDocument = snapshots.find((snapshot) => snapshot.docType !== 'asset');
+      if (firstDocument && store.currentFileId === null) {
+        store.setCurrentFile(firstDocument.fileId); store.setCurrentSnapshot(firstDocument.snapshotId);
       }
       await consumePendingPushEvents(binding.bindingId, event => store.applyEvent(event), {
         indexedDB: this.options.indexedDB,
       });
       if (this.closed) return;
       this.patch({ status: 'connected', connection: 'mailbox', roomId: binding.roomId,
-        snapshotContent: first?.content ?? null, snapshotDocType: first?.docType ?? 'markdown',
-        snapshotId: first?.snapshotId ?? null, fileId: first?.fileId ?? null });
+        snapshotContent: firstDocument?.content ?? null, snapshotDocType: firstDocument?.docType ?? 'markdown',
+        snapshotId: firstDocument?.snapshotId ?? null, fileId: firstDocument?.fileId ?? null });
     } catch (error) {
       if (!this.closed) this.patch({ status: 'error', error: { kind: 'invite_invalid', message: safeProductionMessage(error) } });
     } finally { if (this.abort === abort) this.abort = null; }
   }
-  close(): void { this.closed = true; this.abort?.abort(); this.abort = null; }
+  close(): void {
+    this.closed = true;
+    this.abort?.abort();
+    this.abort = null;
+    if (this.state.roomId) browserAssetRegistry.clearRoom(this.state.roomId);
+  }
   async createComment(): Promise<ReviewEvent> { throw new Error('reopen the original share link to author'); }
   async replyToComment(): Promise<ReviewEvent> { throw new Error('reopen the original share link to author'); }
   async resolveComment(): Promise<ReviewEvent> { throw new Error('reopen the original share link to author'); }
@@ -673,11 +741,24 @@ export class RememberedPushShareSessionFacade {
 
 export function reviewSnapshotFromDurable(snapshot: DurableShareSnapshot, roomId: string): ReviewSnapshot {
     const metadata = isRecord(snapshot.metadata) ? snapshot.metadata : {};
-    const baseHash = typeof metadata.baseHash === 'string' ? metadata.baseHash : digest(new TextEncoder().encode(snapshot.content));
+    let byteLength: number;
+    if (snapshot.docType === 'asset') {
+      const bytes = decodeCanonicalBase64Url(snapshot.content);
+      byteLength = bytes.length;
+      bytes.fill(0);
+    } else {
+      byteLength = new TextEncoder().encode(snapshot.content).length;
+    }
+    const baseHash = typeof metadata.baseHash === 'string'
+      ? metadata.baseHash
+      : digest(new TextEncoder().encode(snapshot.content));
     return { roomId, fileId: snapshot.fileId, snapshotId: snapshot.snapshotId,
       createdAt: Number.isSafeInteger(metadata.createdAt) ? metadata.createdAt as number : Date.now(),
       createdBy: typeof metadata.createdBy === 'string' ? metadata.createdBy : 'share-owner', baseHash,
-      byteLength: new TextEncoder().encode(snapshot.content).length, docType: snapshot.docType, content: snapshot.content,
+      byteLength, docType: snapshot.docType,
+      ...(snapshot.docType === 'asset'
+        ? { mediaType: snapshot.mediaType }
+        : { content: snapshot.content }),
       ...(isRecord(metadata.anchorIndex) ? { anchorIndex: metadata.anchorIndex as unknown as ReviewSnapshot['anchorIndex'] } : {}),
       ...(typeof metadata.ownerDisplayPath === 'string' ? { ownerDisplayPath: metadata.ownerDisplayPath } : {}) };
 }
@@ -978,12 +1059,18 @@ export async function decryptDurableShareSnapshot(shareId: string, epoch: number
     plaintext = xchacha20poly1305(capability.roomKeys.snapshotKey, sealed.subarray(0, 24), aad).decrypt(sealed.subarray(24));
     inflated = await decompressSnapshotIfNeeded(plaintext);
     const value = JSON.parse(new TextDecoder().decode(inflated)) as unknown;
-    if (!isRecord(value) || Object.keys(value).some(key => !['v','fileId','snapshotId','docType','content','metadata'].includes(key)) ||
+    if (!isRecord(value) || Object.keys(value).some(key => !['v','fileId','snapshotId','docType','content','mediaType','metadata'].includes(key)) ||
       value.v !== 3 || value.fileId !== fileId || value.snapshotId !== snapshotId ||
-      (value.docType !== 'markdown' && value.docType !== 'html') || typeof value.content !== 'string') {
+      (value.docType !== 'markdown' && value.docType !== 'html' && value.docType !== 'asset') || typeof value.content !== 'string' ||
+      (value.docType === 'asset' && !isValidSnapshotMediaType(value.mediaType))) {
       throw new Error('durable share snapshot plaintext is invalid');
     }
+    if (value.docType === 'asset') {
+      const bytes = decodeCanonicalBase64Url(value.content);
+      bytes.fill(0);
+    }
     return { fileId, snapshotId, docType: value.docType, content: value.content,
+      ...(value.docType === 'asset' ? { mediaType: value.mediaType as string } : {}),
       ...(value.metadata === undefined ? {} : { metadata: structuredClone(value.metadata) }) };
   } finally { aad.fill(0); if (inflated !== plaintext) inflated?.fill(0); plaintext?.fill(0); }
 }
@@ -996,7 +1083,7 @@ function disposeBundle(bundle: DecodedDurableShareBundle): void {
 function disposeLinkKeys(keys: ShareLinkKeys): void {
   keys.linkSecret.fill(0); keys.bundleKey.fill(0); keys.readAdmissionKey.fill(0); keys.writeAdmissionKey?.fill(0);
 }
-function disposeSnapshot(snapshot: DurableShareSnapshot): void { snapshot.content = ''; snapshot.metadata = undefined; }
+function disposeSnapshot(snapshot: DurableShareSnapshot): void { snapshot.content = ''; snapshot.metadata = undefined; snapshot.mediaType = undefined; }
 function parseRememberedSnapshotRef(value: unknown): { fileId: string; snapshotId: string; ciphertextBytes: number; ciphertextSha256: string; uploadedAt: number } {
   if (!isRecord(value) || typeof value.fileId !== 'string' || typeof value.snapshotId !== 'string' ||
     !Number.isSafeInteger(value.ciphertextBytes) || (value.ciphertextBytes as number) < 41 ||
@@ -1019,10 +1106,16 @@ async function decryptRememberedSnapshot(shareId: string, epoch: number, _roomId
     inflated = await decompressSnapshotIfNeeded(plaintext);
     const value = JSON.parse(new TextDecoder().decode(inflated)) as unknown;
     if (!isRecord(value) || value.v !== 3 || value.fileId !== fileId || value.snapshotId !== snapshotId ||
-      (value.docType !== 'markdown' && value.docType !== 'html') || typeof value.content !== 'string') {
+      (value.docType !== 'markdown' && value.docType !== 'html' && value.docType !== 'asset') || typeof value.content !== 'string' ||
+      (value.docType === 'asset' && !isValidSnapshotMediaType(value.mediaType))) {
       throw new Error('remembered snapshot plaintext is invalid');
     }
+    if (value.docType === 'asset') {
+      const bytes = decodeCanonicalBase64Url(value.content);
+      bytes.fill(0);
+    }
     return { fileId, snapshotId, docType: value.docType, content: value.content,
+      ...(value.docType === 'asset' ? { mediaType: value.mediaType as string } : {}),
       ...(value.metadata === undefined ? {} : { metadata: structuredClone(value.metadata) }) };
   } finally { aad.fill(0); if (inflated !== plaintext) inflated?.fill(0); plaintext?.fill(0); }
 }

@@ -1,11 +1,12 @@
-import { base64UrlEncode, deriveShareLinkKeys, expandShareLinkKeys } from './browser-crypto';
+import { base64UrlEncode, contentHash, deriveShareLinkKeys, expandShareLinkKeys } from './browser-crypto';
 import { deriveReadKeysV3, toCanonicalBytes } from './browser-crypto';
 import { buildShareBundleMutations, EMPTY_SHARE_MANIFEST_DIGEST } from './browser-share-owner';
 import { parseAndStripShareInvite } from './browser-share';
 import { createBrowserDurableShareResolver, createShareMailboxTransport, decryptDurableShareSnapshot,
   DurableShareBrowserSessionFacade, reviewSnapshotFromDurable, subscribeToDurableShareChanges,
-  RememberedPushShareSessionFacade,
+  RememberedPushShareSessionFacade, stageDurableAsset,
   type BrowserDurableSharePersistence } from './browser-share-production';
+import { browserAssetRegistry } from './browser-asset-registry';
 import { indexedDB as fakeIndexedDB } from 'fake-indexeddb';
 import { StaleShareEpochError } from './browser-share-session';
 import { xchacha20poly1305 } from '@noble/ciphers/chacha.js';
@@ -136,6 +137,27 @@ const inviteUrl = `https://attn.sh/s/${shareId}#key=${base64UrlEncode(secret)}`;
   const mapped = reviewSnapshotFromDurable({ fileId: 'file-a', snapshotId: 'snapshot-a', docType: 'markdown', content: '# x' }, 'resolved-room');
   assert(mapped.roomId === 'resolved-room', 'durable snapshot lost its resolved room binding');
   console.log('PASS durable snapshot installation binds resolved room before state patch');
+}
+
+{
+  const raw = new Uint8Array(24);
+  raw.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  raw.set([0, 0, 0, 2, 0, 0, 0, 2], 16);
+  const fileId = 'durable-image-file'; const snapshotId = 'durable-image-snapshot';
+  const hash = contentHash(raw);
+  stageDurableAsset({
+    fileId, snapshotId, docType: 'asset', content: base64UrlEncode(raw), mediaType: 'image/png',
+    metadata: { baseHash: hash, manifestEntry: {
+      fileId, snapshotId, path: 'assets/diagram.png', kind: 'asset', mediaType: 'image/png',
+      byteLength: raw.length, contentHash: hash,
+    } },
+  }, 'durable-image-room');
+  assert(browserAssetRegistry.urlFor('durable-image-room', snapshotId)?.startsWith('blob:'),
+    'offline durable image did not activate a verified Blob URL');
+  const mapped = reviewSnapshotFromDurable({ fileId, snapshotId, docType: 'asset', content: base64UrlEncode(raw), mediaType: 'image/png' }, 'durable-image-room');
+  assert(mapped.assetContent === undefined && mapped.content === undefined, 'durable raw image entered review store');
+  browserAssetRegistry.clearRoom('durable-image-room'); raw.fill(0);
+  console.log('PASS durable image snapshot activates Blob-only renderer state');
 }
 
 {

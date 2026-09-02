@@ -6,6 +6,7 @@
     HtmlAnnotationBridge,
     injectDocRuntime,
   } from './review/html-annotation-bridge';
+  import { rewriteSharedHtmlImageSources } from './review/html-shared-assets';
   import type { AnnotationBridgeEvents } from './review/html-annotation-bridge';
 
   interface Props {
@@ -30,6 +31,8 @@
     mtime?: number;
     /** Native/local pages retain script support; hosted snapshots disable it. */
     allowScripts?: boolean;
+    /** Resolves a share-bound HTML image src to an in-memory Blob URL. */
+    resolveAssetUrl?: (src: string) => string | null;
     /** Turn on commenting for either a shared source or a local path. */
     annotate?: boolean;
     /** Wired up once the frame exists, so a parent can drive the rail. */
@@ -43,6 +46,7 @@
     content,
     mtime,
     allowScripts = true,
+    resolveAssetUrl,
     annotate = false,
     annotationEvents,
     onBridge,
@@ -90,9 +94,11 @@
   // is why the trust boundary sits in the shell and not in the frame.
   // @see planning/collab/html-annotation.md §3, §4
   let sandbox = $derived(htmlViewerSandbox(allowScripts || annotating));
-  let renderedContent = $derived(
-    annotating && content !== undefined ? injectDocRuntime(content) : content,
-  );
+  let renderedContent = $derived.by(() => {
+    if (content === undefined) return content;
+    const withSharedAssets = rewriteSharedHtmlImageSources(content, resolveAssetUrl);
+    return annotating ? injectDocRuntime(withSharedAssets) : withSharedAssets;
+  });
   let src = $derived.by(() => {
     if (isContentMode || path === undefined) return undefined;
     const params = new URLSearchParams();

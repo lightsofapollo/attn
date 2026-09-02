@@ -60,6 +60,7 @@
   import SelectionToolbar from './lib/SelectionToolbar.svelte';
   import { deriveFileEntries, latestRenderableSnapshotId } from './lib/review/file-nav';
   import { reviewerStatusPresentation } from './lib/review/reviewer-status-model';
+  import { buildSharedAssetResolver } from './lib/review/asset-resolution';
   import { reviewStore } from './lib/review/store.svelte';
   import {
     applyReviewHoverHighlight,
@@ -642,6 +643,16 @@
     return sessionState.fileId === selectedFileId
       ? sessionState.snapshotDocType
       : 'markdown';
+  });
+  // The session only puts verified asset metadata in reviewStore; the
+  // tab-local asset registry behind this resolver owns the decrypted bytes and
+  // their Blob URL lifetime. Read dependencies eagerly so a newly activated
+  // manifest rebuilds image NodeViews instead of leaving their fallback cards.
+  const resolveReviewAssetUrl = $derived.by(() => {
+    const snapshots = reviewStore.snapshots;
+    const roomId = sessionState.roomId;
+    const docWirePath = displayedSnapshot?.ownerDisplayPath;
+    return buildSharedAssetResolver(snapshots, roomId, docWirePath);
   });
 
   $effect(() => {
@@ -1695,6 +1706,7 @@
                 <HtmlViewer
                   content={displayedContent ?? ''}
                   allowScripts={false}
+                  resolveAssetUrl={resolveReviewAssetUrl}
                   annotate={htmlAnnotatable}
                   annotationEvents={htmlAnnotationEvents}
                   onBridge={(bridge) => (htmlBridge = bridge)}
@@ -1703,6 +1715,7 @@
                 <Editor
                   markdown={reviewerCollabSeed?.markdown ?? displayedContent ?? ''}
                   editable={false}
+                  resolveAssetUrl={resolveReviewAssetUrl}
                   plugins={editorPlugins}
                   onReady={handleEditorReady}
                   collabClientId={reviewerAvailability.collabReady

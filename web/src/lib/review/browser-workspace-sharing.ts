@@ -74,6 +74,16 @@ import {
   type ShareRecordView,
 } from './browser-workspace-share';
 import { compareManifestPathsUtf8 } from './browser-workspace-manifest';
+import { sharedAssetPathFor } from './asset-resolution';
+import { htmlImageSources, markdownImageSources } from './document-image-sources';
+import {
+  bytesMatchSharedImageMediaType,
+  hasSafeSharedImageDimensions,
+  isSupportedSharedImageMediaType,
+  MAX_SHARED_IMAGE_BYTES,
+  MAX_SHARED_IMAGE_COUNT,
+  MAX_SHARED_IMAGE_TOTAL_BYTES,
+} from './shared-image-policy';
 import { normalizeEntryPath, type ShareScopeKind, type WorkspaceEntryRecord } from './browser-workspace-schema';
 import type { LeaseHandle } from './browser-workspace-lease';
 import type { MailboxEnvelope } from './browser-ws';
@@ -533,15 +543,15 @@ export class BrowserWorkspaceSharingCoordinator {
     const sources = await this.loadSources(capability.sharePaths ?? []);
     const nextManifest: ManagedShareSnapshotRef[] = [];
     try {
-      const desired = new Map<string, { snapshotId: string; source: BrowserSnapshotEntry }>();
+      const desired = new Map<string, {
+        snapshotId: string;
+        source: BrowserSnapshotEntry;
+        entry: (typeof manifest.entries)[number];
+      }>();
       for (const entry of manifest.entries) {
         const source = sources.find((candidate) => candidate.path === entry.path);
         if (!source) throw new StorageConflictError('durable share source path disappeared');
-        // The current retained-snapshot plaintext format is text-bearing.
-        // Assets remain available through the live ordinary room; a later
-        // resolver extension may retain inert binary snapshots as well.
-        if (source.docType === 'asset') continue;
-        desired.set(entry.fileId, { snapshotId: entry.snapshotId, source });
+        desired.set(entry.fileId, { snapshotId: entry.snapshotId, source, entry });
       }
       for (const [fileId, wanted] of desired) {
         const retained = remote.snapshots.find(
@@ -551,17 +561,35 @@ export class BrowserWorkspaceSharingCoordinator {
           nextManifest.push(retained);
           continue;
         }
-        const content = new TextDecoder('utf-8', { fatal: true }).decode(wanted.source.bytes);
-        if (wanted.source.docType === 'asset') {
-          throw new StorageConflictError('durable text projection selected an asset');
-        }
-        const metadata = wanted.source.docType === 'markdown'
+        const content = wanted.source.docType === 'asset'
+          ? base64UrlEncode(wanted.source.bytes)
+          : new TextDecoder('utf-8', { fatal: true }).decode(wanted.source.bytes);
+        const anchorIndex = wanted.source.docType === 'markdown'
           ? await (this.dependencies.indexBuilder
               ?? (await import('./browser-anchor-index')).buildCanonicalAnchorIndex)(
                 wanted.source.bytes,
                 wanted.snapshotId,
               )
           : undefined;
+        const durableMetadata = {
+          ...(anchorIndex === undefined ? {} : { anchorIndex }),
+          baseHash: wanted.entry.contentHash,
+          ownerDisplayPath: wanted.entry.path,
+          createdAt: this.timestamp(),
+          ...(wanted.source.docType === 'asset'
+            ? {
+                manifestEntry: {
+                  fileId: wanted.entry.fileId,
+                  snapshotId: wanted.entry.snapshotId,
+                  path: wanted.entry.path,
+                  kind: 'asset',
+                  mediaType: wanted.source.mediaType,
+                  byteLength: wanted.source.bytes.length,
+                  contentHash: wanted.entry.contentHash,
+                },
+              }
+            : {}),
+        };
         const sealed = await sealDurableShareSnapshot({
           shareId: credentials.shareId,
           epoch: credentials.epoch,
@@ -569,7 +597,8 @@ export class BrowserWorkspaceSharingCoordinator {
           snapshotId: wanted.snapshotId,
           docType: wanted.source.docType,
           content,
-          metadata,
+          ...(wanted.source.docType === 'asset' ? { mediaType: wanted.source.mediaType } : {}),
+          metadata: durableMetadata,
           snapshotKey: credentials.keys.snapshotKey,
         });
         try {
@@ -772,31 +801,114 @@ export class BrowserWorkspaceSharingCoordinator {
   private async resolvePaths(scopeKind: ShareScopeKind, requested: readonly string[]): Promise<string[]> {
     const entries = await this.storage.workspaces.listEntries(this.workspaceId);
     const live = new Map(entries.map((entry) => [entry.path, entry]));
-    const paths = scopeKind === 'workspace'
+    const requestedPaths = scopeKind === 'workspace'
       ? entries.map((entry) => entry.path)
       : requested.map((path) => normalizeEntryPath(path));
-    if (scopeKind === 'file' && paths.length !== 1) {
+    if (scopeKind === 'file' && requestedPaths.length !== 1) {
       throw new BrowserStorageError('current-file share requires exactly one path');
     }
-    if (paths.length === 0) throw new BrowserStorageError('share scope cannot be empty');
-    if (new Set(paths).size !== paths.length) throw new BrowserStorageError('share scope contains duplicate paths');
-    for (const path of paths) if (!live.has(path)) throw new StorageConflictError('share scope contains a stale path');
-    if (!paths.some((path) => {
+    if (requestedPaths.length === 0) throw new BrowserStorageError('share scope cannot be empty');
+    if (new Set(requestedPaths).size !== requestedPaths.length) throw new BrowserStorageError('share scope contains duplicate paths');
+    for (const path of requestedPaths) if (!live.has(path)) throw new StorageConflictError('share scope contains a stale path');
+    if (!requestedPaths.some((path) => {
       const entry = live.get(path);
       return entry?.kind === 'markdown' || (entry !== undefined && entryIsHtml(entry));
     })) {
       throw new BrowserStorageError('share scope must contain at least one Markdown or HTML document');
     }
+    // A document scope is a dependency closure, not a hand-maintained file
+    // list. Only local, supported image assets that its document actually
+    // names are added; remote/missing/non-image srcs remain honest fallbacks.
+    const paths = new Set(requestedPaths);
+    const documentPaths = requestedPaths.filter((path) => {
+      const entry = live.get(path);
+      return entry?.kind === 'markdown' || (entry !== undefined && entryIsHtml(entry));
+    });
+    const images = await this.referencedImages(documentPaths, live);
+    for (const image of images) paths.add(image);
     return [...paths].sort(compareManifestPathsUtf8);
+  }
+
+  private async referencedImages(
+    documentPaths: readonly string[],
+    live: ReadonlyMap<string, WorkspaceEntryRecord>,
+  ): Promise<string[]> {
+    if (documentPaths.length === 0) return [];
+    const candidates = new Set<string>();
+    let totalBytes = 0;
+    for (const documentPath of documentPaths) {
+      const entry = live.get(documentPath);
+      if (!entry) continue;
+      const body = await this.storage.workspaces.getRevisionBody(
+        this.workspaceId,
+        documentPath,
+        entry.headRevisionId,
+      );
+      let sources: string[];
+      try {
+        const text = new TextDecoder('utf-8', { fatal: true }).decode(body);
+        sources = entry.kind === 'markdown' ? markdownImageSources(text) : htmlImageSources(text);
+      } catch {
+        sources = [];
+      } finally {
+        body.fill(0);
+      }
+      for (const src of sources) {
+        const path = sharedAssetPathFor(documentPath, src);
+        if (path === null || candidates.has(path)) continue;
+        const asset = live.get(path);
+        if (!asset || asset.kind !== 'asset' || !isSupportedSharedImageMediaType(asset.mediaType)) continue;
+        candidates.add(path);
+      }
+    }
+    const paths: string[] = [];
+    for (const path of candidates) {
+      if (paths.length >= MAX_SHARED_IMAGE_COUNT) break;
+      const entry = live.get(path);
+      if (!entry || entry.kind !== 'asset' || !entry.mediaType) continue;
+      const bytes = await this.storage.workspaces.getRevisionBody(this.workspaceId, path, entry.headRevisionId);
+      try {
+        if (
+          bytes.length > MAX_SHARED_IMAGE_BYTES
+          || totalBytes + bytes.length > MAX_SHARED_IMAGE_TOTAL_BYTES
+          || !bytesMatchSharedImageMediaType(bytes, entry.mediaType)
+          || !hasSafeSharedImageDimensions(bytes, entry.mediaType)
+        ) continue;
+        paths.push(path);
+        totalBytes += bytes.length;
+      } finally {
+        bytes.fill(0);
+      }
+    }
+    return paths;
   }
 
   private async loadSources(paths: readonly string[]): Promise<BrowserSnapshotEntry[]> {
     const sources: BrowserSnapshotEntry[] = [];
+    let sharedImageCount = 0;
+    let sharedImageBytes = 0;
     try {
       for (const path of paths) {
         const entry = await this.storage.workspaces.getEntry(this.workspaceId, path);
         if (!entry) throw new StorageConflictError('share scope changed before publication');
         const bytes = await this.storage.workspaces.getRevisionBody(this.workspaceId, path, entry.headRevisionId);
+        if (entry.kind === 'asset' && isSupportedSharedImageMediaType(entry.mediaType)) {
+          if (
+            bytes.length > MAX_SHARED_IMAGE_BYTES
+            || sharedImageCount >= MAX_SHARED_IMAGE_COUNT
+            || sharedImageBytes + bytes.length > MAX_SHARED_IMAGE_TOTAL_BYTES
+            || !bytesMatchSharedImageMediaType(bytes, entry.mediaType!)
+            || !hasSafeSharedImageDimensions(bytes, entry.mediaType!)
+          ) {
+            // A stale or deliberately oversized local image must not make the
+            // whole document unshareable. Leave its authored src untouched;
+            // the reviewer gets the normal unavailable-image fallback instead.
+            bytes.fill(0);
+            continue;
+          }
+          sharedImageCount += 1;
+          sharedImageBytes += bytes.length;
+        }
         sources.push(entry.kind === 'markdown'
           ? { path, docType: 'markdown', bytes, revisionId: entry.headRevisionId }
           : entryIsHtml(entry)

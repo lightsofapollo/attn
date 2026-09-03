@@ -5,6 +5,8 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { buildContentSecurityPolicy } from '../src/lib/hosted/csp.ts';
+
 const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const relayOrigin = 'https://relay-staging.attn.sh';
 const webOrigin = 'https://staging.attn.sh';
@@ -65,39 +67,18 @@ async function verifyBuild(expectedRelayOrigin) {
   return entryPath;
 }
 
-async function themePreflightSha256() {
-  // The worker's CSP allows the inline theme-preflight script by hash (see
-  // src/lib/hosted/csp.ts). Read the constant from its source of truth so the
-  // pinned policy below cannot drift from it again — hardcoding the old
-  // hash-less directive here is what made this verifier reject a healthy
-  // deploy.
-  const source = await readFile(
-    path.join(webRoot, 'src', 'lib', 'hosted', 'theme-preflight.ts'),
-    'utf8',
-  );
-  const match = source.match(/THEME_PREFLIGHT_SHA256 = '(sha256-[A-Za-z0-9+/=]+)'/u);
-  if (!match) throw new Error('THEME_PREFLIGHT_SHA256 not found in theme-preflight.ts');
-  return match[1];
-}
-
 async function verifyLiveDeployment(expectedWebOrigin, expectedRelayOrigin, expectedEntryPath) {
-  const preflightHash = await themePreflightSha256();
-  const requiredCspDirectives = new Set([
-    "default-src 'none'",
-    "base-uri 'none'",
-    `connect-src 'self' ${expectedRelayOrigin} ${expectedRelayOrigin.replace('https:', 'wss:')}`,
-    "font-src 'self' data:",
-    "form-action 'none'",
-    "frame-ancestors 'none'",
-    "frame-src 'self' blob: data:",
-    "img-src 'self' blob: data:",
-    "manifest-src 'self'",
-    "media-src 'self' blob: data:",
-    "object-src 'none'",
-    `script-src 'self' 'wasm-unsafe-eval' '${preflightHash}'`,
-    "style-src 'self' 'unsafe-inline'",
-    "worker-src 'self'",
-  ]);
+  // Derive the expected policy from the same function the worker serves it
+  // from, rather than restating the directives here. A hardcoded copy has now
+  // rejected a healthy deploy twice — once when the script-src hash landed,
+  // once when img-src gained `https:` for remote document images — and in both
+  // cases the deploy itself was fine and only this check was stale.
+  const requiredCspDirectives = new Set(
+    buildContentSecurityPolicy(expectedRelayOrigin)
+      .split(';')
+      .map((directive) => directive.trim())
+      .filter(Boolean),
+  );
   const deadline = Date.now() + 60_000;
   let lastFailure = 'deployment did not become readable';
   while (Date.now() < deadline) {

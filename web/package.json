@@ -14,7 +14,7 @@
     "check:anchor-wasm": "node scripts/build-anchor-wasm.mjs --check",
     "build:doc-runtime": "node scripts/build-doc-runtime.mjs",
     "check:doc-runtime": "node scripts/build-doc-runtime.mjs --check",
-    "deploy:staging": "node scripts/deploy-browser-staging.mjs",
+    "deploy:staging": "tsx scripts/deploy-browser-staging.mjs",
     "check": "npm run generate:icons && svelte-check --tsconfig ./tsconfig.json",
     "test": "node scripts/run-tests.mjs",
     "test:unit": "node scripts/run-tests.mjs",

@@ -95,6 +95,15 @@ require_free_port() {
   fi
 }
 
+# Same reasoning as the port guard: `npx wrangler` in relay/ would happily
+# download a wrangler that is not the pinned one and run the relay on it.
+if [ -z "${E2E_RELAY_URL:-}" ] && [ ! -d "$PROJECT_DIR/relay/node_modules" ]; then
+  echo "local mode runs the relay from relay/, whose dependencies are not installed." >&2
+  echo "run: npm --prefix relay ci" >&2
+  echo "(or set E2E_RELAY_URL and E2E_WEB_ORIGIN to test against a deployed environment)" >&2
+  exit 1
+fi
+
 [ -n "${E2E_RELAY_URL:-}" ] || require_free_port "$RELAY_PORT" "local relay" RELAY_PORT
 [ -n "${E2E_WEB_ORIGIN:-}" ] || require_free_port "$WEB_PORT" "hosted web app" WEB_PORT
 

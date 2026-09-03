@@ -241,10 +241,20 @@ jobs:
         with:
           node-version: "22"
           cache: npm
-          cache-dependency-path: web/package-lock.json
+          cache-dependency-path: |
+            web/package-lock.json
+            relay/package-lock.json
 
       - name: Install dependencies
         working-directory: web
+        run: npm ci
+
+      # Local mode runs the relay from relay/, so its deps have to be installed
+      # or `npx wrangler` silently fetches whatever is newest from the registry
+      # — a different major than the pinned one, resolved at run time. That is
+      # the non-hermeticity this whole change removes; don't reintroduce it here.
+      - name: Install relay dependencies
+        working-directory: relay
         run: npm ci
 
       - name: Install Playwright Chromium

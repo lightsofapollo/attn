@@ -4,6 +4,7 @@
 // web/scripts/run-tests.mjs, not vitest.
 
 import { sharedAssetPathFor, assetDataUrl, buildSharedAssetResolver } from './asset-resolution';
+import type { SharedAssetUrlRegistry } from './asset-resolution';
 import type { ReviewSnapshot } from '../types';
 
 interface CaseResult {
@@ -164,6 +165,39 @@ function assetSnapshot(path: string, overrides: Partial<ReviewSnapshot> = {}): R
 defineCase('an asset that travelled with the document resolves to its bytes', () => {
   const resolve = buildSharedAssetResolver([assetSnapshot('diagram.png')], 'room-1', 'images.md');
   assertEq(resolve('./diagram.png'), 'data:image/png;base64,AAAA', 'resolved');
+});
+
+defineCase('a verified browser asset resolves through its tab-local Blob URL', () => {
+  const registry = {
+    urlFor: (roomId: string, snapshotId: string) => roomId === 'room-1' && snapshotId === 'snap-diagram.png'
+      ? 'blob:verified-image'
+      : null,
+    dataUrlFor: () => null,
+  } satisfies SharedAssetUrlRegistry;
+  const resolve = buildSharedAssetResolver(
+    [assetSnapshot('diagram.png', { assetContent: undefined })],
+    'room-1',
+    'images.md',
+    registry,
+  );
+  assertEq(resolve('./diagram.png'), 'blob:verified-image', 'verified Blob URL wins over serialized fallback');
+});
+
+defineCase('an opaque sandbox resolves the same verified asset through a data URL', () => {
+  const registry = {
+    urlFor: () => 'blob:parent-origin-image',
+    dataUrlFor: (roomId: string, snapshotId: string) => roomId === 'room-1' && snapshotId === 'snap-diagram.png'
+      ? 'data:image/png;base64,AAAA'
+      : null,
+  } satisfies SharedAssetUrlRegistry;
+  const resolve = buildSharedAssetResolver(
+    [assetSnapshot('diagram.png', { assetContent: undefined })],
+    'room-1',
+    'images.md',
+    registry,
+    'opaque-sandbox',
+  );
+  assertEq(resolve('./diagram.png'), 'data:image/png;base64,AAAA', 'sandbox-safe data URL wins');
 });
 
 defineCase('a src with no matching asset resolves to null, not a guess', () => {

@@ -511,9 +511,25 @@ impl WorkspaceSnapshotManifest {
                 "workspace manifest entries must not be empty",
             ));
         }
-        if self.scope == WorkspaceManifestScope::File && self.entries.len() != 1 {
+        // A file-scoped share contains one primary document plus its declared
+        // image dependencies. The document count, rather than total entries,
+        // remains the scope boundary so reviewers can resolve `./image.png`
+        // without turning a current-file share into a multi-document share.
+        if self.scope == WorkspaceManifestScope::File
+            && self
+                .entries
+                .iter()
+                .filter(|entry| {
+                    matches!(
+                        entry.kind,
+                        WorkspaceManifestEntryKind::Markdown | WorkspaceManifestEntryKind::Html
+                    )
+                })
+                .count()
+                != 1
+        {
             return Err(SnapshotValidationError::new(
-                "file-scoped manifest must contain exactly one entry",
+                "file-scoped manifest must contain exactly one document",
             ));
         }
 
@@ -1888,6 +1904,44 @@ mod tests {
         let mut payload = workspace_manifest(vec![manifest_entry("a.bin", &raw)]);
         payload.manifest.as_mut().unwrap().entries[0].file_id = id("not-base64url!");
         assert!(payload.validate().is_err());
+    }
+
+    #[test]
+    fn file_scoped_manifest_allows_one_document_with_image_dependencies() {
+        let document = WorkspaceManifestEntry {
+            file_id: id("AQEBAQEBAQEBAQEBAQEBAQ"),
+            snapshot_id: id("AgICAgICAgICAgICAgICAg"),
+            path: "notes/readme.md".to_string(),
+            kind: WorkspaceManifestEntryKind::Markdown,
+            media_type: None,
+            byte_length: 7,
+            content_hash: content_hash(b"# note\n"),
+        };
+        let image = WorkspaceManifestEntry {
+            file_id: id("AwMDAwMDAwMDAwMDAwMDAw"),
+            snapshot_id: id("BAQEBAQEBAQEBAQEBAQEBA"),
+            path: "notes/chart.png".to_string(),
+            kind: WorkspaceManifestEntryKind::Asset,
+            media_type: Some("image/png".to_string()),
+            byte_length: 4,
+            content_hash: content_hash(&[0x89, 0x50, 0x4e, 0x47]),
+        };
+        let manifest = WorkspaceSnapshotManifest {
+            v: 1,
+            kind: WorkspaceManifestKind::AttnWorkspaceSnapshot,
+            scope: WorkspaceManifestScope::File,
+            // Canonical UTF-8 path ordering, not declaration ordering.
+            entries: vec![document, image],
+        };
+        assert!(
+            manifest.validate().is_err(),
+            "entries must remain canonically sorted"
+        );
+        let mut manifest = manifest;
+        manifest
+            .entries
+            .sort_by(|left, right| left.path.as_bytes().cmp(right.path.as_bytes()));
+        manifest.validate().unwrap();
     }
 
     #[test]

@@ -35,6 +35,7 @@ const IMAGE_EXTENSIONS: &[(&str, &str)] = &[
     ("jpeg", "image/jpeg"),
     ("gif", "image/gif"),
     ("webp", "image/webp"),
+    ("avif", "image/avif"),
     ("bmp", "image/bmp"),
     ("ico", "image/x-icon"),
     ("svg", "image/svg+xml"),
@@ -42,11 +43,11 @@ const IMAGE_EXTENSIONS: &[(&str, &str)] = &[
 
 /// Largest single asset that may be published. Generous for a screenshot or a
 /// diagram, small enough that one pathological file cannot dominate a share.
-pub const MAX_ASSET_BYTES: u64 = 8 * 1024 * 1024;
+pub const MAX_ASSET_BYTES: u64 = 3 * 1024 * 1024;
 
 /// Ceiling on everything one document contributes. A snapshot is base64url'd
 /// into an encrypted envelope, so the wire cost is ~4/3 of this.
-pub const MAX_TOTAL_BYTES: u64 = 32 * 1024 * 1024;
+pub const MAX_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Ceiling on how many assets one document contributes, so a generated file
 /// with a thousand thumbnails cannot stall a share.

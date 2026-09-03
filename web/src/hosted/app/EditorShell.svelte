@@ -56,7 +56,13 @@
   import { scrollViewToPos } from '../../lib/scroll-viewport';
   import { peerJumpPosition } from '../../lib/peer-strip-format';
   import { attachCollabPresenceSinks } from '../../lib/prosemirror/collab-presence-sinks';
+  import { sharedAssetPathFor } from '../../lib/review/asset-resolution';
+  import { approvedExternalImageUrl } from '../../lib/review/external-image-policy';
+  import { sharedImageDataUrl } from '../../lib/review/image-data-url';
+  import { htmlImageSources, markdownImageSources } from '../../lib/review/document-image-sources';
+  import { isSupportedSharedImageMediaType } from '../../lib/review/shared-image-policy';
   import LoadingLine from './LoadingLine.svelte';
+  import ImportChooser from './ImportChooser.svelte';
   import HtmlViewer from '../../lib/HtmlViewer.svelte';
   import HtmlCommentComposer from '../../lib/HtmlCommentComposer.svelte';
   import type {
@@ -370,9 +376,45 @@
   // no-op instead of renaming/deleting whichever file became active.
   let entryActionPath = $state<string | null>(null);
   let railError = $state<string | null>(null);
+  let importConflict = $state(false);
+  let downloadingActiveEntry = $state(false);
+  let activeEntryDownloadError = $state<string | null>(null);
   let assetInput = $state<HTMLInputElement | undefined>();
   let assetFolderInput = $state<HTMLInputElement | undefined>();
   let previewUrl = $state<string | null>(null);
+  // Blob URLs stay only in this tab's live component state. Neither the
+  // document nor the workspace store is rewritten: authored relative srcs
+  // remain the source of truth and a missing/rejected asset keeps the normal
+  // image fallback.
+  let localAssetUrls = $state<Record<string, string>>({});
+  let localHtmlAssetUrls = $state<Record<string, string>>({});
+  interface LocalAssetUrl {
+    blobUrl: string;
+    htmlDataUrl: string;
+  }
+  let ownedAssetUrls = new Map<string, LocalAssetUrl>();
+  const resolveLocalAssetUrl = $derived.by(() => {
+    const documentPath = activeEntry?.path;
+    const urls = localAssetUrls;
+    return (src: string): string | null => {
+      const external = approvedExternalImageUrl(src);
+      if (external !== null) return external;
+      if (!documentPath) return null;
+      const path = sharedAssetPathFor(documentPath, src);
+      return path === null ? null : urls[path] ?? null;
+    };
+  });
+  const resolveLocalHtmlAssetUrl = $derived.by(() => {
+    const documentPath = activeEntry?.path;
+    const urls = localHtmlAssetUrls;
+    return (src: string): string | null => {
+      const external = approvedExternalImageUrl(src);
+      if (external !== null) return external;
+      if (!documentPath) return null;
+      const path = sharedAssetPathFor(documentPath, src);
+      return path === null ? null : urls[path] ?? null;
+    };
+  });
 
   /* The empty-canvas invitation (attn-mkmz.5). A brand-new workspace lands on a
      blank untitled.md, and the only standing offer to bring a real document in
@@ -815,6 +857,88 @@
     };
   });
 
+  // Resolve local image dependencies through OPFS into short-lived Blob URLs
+  // for Markdown and data URLs for the opaque HTML sandbox. This is
+  // intentionally separate from the encrypted-share registry: local images
+  // are never staged as share snapshots, and share viewers never receive an
+  // OPFS-derived URL.
+  $effect(() => {
+    const entry = activeEntry;
+    // `displayText` is the editor's current buffer while `bodyText` is the
+    // last route/load snapshot. Prefer the live value so a newly authored
+    // relative image resolves before the debounce commits and reloads it.
+    const content = displayText ?? bodyText ?? '';
+    const liveAssets = new Map(workspace.entries.map((candidate) => [candidate.path, candidate]));
+    if (!entry || (entry.kind !== 'markdown' && entry.kind !== 'html')) {
+      for (const asset of ownedAssetUrls.values()) URL.revokeObjectURL(asset.blobUrl);
+      ownedAssetUrls = new Map();
+      localAssetUrls = {};
+      localHtmlAssetUrls = {};
+      return;
+    }
+    const sources = entry.kind === 'markdown' ? markdownImageSources(content) : htmlImageSources(content);
+    const paths = new Set<string>();
+    for (const src of sources) {
+      const path = sharedAssetPathFor(entry.path, src);
+      const asset = path === null ? undefined : liveAssets.get(path);
+      if (path !== null && asset?.kind === 'asset' && isSupportedSharedImageMediaType(asset.mediaType)) {
+        paths.add(path);
+      }
+    }
+    let cancelled = false;
+    void (async () => {
+      const next = new Map<string, LocalAssetUrl>();
+      const created: LocalAssetUrl[] = [];
+      try {
+        for (const path of paths) {
+          const retained = ownedAssetUrls.get(path);
+          if (retained) {
+            next.set(path, retained);
+            continue;
+          }
+          const result = await service.readEntryBytes(workspace.id, path);
+          if (!result) continue;
+          const bytes = new Uint8Array(result.bytes);
+          try {
+            const mediaType = result.mediaType;
+            if (!mediaType || !isSupportedSharedImageMediaType(mediaType)) continue;
+            const blob = new Blob([bytes.buffer as ArrayBuffer], { type: mediaType });
+            const asset = {
+              blobUrl: URL.createObjectURL(blob),
+              htmlDataUrl: sharedImageDataUrl(mediaType, bytes),
+            };
+            created.push(asset);
+            next.set(path, asset);
+          } finally {
+            bytes.fill(0);
+          }
+        }
+        if (cancelled) {
+          for (const asset of created) URL.revokeObjectURL(asset.blobUrl);
+          return;
+        }
+        for (const [path, asset] of ownedAssetUrls) {
+          if (!next.has(path)) URL.revokeObjectURL(asset.blobUrl);
+        }
+        ownedAssetUrls = next;
+        localAssetUrls = Object.fromEntries(
+          [...next].map(([path, asset]) => [path, asset.blobUrl]),
+        );
+        localHtmlAssetUrls = Object.fromEntries(
+          [...next].map(([path, asset]) => [path, asset.htmlDataUrl]),
+        );
+      } catch {
+        for (const asset of created) URL.revokeObjectURL(asset.blobUrl);
+      }
+    })();
+    return () => { cancelled = true; };
+  });
+
+  $effect(() => () => {
+    for (const asset of ownedAssetUrls.values()) URL.revokeObjectURL(asset.blobUrl);
+    ownedAssetUrls.clear();
+  });
+
   async function createMarkdownFile(): Promise<void> {
     const raw = newMarkdownPath.trim();
     if (raw.length === 0) return;
@@ -882,6 +1006,7 @@
     const wsId = workspace.id;
     const onScreen = (): boolean => workspace.id === wsId;
     railError = null;
+    importConflict = false;
     try {
       await importIntoWorkspace({
         workspaceId: wsId,
@@ -901,7 +1026,13 @@
     } catch (error) {
       // The rail belongs to whatever is on screen now; an error about a
       // workspace the user has left would read as a failure of this one.
-      if (onScreen()) railError = error instanceof Error ? error.message : String(error);
+      if (onScreen()) {
+        const message = error instanceof Error ? error.message : String(error);
+        importConflict = /entry already exists/iu.test(message);
+        railError = importConflict
+          ? 'That path already exists in this workspace. Open a fresh import to use the current folder contents.'
+          : message;
+      }
     } finally {
       if (assetInput) assetInput.value = '';
     }
@@ -952,11 +1083,22 @@
 
   async function downloadActiveEntry(): Promise<void> {
     const entry = activeEntry;
-    if (!entry) return;
-    const result = await service.readEntryBytes(workspace.id, entry.path);
-    if (!result) return;
-    const basename = entry.path.split('/').pop() ?? entry.path;
-    triggerDownload(document, basename, result.bytes, result.mediaType);
+    if (!entry || downloadingActiveEntry) return;
+    downloadingActiveEntry = true;
+    activeEntryDownloadError = null;
+    try {
+      const result = await service.readEntryBytes(workspace.id, entry.path);
+      if (!result) {
+        activeEntryDownloadError = 'The file could not be read. Please try downloading it again.';
+        return;
+      }
+      const basename = entry.path.split('/').pop() ?? entry.path;
+      triggerDownload(document, basename, result.bytes, result.mediaType);
+    } catch {
+      activeEntryDownloadError = 'The download could not be prepared. Please try again.';
+    } finally {
+      downloadingActiveEntry = false;
+    }
   }
 
   async function exportZip(): Promise<void> {
@@ -2658,6 +2800,19 @@
   function entryBasename(entry: WorkspaceEntry): string {
     return entry.path.split('/').pop() ?? entry.path;
   }
+  function downloadOnlyFormat(entry: WorkspaceEntry): string {
+    const extension = entryBasename(entry).split('.').pop()?.toLowerCase();
+    const names: Record<string, string> = {
+      csv: 'Comma-separated data',
+      json: 'JSON data',
+      pdf: 'PDF document',
+      rs: 'Rust source',
+      zip: 'ZIP archive',
+    };
+    if (extension && names[extension]) return names[extension];
+    if (extension) return `${extension.toUpperCase()} file`;
+    return 'File';
+  }
   function entrySubtitle(entry: WorkspaceEntry): string {
     if (entry.presentation === 'preview') return 'Preview inline';
     if (entry.presentation === 'download-only') return 'Download only';
@@ -3226,6 +3381,7 @@
             onCollabDocChange={handleCollabDocChange}
             onCollabSelectionChange={handleCollabSelectionChange}
             onCollabViewportChange={handleCollabViewportChange}
+            resolveAssetUrl={resolveLocalAssetUrl}
           />
         {/key}
       </div>
@@ -3242,6 +3398,7 @@
         <HtmlViewer
           content={bodyText ?? displayText ?? ''}
           allowScripts={false}
+          resolveAssetUrl={resolveLocalHtmlAssetUrl}
           annotate={htmlAnnotatable}
           annotationEvents={htmlAnnotationEvents}
           onBridge={(bridge) => (htmlBridge = bridge)}
@@ -3254,34 +3411,59 @@
         <p class="placeholder">Tap to start writing…</p>
       {/if}
     {:else if activeEntry && activeEntry.presentation !== 'editable'}
-      <div class="eyebrow">
-        {activeEntry.presentation === 'preview' ? 'Asset preview' : 'Download only'}
-      </div>
-      <h1>{activeEntry.path}</h1>
-      {#if activeEntry.presentation === 'preview' && previewUrl}
-        <button
-          class="asset-image-button"
-          type="button"
-          aria-label={`View ${activeEntry.path} full screen`}
-          onclick={openLightbox}
-        >
-          <img class="asset-image" src={previewUrl} alt={activeEntry.path} />
-        </button>
-      {:else}
-        <div class="asset-preview">
-          <strong>{activeEntry.path}</strong>
-          {#if activeEntry.presentation === 'preview'}
-            Decrypting preview… · {activeEntry.sizeLabel}
-          {:else}
-            This format is never executed here. Download it or open it in native attn ·
-            {activeEntry.sizeLabel}
+      {#if activeEntry.presentation === 'download-only'}
+        <section class="download-only-card" aria-labelledby="download-only-heading">
+          <div class="download-only-intro">
+            <span class="download-only-mark" aria-hidden="true">↓</span>
+            <div>
+              <h1 id="download-only-heading" class="download-only-title">{entryBasename(activeEntry)}</h1>
+              <p class="download-only-path">{activeEntry.path}</p>
+              <p class="download-only-note"><strong>Note:</strong> This file stays inert in the browser. Download it to use it in the right tool.</p>
+            </div>
+          </div>
+          <dl class="download-only-meta">
+            <div>
+              <dt>Format</dt>
+              <dd>{downloadOnlyFormat(activeEntry)}</dd>
+            </div>
+            <div>
+              <dt>Size</dt>
+              <dd>{activeEntry.sizeLabel}</dd>
+            </div>
+          </dl>
+          <div class="download-only-actions">
+            <button
+              class="button primary"
+              type="button"
+              disabled={downloadingActiveEntry}
+              onclick={() => void downloadActiveEntry()}
+            >
+              {downloadingActiveEntry ? 'Preparing download…' : 'Download file'}
+            </button>
+            <a class="download-native-link" href="/#native">Open in native attn <span aria-hidden="true">↗</span></a>
+          </div>
+          {#if activeEntryDownloadError}
+            <p class="download-only-error" role="alert">{activeEntryDownloadError}</p>
           {/if}
-        </div>
-        <div class="storage-actions">
-          <button class="button" type="button" onclick={() => void downloadActiveEntry()}>
-            Download
+        </section>
+      {:else}
+        <div class="eyebrow">Asset preview</div>
+        <h1>{activeEntry.path}</h1>
+        {#if previewUrl}
+          <button
+            class="asset-image-button"
+            type="button"
+            aria-label={`View ${activeEntry.path} full screen`}
+            onclick={openLightbox}
+          >
+            <img class="asset-image" src={previewUrl} alt={activeEntry.path} />
           </button>
-        </div>
+        {:else}
+          <div class="asset-preview">
+            <strong>{activeEntry.path}</strong>
+            Decrypting preview… · {activeEntry.sizeLabel}
+          </div>
+        {/if}
       {/if}
     {:else}
       <div class="eyebrow">Working draft</div>
@@ -3295,10 +3477,10 @@
       {/if}
     {/if}
       {#if showCanvasInvite}
-        <!-- Not aria-hidden. It holds two buttons and the only visible route
-             back to the desk, and aria-hidden over focusable controls is the
-             "hidden but tabbable" defect, not a fix — assistive tech would be
-             handed a page whose every control it must not describe. -->
+        <!-- Not aria-hidden. It holds the import trigger and the only visible
+             route back to the desk, and aria-hidden over focusable controls is
+             the "hidden but tabbable" defect, not a fix — assistive tech would
+             be handed a page whose controls it must not describe. -->
         <div class="canvas-invite" data-slot="canvas-invite">
           <div class="canvas-invite-card">
             <BrandMark size={40} />
@@ -3312,12 +3494,12 @@
                 : 'Drop a Markdown file or a folder here, or choose one.'}
             </p>
             <div class="canvas-invite-actions">
-              <button class="button primary" type="button" onclick={() => assetInput?.click()}>
-                Choose files
-              </button>
-              <button class="button" type="button" onclick={() => assetFolderInput?.click()}>
-                Choose folder
-              </button>
+              <ImportChooser
+                variant="canvas"
+                label="Choose files or folder"
+                onChooseFiles={() => assetInput?.click()}
+                onChooseFolder={() => assetFolderInput?.click()}
+              />
             </div>
             <p class="canvas-invite-privacy">
               Files stay in this browser profile — nothing is uploaded.
@@ -3523,21 +3705,21 @@
            thing a drag is actually aimed at — you cannot drop onto a word.
            It is still one real <button>, so the keyboard and pointer paths are
            unchanged; the button is simply the size and shape of the target. -->
-      <button
-        class="hosted-sidebar-add"
-        type="button"
-        data-action="add-assets"
-        onclick={() => assetInput?.click()}
-      >
-        <svg class="hosted-sidebar-add-glyph" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M12 5v14M5 12h14" />
-        </svg>
-        <span class="hosted-sidebar-add-label">Add files</span>
-        <span class="hosted-sidebar-add-hint">or drop them here</span>
-      </button>
+      <div class="hosted-sidebar-add-group">
+        <ImportChooser
+          variant="sidebar"
+          label="Add files"
+          hint="or drop them here"
+          onChooseFiles={() => assetInput?.click()}
+          onChooseFolder={() => assetFolderInput?.click()}
+        />
+      </div>
     {/if}
     {#if railError}
       <p class="hosted-sidebar-error" role="alert">{railError}</p>
+      {#if importConflict}
+        <a class="hosted-sidebar-error-action" href="/open">Open fresh import</a>
+      {/if}
     {/if}
   </div>
 {/snippet}
@@ -3936,9 +4118,12 @@
         </div>
       {/if}
     {/each}
-    <button class="file-add-row" type="button" onclick={() => assetInput?.click()}>
-      ＋ Add file or asset
-    </button>
+    <ImportChooser
+      variant="sheet"
+      label="＋ Add file or asset"
+      onChooseFiles={() => assetInput?.click()}
+      onChooseFolder={() => assetFolderInput?.click()}
+    />
   </BottomSheet>
 {/if}
 

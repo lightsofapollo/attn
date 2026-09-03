@@ -161,7 +161,8 @@ test('a blank untitled.md opens the ordinary editor, rail and all', async ({ pag
   await expect(page.locator('[data-slot="canvas-invite"]')).toHaveCount(0);
   await expect(page.getByRole('textbox', { name: 'Filter files' })).toBeVisible();
   await expect(page.locator('[data-path][data-active="true"]')).toContainText('untitled.md');
-  await expect(page.locator('.hosted-sidebar-add')).toContainText('Add files');
+  await expect(page.locator('[data-action="add-assets"]')).toContainText('Add files');
+  await expect(page.locator('[data-action="add-folder"]')).toContainText('Add folder');
 
   // The invitation must not arrive late — the autosave commit that follows the
   // first keystroke refreshes the workspace, and that refresh used to clear the
@@ -403,8 +404,12 @@ test('asset entries render inline previews and download-only placeholders', asyn
   // Safe rasters render inline from (mock-)decrypted bytes.
   await expect(page.locator('.asset-image')).toBeVisible();
   await page.goto('/app/w/ws-product/data/notes.json?shell=demo');
-  await expect(page.locator('.hosted-native-document .eyebrow')).toHaveText('Download only');
-  await expect(page.locator('.asset-preview')).toContainText('never executed');
+  await expect(page.locator('.hosted-native-document > .eyebrow')).toHaveCount(0);
+  await expect(page.locator('.download-only-card h1')).toHaveText('notes.json');
+  await expect(page.locator('.download-only-path')).toHaveText('data/notes.json');
+  await expect(page.locator('.download-only-card h2')).toHaveCount(0);
+  await expect(page.locator('.download-only-note')).toHaveText('Note: This file stays inert in the browser. Download it to use it in the right tool.');
+  await expect(page.locator('.download-only-note')).toHaveCSS('font-style', 'italic');
   await expect(page.locator('.hosted-native-document').getByRole('button', { name: 'Download' })).toBeVisible();
 });
 

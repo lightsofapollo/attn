@@ -3,7 +3,8 @@
 // The policy is pinned except for the relay origin, which differs between
 // staging (relay-staging.attn.sh) and production (relay.attn.sh) and is
 // injected via the worker's RELAY_ORIGIN var. Everything else stays
-// deliberately closed: no third-party scripts, analytics, or remote assets.
+// deliberately closed: no third-party scripts or analytics. HTTPS images are
+// the one explicit remote-content capability, gated by the renderer policy.
 
 import { THEME_PREFLIGHT_SHA256 } from './theme-preflight';
 
@@ -25,7 +26,7 @@ export function buildContentSecurityPolicy(
     "form-action 'none'",
     `frame-ancestors ${frameAncestors}`,
     "frame-src 'self' blob: data:",
-    "img-src 'self' blob: data:",
+    "img-src 'self' blob: data: https:",
     "manifest-src 'self'",
     "media-src 'self' blob: data:",
     "object-src 'none'",

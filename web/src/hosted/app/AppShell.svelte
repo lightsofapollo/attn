@@ -607,14 +607,18 @@
 </script>
 
 {#if phase === 'loading'}
-  <!-- attn-mkmz.7. Both loading branches used to render `main.desk` with a
-       left-aligned eyebrow at the top of the page — so opening a DOCUMENT drew
-       a desk-shaped page first, then snapped to a three-column editor, and the
-       indicator itself sat in the top-left corner of a region it was standing
-       in for. One centred surface for every wait, and the editor route names
-       the same thing at every stage (see EditorShell's own loading text). -->
+  <!-- Keep the desk's masthead and content region in place while its data is
+       loading. Removing the header here made the whole page jump down when the
+       ready desk mounted; only the content of that region should change. -->
   <div class="app-shell" data-app-view="loading">
-    <div class="app-loading" role="status"><LoadingLine text="Opening your desk" /></div>
+    <AppHeader mode={health.mode}>
+      {#snippet actions()}
+        <a class="button" href="/app/storage">Storage</a>
+      {/snippet}
+    </AppHeader>
+    <main class="desk desk-loading" aria-busy="true">
+      <div class="desk-loading-status" role="status"><LoadingLine text="Opening your desk" /></div>
+    </main>
   </div>
 {:else if phase === 'error'}
   <!-- The moment of real fear had the least design in the app (attn-a9f7.1.3):
@@ -766,4 +770,3 @@
     {/if}
   </div>
 {/if}
-

@@ -500,13 +500,9 @@
       // renders the authored src verbatim — the same bytes the stock `toDOM`
       // emits — and the src fails exactly as it did before.
       //
-      // What changes for those surfaces is only the FAILURE state, and that is
-      // the point: hosted has no filesystem behind `./diagram.png` and its CSP
-      // has no `https:` in `img-src`, so those images cannot load there and
-      // will not until workspace-relative assets land. Until then the honest
-      // answer is the same card native shows — alt text and a filename in the
-      // document's voice — not the platform's broken-image glyph. Shipping the
-      // graceful state on one of two surfaces is a half-landed feature.
+      // Resolver-owning surfaces distinguish workspace-relative files from
+      // approved HTTPS images. A declined source stays behind this view's
+      // explicit fallback rather than receiving a surprise network request.
       image: (node: PmNode) => imageNodeView(node, resolveAssetUrl),
       code_block(node, editorView, getPos) {
         const mermaid = mermaidNodeView(node, editorView, getPos);

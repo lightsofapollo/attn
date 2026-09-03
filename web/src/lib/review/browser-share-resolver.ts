@@ -1,7 +1,7 @@
 /** Crypto-agnostic durable-share resolution with persistent rollback fencing. */
 
 export type DurableShareTier = 'view' | 'comment' | 'suggest';
-export type DurableShareDocType = 'markdown' | 'html';
+export type DurableShareDocType = 'markdown' | 'html' | 'asset';
 
 const PROTOCOL_ID = /^[A-Za-z0-9_-]{1,128}$/u;
 const BUNDLE_ID = /^[A-Za-z0-9_-]{22}$/u;
@@ -53,6 +53,7 @@ export interface DurableShareSnapshot {
   snapshotId: string;
   docType: DurableShareDocType;
   content: string;
+  mediaType?: string;
   metadata?: unknown;
 }
 
@@ -330,8 +331,9 @@ export class BrowserShareResolver<TCapability = unknown> {
       try {
         if (
           snapshot.fileId !== ref.fileId || snapshot.snapshotId !== ref.snapshotId ||
-          (snapshot.docType !== 'markdown' && snapshot.docType !== 'html') ||
-          typeof snapshot.content !== 'string'
+          (snapshot.docType !== 'markdown' && snapshot.docType !== 'html' && snapshot.docType !== 'asset') ||
+          typeof snapshot.content !== 'string' ||
+          (snapshot.docType === 'asset' && typeof snapshot.mediaType !== 'string')
         ) {
           throw new BrowserShareResolutionError(
             'snapshot_invalid',

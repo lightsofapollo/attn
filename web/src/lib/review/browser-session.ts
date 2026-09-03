@@ -55,6 +55,7 @@ import {
   decodeCanonicalBase64Url,
   validateSnapshotPlaintext,
 } from './browser-workspace-manifest';
+import { browserAssetRegistry, type BrowserAssetRegistry } from './browser-asset-registry';
 import { assembleBrowserEvent, type AssembledBrowserEvent } from './browser-envelope';
 import {
   BrowserOutbox,
@@ -376,6 +377,8 @@ export interface BrowserSessionOptions {
   storage?: BrowserStorage;
   /** Override the production IndexedDB opener. */
   storageFactory?: (createIfMissing: boolean) => Promise<BrowserStorage | null>;
+  /** Per-tab verified-asset runtime. Never persisted with the review store. */
+  assetRegistry?: BrowserAssetRegistry;
 }
 
 /** Minimal fetch shape — avoids depending on lib.dom.d.ts in TS tests. */
@@ -920,6 +923,7 @@ export function admissionHeaderValue(
  */
 export class BrowserSession {
   private readonly opts: BrowserSessionOptions;
+  private readonly assetRegistry: BrowserAssetRegistry;
   private state: BrowserSessionState = {
     principal: 'reviewer',
     ownerOnline: false,
@@ -984,6 +988,7 @@ export class BrowserSession {
 
   constructor(opts: BrowserSessionOptions = {}) {
     this.opts = opts;
+    this.assetRegistry = opts.assetRegistry ?? browserAssetRegistry;
     this.principal = opts.owner ? 'owner' : 'reviewer';
     this.state = { ...this.state, principal: this.principal };
     this.store = opts.store ?? null;
@@ -1668,6 +1673,7 @@ export class BrowserSession {
 
   /** Tear down transports and clobber in-memory keys. Safe to call repeatedly. */
   close(): void {
+    const roomId = this.state.roomId;
     this.detachPagehide();
     this.stopTransport();
     this.reviewInboundDoorbell?.close();
@@ -1680,6 +1686,7 @@ export class BrowserSession {
     this.pendingSnapshots.clear();
     this.hydratedEntries.clear();
     this.pendingWorkspaceManifests.clear();
+    if (roomId) this.assetRegistry.clearRoom(roomId);
     this.signerRefreshAttempts.clear();
     this.volatileInbound.clear();
     this.clearStorePlaintext();
@@ -2206,6 +2213,7 @@ export class BrowserSession {
   }
 
   private fail(kind: BrowserSessionError['kind'], message: string): void {
+    const roomId = this.state.roomId;
     this.detachPagehide();
     this.stopTransport();
     this.storage?.close();
@@ -2216,6 +2224,7 @@ export class BrowserSession {
     this.pendingSnapshots.clear();
     this.hydratedEntries.clear();
     this.pendingWorkspaceManifests.clear();
+    if (roomId) this.assetRegistry.clearRoom(roomId);
     this.signerRefreshAttempts.clear();
     this.volatileInbound.clear();
     this.clearStorePlaintext();
@@ -3120,7 +3129,16 @@ export class BrowserSession {
       }
       snapshot.byteLength = raw.length;
       snapshot.mediaType = inline.mediaType;
-      raw.fill(0);
+      // Move the verified buffer into the tab-local registry. It stays inert
+      // until the signed workspace manifest binds every field below.
+      this.assetRegistry.stage({
+        roomId: meta.roomId,
+        fileId: body.fileId,
+        snapshotId: body.snapshotId,
+        path: body.ownerDisplayPath ?? '',
+        mediaType: inline.mediaType,
+        bytes: raw,
+      });
     } else {
       const canonical = toCanonicalBytes(inline.manifest);
       if (contentHash(canonical) !== body.baseHash) {
@@ -3144,6 +3162,7 @@ export class BrowserSession {
       }
       this.pendingWorkspaceManifests.delete(body.snapshotId);
       snapshot.workspaceManifest = inline.manifest;
+      this.assetRegistry.activateManifest(meta.roomId, inline.manifest.entries);
     }
     store.applySnapshot(snapshot);
     if (inline.docType !== 'workspace_manifest') {

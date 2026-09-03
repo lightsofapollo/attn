@@ -388,6 +388,71 @@ defineCase('renaming a file edits its row, not a field at the foot of the rail',
   );
 });
 
+defineCase('file-tree disclosure and selection stay inside the branch guide', () => {
+  const tree = read('FileTree.svelte');
+  const reviewTree = read('ReviewFileTree.svelte');
+  const css = read('../app.css');
+
+  assert(
+    tree.includes("sidebar-tree-chevron--open") && tree.includes('exp ?'),
+    'the owner tree chevron must derive its direction from the folder open state',
+  );
+  assert(
+    reviewTree.includes('review-tree-chevron--open') && reviewTree.includes('collapsed.has(node.path)'),
+    'the review tree chevron must derive its direction from the folder collapsed state',
+  );
+  assert(
+    css.includes('transition: transform var(--t) var(--ease)')
+      && css.includes('.sidebar-tree-chevron--open')
+      && css.includes('.review-tree-chevron--open'),
+    'both trees need the shared eased disclosure motion',
+  );
+  assert(
+    css.includes('margin-inline-start: calc(var(--tree-depth, 0) * 20px)')
+      && css.includes('width: calc(100% - var(--tree-depth, 0) * 20px)')
+      && css.includes('padding-left: 10px !important'),
+    'nested row fills must be inset from the containing guide while preserving label spacing',
+  );
+  assert(
+    css.includes('@media (prefers-reduced-motion: reduce)')
+      && css.includes('.sidebar-tree-chevron,\n    .review-tree-chevron'),
+    'disclosure motion must respect reduced-motion preferences',
+  );
+});
+
+defineCase('hosted import uses one files-or-folder chooser', () => {
+  const shell = read('../hosted/app/EditorShell.svelte');
+  const openPage = read('../hosted/app/OpenPage.svelte');
+  const chooser = read('../hosted/app/ImportChooser.svelte');
+
+  assert(
+    chooser.includes('Choose one or more files') && chooser.includes('Keep the folder structure'),
+    'the chooser must expose files and folders as explicit menu choices',
+  );
+  assert(
+    (shell.match(/<ImportChooser/g) ?? []).length >= 3,
+    'sidebar, empty canvas, and mobile sheet must share the chooser',
+  );
+  assert(
+    shell.includes('webkitdirectory') && shell.includes('bind:this={assetFolderInput}'),
+    'the folder input must remain available behind the shared chooser',
+  );
+  assert(
+    openPage.includes('<ImportChooser') && openPage.includes('bind:this={folderInput}')
+      && openPage.includes('webkitdirectory'),
+    'the desk import route must offer the same folder choice',
+  );
+  assert(
+    !shell.includes('data-action="add-folder"'),
+    'the sidebar must not expose a second competing folder button',
+  );
+  assert(
+    shell.includes('Open a fresh import to use the current folder contents.')
+      && shell.includes('href="/open"'),
+    'duplicate imports must explain the stale-workspace path and link to a fresh import',
+  );
+});
+
 let failed = 0;
 for (const run of cases) {
   const result = run();

@@ -13,10 +13,18 @@
 // strips the share root, admits only `Component::Normal` segments, joins with
 // `/`, and NFC-normalises. So they live in one root-relative space and a src
 // resolved against the document's own path lands on the asset's key. The
-// manifest is NOT consulted: it is a binding artifact, and the asset snapshot
-// already carries the only key needed.
+// Browser asset bytes are activated only after their snapshot metadata matches
+// the signed manifest, then live as tab-local Blob URLs. Native keeps its
+// existing base64 bridge as a backwards-compatible rendering fallback.
 
 import type { ReviewSnapshot } from '../types';
+import { browserAssetRegistry } from './browser-asset-registry';
+
+/** The narrow runtime capability a shared-image resolver needs from a tab. */
+export interface SharedAssetUrlRegistry {
+  urlFor(roomId: string, snapshotId: string): string | null;
+  dataUrlFor(roomId: string, snapshotId: string): string | null;
+}
 
 /** `scheme:` — 2+ chars so a `C:` drive letter is not mistaken for one.
  *  Mirrors `is_non_local` in src/review/assets.rs. */
@@ -125,6 +133,8 @@ export function buildSharedAssetResolver(
   snapshots: readonly ReviewSnapshot[],
   roomId: string | null,
   docWirePath: string | null | undefined,
+  registry: SharedAssetUrlRegistry = browserAssetRegistry,
+  renderTarget: 'document' | 'opaque-sandbox' = 'document',
 ): (src: string) => string | null {
   if (!roomId || !docWirePath) return () => null;
 
@@ -151,7 +161,13 @@ export function buildSharedAssetResolver(
     if (!snapshot) return null;
     const cached = urls.get(snapshot.snapshotId);
     if (cached !== undefined) return cached;
-    const url = assetDataUrl(snapshot.mediaType, snapshot.assetContent);
+    // Browser sessions intentionally do not put asset payloads on a
+    // ReviewSnapshot. Their hash- and manifest-bound bytes live only in the
+    // tab-local registry; native keeps its existing `assetContent` bridge.
+    const url = (renderTarget === 'opaque-sandbox'
+      ? registry.dataUrlFor(roomId, snapshot.snapshotId)
+      : registry.urlFor(roomId, snapshot.snapshotId))
+      ?? assetDataUrl(snapshot.mediaType, snapshot.assetContent);
     urls.set(snapshot.snapshotId, url);
     return url;
   };

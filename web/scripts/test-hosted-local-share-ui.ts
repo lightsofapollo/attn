@@ -21,7 +21,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { once } from 'node:events';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { chromium, type BrowserContext, type Page } from '@playwright/test';
+import { chromium, expect, type BrowserContext, type Page } from '@playwright/test';
 
 const webRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const relayRoot = path.resolve(webRoot, '..', 'relay');
@@ -31,12 +31,21 @@ const relayUrl = `http://127.0.0.1:${relayPort}`;
 const appUrl = `http://127.0.0.1:${appPort}`;
 const commentMarker = 'LOCAL-OWNER-REVIEW-COMMENT-9173';
 const suggestionMarker = 'LOCAL-OWNER-REVIEW-SUGGESTION-9173';
+const sharedImageSource = '../images/pixel.png';
+const workingRemoteImageSource = 'https://images.pexels.com/photos/35227957/pexels-photo-35227957.jpeg';
+const remoteImageSource = 'https://images.attn.invalid/remote-share-image.png';
+const unresolvedImageSource = 'data:;base64,';
+const sharedPng = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==',
+  'base64',
+);
 const useExternalServers = process.env.ATTN_SHARE_UI_EXTERNAL === '1';
 
 let relay: ChildProcessWithoutNullStreams | null = null;
 let app: ChildProcessWithoutNullStreams | null = null;
 let ownerContext: BrowserContext | null = null;
 let reviewerContext: BrowserContext | null = null;
+let offlineReviewerContext: BrowserContext | null = null;
 let browser: Awaited<ReturnType<typeof chromium.launch>> | null = null;
 const diagnostics: string[] = [];
 // Playwright's locator waits use unref'd timers. Keep a real handle while the
@@ -99,6 +108,13 @@ function captureBrowserFailures(page: Page, label: string): void {
   });
 }
 
+function seedProfileDisplayName({ displayName }: { displayName: string }): void {
+  // Playwright init scripts also run inside `srcdoc` frames. Those frames are
+  // intentionally opaque-origin, where touching localStorage throws.
+  if (window.location.protocol !== 'http:' && window.location.protocol !== 'https:') return;
+  localStorage.setItem('attn.profile.displayName', displayName);
+}
+
 async function selectText(page: Page, needle: string): Promise<void> {
   const result = await page.evaluate((text) => {
     const view = (window as unknown as { __attnPmView?: { dom: HTMLElement } }).__attnPmView;
@@ -124,6 +140,186 @@ async function selectText(page: Page, needle: string): Promise<void> {
   }, needle);
   if (result !== 'selected') throw new Error(`could not select ${needle}: ${result}`);
   await page.locator('[data-slot="selection-toolbar"]').waitFor({ state: 'visible' });
+}
+
+async function expectResolvedSharedImage(page: Page, label: string): Promise<void> {
+  const wrapper = page.locator(`.md-image[data-src="${sharedImageSource}"]`);
+  await wrapper.waitFor({ state: 'attached', timeout: 60_000 });
+  await page.waitForFunction(
+    (source) => document.querySelector(`.md-image[data-src="${source}"]`)?.getAttribute('data-loaded') === 'true',
+    sharedImageSource,
+    { timeout: 60_000 },
+  );
+  const image = wrapper.locator('img');
+  await image.waitFor({ state: 'visible', timeout: 60_000 });
+  const detail = await image.evaluate((element) => {
+    const imageElement = element as HTMLImageElement;
+    return {
+      src: imageElement.getAttribute('src'),
+      width: imageElement.naturalWidth,
+      height: imageElement.naturalHeight,
+      loaded: imageElement.parentElement?.getAttribute('data-loaded'),
+    };
+  });
+  if (detail.loaded !== 'true' || detail.width !== 1 || detail.height !== 1 || !detail.src?.startsWith('blob:')) {
+    throw new Error(`${label} did not render the verified local image: ${JSON.stringify(detail)}`);
+  }
+}
+
+async function expectBlockedRemoteImage(page: Page, label: string): Promise<void> {
+  const image = page.locator(`.md-image[data-src="${remoteImageSource}"] img`);
+  await image.waitFor({ state: 'attached', timeout: 60_000 });
+  await image.waitFor({ state: 'hidden', timeout: 60_000 });
+  const detail = await image.evaluate((element) => ({
+    src: element.getAttribute('src'),
+    broken: element.parentElement?.getAttribute('data-broken'),
+  }));
+  if (detail.src !== unresolvedImageSource || detail.broken !== 'true') {
+    throw new Error(`${label} did not retain a no-network remote-image fallback: ${JSON.stringify(detail)}`);
+  }
+}
+
+async function expectBlockedApprovedImage(page: Page, label: string): Promise<void> {
+  const image = page.locator(`.md-image[data-src="${workingRemoteImageSource}"] img`);
+  await image.waitFor({ state: 'attached', timeout: 60_000 });
+  await image.waitFor({ state: 'hidden', timeout: 60_000 });
+  const detail = await image.evaluate((element) => ({
+    src: element.getAttribute('src'),
+    broken: element.parentElement?.getAttribute('data-broken'),
+  }));
+  if (detail.src !== unresolvedImageSource || detail.broken !== 'true') {
+    throw new Error(`${label} did not gate the approved remote image before opt-in: ${JSON.stringify(detail)}`);
+  }
+}
+
+async function expectResolvedExternalImage(page: Page, label: string): Promise<void> {
+  const wrapper = page.locator(`.md-image[data-src="${workingRemoteImageSource}"]`);
+  await wrapper.waitFor({ state: 'attached', timeout: 60_000 });
+  await page.waitForFunction(
+    (source) => document.querySelector(`.md-image[data-src="${source}"]`)?.getAttribute('data-loaded') === 'true',
+    workingRemoteImageSource,
+    { timeout: 60_000 },
+  );
+  const image = wrapper.locator('img');
+  const detail = await image.evaluate((element) => {
+    const imageElement = element as HTMLImageElement;
+    return {
+      src: imageElement.getAttribute('src'),
+      width: imageElement.naturalWidth,
+      height: imageElement.naturalHeight,
+      referrerPolicy: imageElement.getAttribute('referrerpolicy'),
+      loaded: imageElement.parentElement?.getAttribute('data-loaded'),
+    };
+  });
+  if (
+    detail.loaded !== 'true'
+    || detail.width !== 1
+    || detail.height !== 1
+    || detail.src !== workingRemoteImageSource
+    || detail.referrerPolicy !== 'no-referrer'
+  ) {
+    throw new Error(`${label} did not render the approved remote image: ${JSON.stringify(detail)}`);
+  }
+}
+
+async function chooseVisibleImport(
+  page: Page,
+  choice: 'Files' | 'Folder',
+  files: { name: string; mimeType: string; buffer: Buffer }[] | string,
+): Promise<void> {
+  await page.getByRole('button', { name: 'Add files', exact: true }).click();
+  const menuItem = page.getByRole('menuitem', { name: new RegExp(`^${choice}\\b`, 'u') });
+  await menuItem.waitFor({ state: 'visible' });
+  const fileChooser = page.waitForEvent('filechooser');
+  await menuItem.click();
+  await (await fileChooser).setFiles(files);
+}
+
+async function routeWorkingRemoteImage(context: BrowserContext): Promise<void> {
+  // Keep the success assertion deterministic in CI while preserving the exact
+  // authored HTTPS URL in the DOM. A manual smoke run against the app itself
+  // still exercises the real Pexels response; this route only avoids making the
+  // lifecycle gate depend on a third-party CDN.
+  await context.route(`${workingRemoteImageSource}**`, (route) => route.fulfill({
+    status: 200,
+    contentType: 'image/png',
+    body: sharedPng,
+    headers: { 'cache-control': 'no-store' },
+  }));
+}
+
+async function expectAttemptedExternalImage(page: Page, label: string): Promise<void> {
+  const image = page.locator(`.md-image[data-src="${remoteImageSource}"] img`);
+  await image.waitFor({ state: 'attached', timeout: 60_000 });
+  await page.waitForFunction(
+    (source) => {
+      const imageElement = document.querySelector(`.md-image[data-src="${source}"] img`);
+      return imageElement?.getAttribute('src') === source
+        && imageElement.parentElement?.getAttribute('data-broken') === 'true';
+    },
+    remoteImageSource,
+    { timeout: 60_000 },
+  );
+  const detail = await image.evaluate((element) => ({
+    src: element.getAttribute('src'),
+    referrerPolicy: element.getAttribute('referrerpolicy'),
+    broken: element.parentElement?.getAttribute('data-broken'),
+  }));
+  if (
+    detail.src !== remoteImageSource
+    || detail.referrerPolicy !== 'no-referrer'
+    || detail.broken !== 'true'
+  ) {
+    throw new Error(`${label} did not attempt the approved HTTPS image safely: ${JSON.stringify(detail)}`);
+  }
+}
+
+async function expectResolvedSharedHtmlImages(
+  page: Page,
+  label: string,
+  externalImagesEnabled = false,
+): Promise<void> {
+  const frame = page.frameLocator('[data-slot="html-viewer"] iframe');
+  const verified = frame.locator('#verified-html-image');
+  await expect(verified).toBeVisible({ timeout: 60_000 });
+  await expect(verified).toHaveJSProperty('naturalWidth', 1, { timeout: 60_000 });
+  await expect(verified).toHaveJSProperty('naturalHeight', 1, { timeout: 60_000 });
+  await expect(verified).toHaveAttribute('src', /^data:image\/png;base64,/u);
+
+  const pictureImage = frame.locator('#picture-html-image');
+  await expect(pictureImage).toBeVisible({ timeout: 60_000 });
+  await expect(pictureImage).toHaveJSProperty('naturalWidth', 1, { timeout: 60_000 });
+  const source = frame.locator('#verified-html-source');
+  const srcset = await source.getAttribute('srcset');
+  const expectedRemoteSrcset = externalImagesEnabled ? remoteImageSource : unresolvedImageSource;
+  if (!srcset?.includes('data:image/png;base64,') || !srcset.includes(expectedRemoteSrcset)) {
+    throw new Error(`${label} did not rewrite picture srcset safely: ${JSON.stringify(srcset)}`);
+  }
+
+  const remote = frame.locator('#remote-html-image');
+  await expect(remote).toHaveAttribute(
+    'src',
+    externalImagesEnabled ? remoteImageSource : unresolvedImageSource,
+    { timeout: 60_000 },
+  );
+  await expect(remote).toHaveJSProperty('naturalWidth', 0, { timeout: 60_000 });
+  await expect(remote).toHaveAttribute('referrerpolicy', 'no-referrer');
+  const approvedRemote = frame.locator('#working-remote-html-image');
+  await expect(approvedRemote).toHaveAttribute(
+    'src',
+    externalImagesEnabled ? workingRemoteImageSource : unresolvedImageSource,
+    { timeout: 60_000 },
+  );
+  if (externalImagesEnabled) {
+    await expect(approvedRemote).toHaveJSProperty('naturalWidth', 1, { timeout: 60_000 });
+    await expect(approvedRemote).toHaveJSProperty('naturalHeight', 1, { timeout: 60_000 });
+  } else {
+    await expect(approvedRemote).toHaveJSProperty('naturalWidth', 0, { timeout: 60_000 });
+  }
+  const sandbox = await page.locator('[data-slot="html-viewer"] iframe').getAttribute('sandbox');
+  if (sandbox?.includes('allow-same-origin')) {
+    throw new Error(`${label} weakened the opaque-origin HTML sandbox: ${sandbox}`);
+  }
 }
 
 async function waitForOwnerTextRebase(
@@ -157,12 +353,34 @@ async function currentWorkspaceId(page: Page): Promise<string> {
   return id;
 }
 
-async function createInvite(owner: Page): Promise<string> {
+async function createInvite(owner: Page, options: { selectAll?: boolean } = {}): Promise<string> {
   await owner.locator('[data-slot="owner-header-share"]').click();
   const dialog = owner.getByRole('dialog', { name: 'Share files for review' });
   await dialog.waitFor({ state: 'visible' });
+  if (options.selectAll) await dialog.getByRole('button', { name: 'Select all' }).click();
   await dialog.getByRole('button', { name: /Create review link/u }).click();
-  await dialog.locator('select[aria-label="What this link allows"]').selectOption('suggest');
+  const tierPicker = dialog.locator('select[aria-label="What this link allows"]');
+  try {
+    await tierPicker.selectOption('suggest', { timeout: 30_000 });
+  } catch (error) {
+    const resume = dialog.getByRole('button', { name: 'Resume publishing' });
+    if (await resume.isVisible().catch(() => false)) {
+      // A fresh browser workspace can race its writer lease on the first
+      // publish. Exercise the product's recoverable resume action rather
+      // than turning that transient fence into a false image-test failure.
+      await resume.click();
+      await tierPicker.selectOption('suggest', { timeout: 60_000 });
+      return finishInvite(owner, dialog);
+    }
+    throw new Error(
+      `review link did not become ready: ${JSON.stringify((await dialog.textContent() ?? '').trim())}`,
+      { cause: error },
+    );
+  }
+  return finishInvite(owner, dialog);
+}
+
+async function finishInvite(owner: Page, dialog: ReturnType<Page['getByRole']>): Promise<string> {
   const chip = dialog.locator('.share-link-chip');
   await chip.click();
   const invite = await chip.locator('code').textContent();
@@ -213,12 +431,11 @@ async function main(): Promise<void> {
 
   browser = await chromium.launch({ headless: true });
   ownerContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  await routeWorkingRemoteImage(ownerContext);
   // The product correctly asks a first-time owner to choose a display name
   // after a room becomes active. This lifecycle gate is about durable review
   // convergence, so provide that ordinary prerequisite before navigation.
-  await ownerContext.addInitScript(() => {
-    localStorage.setItem('attn.profile.displayName', 'Owner agent');
-  });
+  await ownerContext.addInitScript(seedProfileDisplayName, { displayName: 'Owner agent' });
   const owner = await ownerContext.newPage();
   captureBrowserFailures(owner, 'owner');
   await owner.goto(`${appUrl}/app#new`, { waitUntil: 'domcontentloaded' });
@@ -252,9 +469,7 @@ async function main(): Promise<void> {
   step('owner passive tab and Desk opened before review activity');
 
   reviewerContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
-  await reviewerContext.addInitScript(() => {
-    localStorage.setItem('attn.profile.displayName', 'Review agent');
-  });
+  await reviewerContext.addInitScript(seedProfileDisplayName, { displayName: 'Review agent' });
   const reviewer = await reviewerContext.newPage();
   captureBrowserFailures(reviewer, 'reviewer');
   await reviewer.goto(invite, { waitUntil: 'domcontentloaded' });
@@ -363,10 +578,190 @@ async function main(): Promise<void> {
   });
   step('resolved history survived reviewer disconnect and reload');
 
+  // Run image behavior in a fresh one-document workspace so the established
+  // comment/suggestion lifecycle above remains an independent baseline.
+  const imageOwner = await ownerContext.newPage();
+  captureBrowserFailures(imageOwner, 'image owner');
+  const remoteRequests: string[] = [];
+  imageOwner.on('request', (request) => {
+    if (request.url().startsWith(remoteImageSource)) remoteRequests.push(request.url());
+  });
+  await imageOwner.goto(`${appUrl}/app#new`, { waitUntil: 'domcontentloaded' });
+  await imageOwner.locator('input[type="file"][multiple][accept*="image"]').setInputFiles([
+    {
+      name: 'docs/review.md',
+      mimeType: 'text/markdown',
+      buffer: Buffer.from(
+        `# Hosted image share\n\n![Verified chart](${sharedImageSource})\n\n![Remote landscape](${workingRemoteImageSource})\n\n![Remote fallback](${remoteImageSource})\n\n`,
+      ),
+    },
+    {
+      name: 'docs/preview.html',
+      mimeType: 'text/html',
+      buffer: Buffer.from(
+        `<!doctype html><html><body>
+          <img id="verified-html-image" src="${sharedImageSource}" alt="Verified chart">
+          <picture>
+            <source id="verified-html-source" srcset="${sharedImageSource} 1x, ${remoteImageSource} 2x">
+            <img id="picture-html-image" src="${sharedImageSource}" alt="Picture chart">
+          </picture>
+          <img id="working-remote-html-image" src="${workingRemoteImageSource}" alt="Remote landscape">
+          <img id="remote-html-image" src="${remoteImageSource}" alt="Remote fallback">
+        </body></html>`,
+      ),
+    },
+    { name: 'images/pixel.png', mimeType: 'image/png', buffer: sharedPng },
+  ]);
+  await imageOwner.getByRole('button', { name: 'review.md', exact: true }).waitFor({ state: 'visible' });
+  await expectResolvedSharedImage(imageOwner, 'local owner');
+  await expectResolvedExternalImage(imageOwner, 'local owner');
+  await expectAttemptedExternalImage(imageOwner, 'local owner');
+
+  // The visible rail affordance is one trigger with two explicit picker
+  // branches. Exercise both native inputs and retain a nested folder path so
+  // the tree geometry assertion below has a real branch to measure.
+  await chooseVisibleImport(imageOwner, 'Files', [{
+    name: 'chooser-file.md',
+    mimeType: 'text/markdown',
+    buffer: Buffer.from('# Files chooser\n'),
+  }]);
+  try {
+    await imageOwner.locator('[data-path$="/chooser-file.md"]').waitFor({ state: 'visible', timeout: 60_000 });
+  } catch (error) {
+    const debug = await imageOwner.evaluate(() => ({
+      paths: [...document.querySelectorAll('[data-path]')].map((element) => element.getAttribute('data-path')),
+      rail: document.querySelector('.hosted-sidebar-error')?.textContent ?? null,
+      inputs: [...document.querySelectorAll('input[type="file"]')].map((element) => ({
+        multiple: element.hasAttribute('multiple'),
+        directory: element.hasAttribute('webkitdirectory'),
+        files: (element as HTMLInputElement).files?.length ?? 0,
+      })),
+    }));
+    throw new Error(`files chooser import did not land: ${JSON.stringify(debug)}`, { cause: error });
+  }
+  await chooseVisibleImport(
+    imageOwner,
+    'Folder',
+    path.resolve(webRoot, '..', 'tests', 'fixtures', 'chooser-folder'),
+  );
+  const nestedRow = imageOwner.locator('[data-path$="/chooser-folder/chooser-folder.md"]');
+  await nestedRow.waitFor({ state: 'visible', timeout: 60_000 });
+  const folderRow = imageOwner.locator('[data-path$="/chooser-folder"]');
+  await folderRow.waitFor({ state: 'visible', timeout: 60_000 });
+  const deepFolderRow = imageOwner.locator('[data-path$="/chooser-folder/deep"]');
+  await deepFolderRow.waitFor({ state: 'visible', timeout: 60_000 });
+  await expect(deepFolderRow).toHaveAttribute('aria-expanded', 'false');
+  await expect(deepFolderRow.locator('.sidebar-tree-chevron')).not.toHaveClass(/sidebar-tree-chevron--open/u);
+  await expect(folderRow).toHaveAttribute('aria-expanded', 'true');
+  await expect(folderRow.locator('.sidebar-tree-chevron')).toHaveClass(/sidebar-tree-chevron--open/u);
+  const nestedGeometry = await nestedRow.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { marginInlineStart: style.marginInlineStart, width: style.width };
+  });
+  if (nestedGeometry.marginInlineStart === '0px' || nestedGeometry.width === '100%') {
+    throw new Error(`nested file row was not inset from its folder guide: ${JSON.stringify(nestedGeometry)}`);
+  }
+  await folderRow.click();
+  await expect(folderRow).toHaveAttribute('aria-expanded', 'false');
+  await expect(folderRow.locator('.sidebar-tree-chevron')).not.toHaveClass(/sidebar-tree-chevron--open/u);
+  await folderRow.click();
+  await expect(folderRow).toHaveAttribute('aria-expanded', 'true');
+  await deepFolderRow.click();
+  await expect(deepFolderRow).toHaveAttribute('aria-expanded', 'true');
+  await expect(deepFolderRow.locator('.sidebar-tree-chevron')).toHaveClass(/sidebar-tree-chevron--open/u);
+  await expect(folderRow).toHaveAttribute('aria-expanded', 'true');
+  await imageOwner.getByRole('button', { name: 'preview.html', exact: true }).click();
+  await expectResolvedSharedHtmlImages(imageOwner, 'local owner HTML document', true);
+  await imageOwner.getByRole('button', { name: 'review.md', exact: true }).click();
+  if (remoteRequests.length === 0) {
+    throw new Error('local owner did not request the approved remote image');
+  }
+  const imageInvite = await createInvite(imageOwner, { selectAll: true });
+
+  reviewerContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  await routeWorkingRemoteImage(reviewerContext);
+  await reviewerContext.addInitScript(seedProfileDisplayName, { displayName: 'Image review agent' });
+  const imageReviewer = await reviewerContext.newPage();
+  captureBrowserFailures(imageReviewer, 'image reviewer');
+  await imageReviewer.goto(imageInvite, { waitUntil: 'domcontentloaded' });
+  await imageReviewer.locator('[data-slot="browser-review"]').waitFor({ state: 'visible' });
+  await imageReviewer.waitForFunction(() => document.querySelector('[data-slot="browser-review"]')?.getAttribute('data-authoring-ready') === 'true');
+  await imageReviewer.getByRole('button', { name: /review\.md/u }).click();
+  await expectResolvedSharedImage(imageReviewer, 'live invited reviewer');
+  await expectBlockedApprovedImage(imageReviewer, 'live invited reviewer');
+  await expectBlockedRemoteImage(imageReviewer, 'live invited reviewer');
+  const loadExternalImages = imageReviewer.getByRole('button', { name: 'Load external images for this review' });
+  await loadExternalImages.waitFor({ state: 'visible' });
+  await loadExternalImages.click();
+  await expectResolvedExternalImage(imageReviewer, 'opted-in invited reviewer');
+  await expectAttemptedExternalImage(imageReviewer, 'opted-in invited reviewer');
+  await imageReviewer.getByRole('button', { name: /preview\.html/u }).click();
+  await expectResolvedSharedHtmlImages(imageReviewer, 'opted-in invited reviewer HTML document', true);
+
+  // A second reviewer tab owns a distinct in-memory Blob registry.
+  const follower = await reviewerContext.newPage();
+  captureBrowserFailures(follower, 'image follower');
+  await follower.goto(imageInvite, { waitUntil: 'domcontentloaded' });
+  await follower.locator('[data-slot="browser-review"]').waitFor({ state: 'visible' });
+  await follower.getByRole('button', { name: /review\.md/u }).click();
+  await expectResolvedSharedImage(follower, 'follower reviewer tab');
+  await expectBlockedApprovedImage(follower, 'follower reviewer tab');
+  await expectBlockedRemoteImage(follower, 'follower reviewer tab');
+  await follower.close();
+
+  // Reload destroys the reviewer surface and its Blob URLs. The fresh page
+  // must hydrate and bind the asset again from the retained durable share.
+  await imageReviewer.reload({ waitUntil: 'domcontentloaded' });
+  await imageReviewer.locator('[data-slot="browser-review"]').waitFor({ state: 'visible' });
+  await imageReviewer.waitForFunction(() => document.querySelector('[data-slot="browser-review"]')?.getAttribute('data-authoring-ready') === 'true');
+  await expectResolvedSharedHtmlImages(imageReviewer, 'reloaded invited reviewer HTML document');
+  await imageReviewer.getByRole('button', { name: /review\.md/u }).click();
+  await expectResolvedSharedImage(imageReviewer, 'reloaded invited reviewer');
+  await expectBlockedApprovedImage(imageReviewer, 'reloaded invited reviewer');
+  await expectBlockedRemoteImage(imageReviewer, 'reloaded invited reviewer');
+  await reviewerContext.close();
+  reviewerContext = null;
+
+  // Once every owner page is gone, a fresh reviewer has no ordinary live
+  // owner connection to borrow. The stable share must restore its document
+  // and image from the retained durable projection, then do it again after a
+  // browser reload with an empty in-memory Blob registry.
+  await ownerContext.close();
+  ownerContext = null;
+  offlineReviewerContext = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  await routeWorkingRemoteImage(offlineReviewerContext);
+  await offlineReviewerContext.addInitScript(seedProfileDisplayName, { displayName: 'Offline review agent' });
+  const offlineReviewer = await offlineReviewerContext.newPage();
+  captureBrowserFailures(offlineReviewer, 'offline reviewer');
+  await offlineReviewer.goto(imageInvite, { waitUntil: 'domcontentloaded' });
+  const offlineShell = offlineReviewer.locator('[data-slot="browser-review"]');
+  await offlineShell.waitFor({ state: 'visible' });
+  await offlineShell.waitFor({ state: 'attached' });
+  await offlineReviewer.waitForFunction(() => document.querySelector('[data-slot="browser-review"]')?.getAttribute('data-owner-online') === 'false');
+  await offlineReviewer.getByRole('button', { name: /preview\.html/u }).click();
+  await expectResolvedSharedHtmlImages(offlineReviewer, 'owner-offline durable reviewer HTML document');
+  await offlineReviewer.getByRole('button', { name: /review\.md/u }).click();
+  await expectResolvedSharedImage(offlineReviewer, 'owner-offline durable reviewer');
+  await expectBlockedApprovedImage(offlineReviewer, 'owner-offline durable reviewer');
+  await expectBlockedRemoteImage(offlineReviewer, 'owner-offline durable reviewer');
+  await offlineReviewer.reload({ waitUntil: 'domcontentloaded' });
+  await offlineReviewer.locator('[data-slot="browser-review"]').waitFor({ state: 'visible' });
+  await offlineReviewer.waitForFunction(() => document.querySelector('[data-slot="browser-review"]')?.getAttribute('data-owner-online') === 'false');
+  await expectResolvedSharedImage(offlineReviewer, 'reloaded owner-offline durable reviewer');
+  await expectBlockedApprovedImage(offlineReviewer, 'reloaded owner-offline durable reviewer');
+  await expectBlockedRemoteImage(offlineReviewer, 'reloaded owner-offline durable reviewer');
+  step('hosted image share survived follower, reload, and owner-offline durable review');
+
   if (diagnostics.some((line) => /\[attn drift\]/u.test(line))) {
     throw new Error(`projection drift detected:\n${diagnostics.filter((line) => /\[attn drift\]/u.test(line)).join('\n')}`);
   }
-  const browserErrors = diagnostics.filter((line) => /(?:page error:|console error:)/u.test(line));
+  // The blocked sources use a malformed local data URL, while the approved
+  // HTTPS fixture intentionally cannot resolve. The DOM assertions above
+  // distinguish a local policy fallback from an attempted external request.
+  const browserErrors = diagnostics.filter((line) => (
+    /(?:page error:|console error:)/u.test(line)
+    && !/console error: Failed to load resource: net::ERR_(?:INVALID_URL|FILE_NOT_FOUND|NAME_NOT_RESOLVED)/u.test(line)
+  ));
   if (browserErrors.length > 0) {
     throw new Error(`browser errors detected:\n${browserErrors.join('\n')}`);
   }
@@ -381,6 +776,7 @@ try {
   if (relevant.length > 0) console.error(relevant.join(''));
   process.exitCode = 1;
 } finally {
+  await offlineReviewerContext?.close();
   await reviewerContext?.close();
   await ownerContext?.close();
   await browser?.close();

@@ -43,6 +43,7 @@
 
 import type { Node as PmNode } from 'prosemirror-model';
 import type { NodeView } from 'prosemirror-view';
+import { UNRESOLVED_SHARED_IMAGE_SRC } from '../review/shared-image-policy';
 
 /** Last path segment of an authored src, decoded for display. Used only in the
  *  placeholder — a reader recognises `diagram.png`, not the whole URL. */
@@ -78,6 +79,10 @@ export function imageNodeView(
   dom.className = 'md-image';
 
   const img = document.createElement('img');
+  // The owner workspace may render an authored HTTPS image, and a reviewer
+  // can explicitly enable one for this tab. Either way, the image host must
+  // not learn which document or share URL sent the reader there.
+  img.setAttribute('referrerpolicy', 'no-referrer');
 
   // Built once and only ever re-texted, so `update()` never has to remove
   // children — and so the placeholder occupies no space until it is needed.
@@ -145,10 +150,11 @@ export function imageNodeView(
     const title = typeof current.attrs.title === 'string' ? current.attrs.title : '';
 
     const resolved = resolveAssetUrl ? resolveAssetUrl(src) : null;
-    // A src the resolver declines stays as authored: it may still be a URL the
-    // webview understands, and a wrong-but-plausible attn:// URL would be a
-    // worse answer than the authored one.
-    const display = resolved ?? src;
+    // A resolver declining a source is a policy decision, not an invitation
+    // for the browser to try the authored URL. Missing local assets and every
+    // non-HTTPS remote shape retain the fallback; a caller can return an
+    // approved HTTPS URL only after applying its own owner/reviewer policy.
+    const display = resolveAssetUrl ? (resolved ?? UNRESOLVED_SHARED_IMAGE_SRC) : src;
 
     // Set only when there is one, matching the `title` handling below and the
     // stock spec: prosemirror-markdown declares `alt: { default: null }` and

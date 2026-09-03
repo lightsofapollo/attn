@@ -6,6 +6,7 @@
     HtmlAnnotationBridge,
     injectDocRuntime,
   } from './review/html-annotation-bridge';
+  import { rewriteSharedHtmlImageSources } from './review/html-shared-assets';
   import type { AnnotationBridgeEvents } from './review/html-annotation-bridge';
 
   interface Props {
@@ -30,6 +31,8 @@
     mtime?: number;
     /** Native/local pages retain script support; hosted snapshots disable it. */
     allowScripts?: boolean;
+    /** Resolves a share-bound HTML image src to an in-memory Blob URL. */
+    resolveAssetUrl?: (src: string) => string | null;
     /** Turn on commenting for either a shared source or a local path. */
     annotate?: boolean;
     /** Wired up once the frame exists, so a parent can drive the rail. */
@@ -43,6 +46,7 @@
     content,
     mtime,
     allowScripts = true,
+    resolveAssetUrl,
     annotate = false,
     annotationEvents,
     onBridge,
@@ -90,9 +94,11 @@
   // is why the trust boundary sits in the shell and not in the frame.
   // @see planning/collab/html-annotation.md §3, §4
   let sandbox = $derived(htmlViewerSandbox(allowScripts || annotating));
-  let renderedContent = $derived(
-    annotating && content !== undefined ? injectDocRuntime(content) : content,
-  );
+  let renderedContent = $derived.by(() => {
+    if (content === undefined) return content;
+    const withSharedAssets = rewriteSharedHtmlImageSources(content, resolveAssetUrl);
+    return annotating ? injectDocRuntime(withSharedAssets) : withSharedAssets;
+  });
   let src = $derived.by(() => {
     if (isContentMode || path === undefined) return undefined;
     const params = new URLSearchParams();
@@ -166,16 +172,22 @@
     <!-- Reviewer mode: the hosted app passes allowScripts=false, producing an
          empty sandbox token list. Native callers retain the historical
          allow-scripts opaque-origin behavior by default. -->
-    <iframe
-      bind:this={frameEl}
-      srcdoc={renderedContent}
-      title={fileName}
-      class="block h-full border-0 bg-white"
-      style="width: calc(100% + {scrollbarWidth}px);"
-      {sandbox}
-      referrerpolicy="no-referrer"
-      onload={() => (loading = false)}
-    ></iframe>
+    <!-- An annotation transition changes both the sandbox token and srcdoc.
+         Recreate the frame so its sandbox is installed before a newly injected
+         runtime can execute; updating srcdoc first would make Chrome reject
+         that runtime against the old empty sandbox. -->
+    {#key sandbox}
+      <iframe
+        bind:this={frameEl}
+        {sandbox}
+        srcdoc={renderedContent}
+        title={fileName}
+        class="block h-full border-0 bg-white"
+        style="width: calc(100% + {scrollbarWidth}px);"
+        referrerpolicy="no-referrer"
+        onload={() => (loading = false)}
+      ></iframe>
+    {/key}
   {:else}
     <!--
       `bind:this` matters as much here as in the srcdoc branch: without it the

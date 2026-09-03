@@ -83,8 +83,17 @@ rejects(() => validateSnapshotPlaintext({ docType: 'html', content: '<b>x</b>', 
 rejects(() => validateSnapshotPlaintext({ docType: 'markdown', content: 'x', annotation: 'html_selectors_v1' }), 'annotation on markdown');
 rejects(() => validateWorkspaceManifest({ ...built, entries: [built.entries[0], built.entries[0]] }), 'duplicate paths/ids');
 rejects(() => validateWorkspaceManifest({ ...built, entries: [...built.entries].reverse() }), 'unsorted paths');
-rejects(() => validateWorkspaceManifest({ ...built, scope: 'file' }), 'file scope with many entries');
+equal(
+  validateWorkspaceManifest({ ...built, scope: 'file' }).entries.length,
+  2,
+  'file scope permits a document plus its image dependencies',
+);
+rejects(() => validateWorkspaceManifest({
+  ...built,
+  scope: 'file',
+  entries: [...built.entries, { ...markdown, path: 'z/second.md', fileId: base64UrlEncode(new Uint8Array(16).fill(9)), snapshotId: base64UrlEncode(new Uint8Array(16).fill(10)) }],
+}), 'file scope rejects a second document');
 rejects(() => validateWorkspaceManifest({ ...built, entries: [{ ...built.entries[0], path: '../raw.bin' }] }), 'escaping path');
 rejects(() => validateWorkspaceManifest({ ...built, entries: [{ ...built.entries[0], contentHash: 'AA' }] }), 'short hash');
 
-console.log(`browser-workspace-manifest: ${vector.cases.length + 14} passed, 0 failed`);
+console.log(`browser-workspace-manifest: ${vector.cases.length + 15} passed, 0 failed`);

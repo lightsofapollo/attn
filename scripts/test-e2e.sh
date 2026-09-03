@@ -77,6 +77,35 @@ assert_truthy() {
     fi
 }
 
+# Poll `--eval` until it returns something truthy, or give up after ~4s.
+# Defined up here rather than beside its first use so every suite can reach it.
+poll_eval() {
+    local js="$1"
+    local tries=0
+    local out=""
+    while [ "$tries" -lt 40 ]; do
+        out=$("$ATTN" --eval "$js" 2>/dev/null || echo "")
+        case "$out" in
+            ''|null|'""'|false|0) ;;
+            *) echo "$out"; return 0 ;;
+        esac
+        sleep 0.1
+        tries=$((tries + 1))
+    done
+    echo "$out"
+}
+
+# Wait for the document heading to actually BECOME `$1`.
+#
+# `--wait-for h1` cannot do this: an h1 from the previously-open document
+# already satisfies it, so it returns instantly and whatever fixed sleep
+# follows is racing the navigation. Losing that race made "Navigate to
+# basic.md" read the previous file's heading (attn-537h).
+wait_for_heading() {
+    local expected="$1"
+    poll_eval "(document.querySelector('h1')?.textContent || '').includes('$expected') ? 'yes' : null" >/dev/null
+}
+
 screenshot() {
     local name="$1"
     local path
@@ -233,10 +262,8 @@ echo "--- Navigate Between Files ---"
 # Click basic.md in the sidebar
 "$ATTN" --click 'text=basic.md'
 
-# Wait for navigation to complete — h1 should contain "Project Status"
-"$ATTN" --wait-for 'h1' --timeout 5000 >/dev/null 2>&1
-# Give rendering a moment to settle after navigation
-sleep 0.3
+# Wait for the heading to become basic.md's, not merely for AN h1 to exist.
+wait_for_heading "Project Status"
 result=$("$ATTN" --query 'h1' | jq -r '.elements[0].text' 2>/dev/null || echo "")
 assert_contains "Navigate to basic.md" "$result" "Project Status"
 screenshot "05-navigate-basic"
@@ -255,15 +282,31 @@ sleep 0.3
 # and the row text contains the filename — `text=` matches text content.
 "$ATTN" --click 'text=child.md'
 
-# Wait for navigation to complete
-"$ATTN" --wait-for 'h1' --timeout 5000 >/dev/null 2>&1
-sleep 0.3
+wait_for_heading "Nested Document"
 result=$("$ATTN" --query 'h1' | jq -r '.elements[0].text' 2>/dev/null || echo "")
 assert_contains "Navigate to nested child.md" "$result" "Nested Document"
 
-# Verify breadcrumb shows nested path
-result=$("$ATTN" --query '[class*="breadcrumb"], nav[aria-label]' | jq -r '.elements[0].text // ""' 2>/dev/null || echo "")
-assert_contains "Breadcrumb shows nested path" "$result" "child.md"
+# The nested file is the one the app considers open.
+#
+# This replaces an assertion on a breadcrumb. The native app has no breadcrumb
+# and has not had one for some time: `web/src/lib/PathBreadcrumb.svelte` is
+# imported by nothing, and a live window reports zero matches for
+# `[class*=breadcrumb]`, `nav[aria-label]` and `[data-slot*=breadcrumb]`. The
+# old selector could only ever find nothing, so the case was asserting the
+# absence of a control rather than any behaviour (attn-537h).
+#
+# What it was reaching for — "the app is showing the nested file" — is real and
+# observable: the sidebar marks the open row `data-active="true"` and carries
+# its full path in `data-path`.
+# `--eval` hands back a JSON-encoded string, which escapes the separators —
+# the path arrives as `...\/nested\/child.md`, so a bare `nested/child.md`
+# never appears in it. Strip the escaping rather than assert on the escaped
+# spelling, so the message still shows a readable path when this fails.
+result=$(poll_eval "(() => {
+    const row = document.querySelector('[data-path][data-active=\"true\"]');
+    return row ? row.getAttribute('data-path') : null;
+})()" | tr -d '\\')
+assert_contains "Nested file is the active sidebar row" "$result" "nested/child.md"
 screenshot "06-nested-file"
 
 # ===================================================================
@@ -276,22 +319,6 @@ echo "=== Test Suite 3: Relative Images (images.md) ==="
 # Poll a synchronous eval until it stops returning `null`/empty. `--eval` hands
 # back whatever the expression evaluates to, JSON-encoded, and does NOT await a
 # Promise — so waiting has to happen out here, not in the page.
-poll_eval() {
-    local js="$1"
-    local tries=0
-    local out=""
-    while [ "$tries" -lt 40 ]; do
-        out=$("$ATTN" --eval "$js" 2>/dev/null || echo "")
-        case "$out" in
-            ''|null|'""'|false|0) ;;
-            *) echo "$out"; return 0 ;;
-        esac
-        sleep 0.1
-        tries=$((tries + 1))
-    done
-    echo "$out"
-}
-
 start_daemon "$FIXTURES/images.md"
 
 # Single-file mode, so directory ordering in tests/fixtures/ is irrelevant here.

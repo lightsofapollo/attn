@@ -32,16 +32,6 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
 
-      # web/ pulls `eyecons` straight from GitHub, so `npm ci` has to resolve
-      # that repo's own floating devDependencies from the live registry rather
-      # than from our lockfile. A peer conflict up there (eslint 10 against
-      # plugins that cap at 9) walks npm 10's arborist into a null node and it
-      # dies with "Cannot read properties of null (reading 'edgesOut')". npm 11
-      # resolves the same tree fine. Node 22 still bundles npm 10, so pin the
-      # newer npm here until the git dependency is vendored away.
-      - name: Upgrade npm
-        run: npm install -g npm@11
-
       - name: Install dependencies
         run: npm ci
 

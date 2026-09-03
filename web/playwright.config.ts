@@ -6,6 +6,15 @@ export default defineConfig({
   expect: { timeout: 20_000 },
   fullyParallel: false,
   workers: 1,
+  // In CI the hosted suite runs everything on one box — Miniflare relay, Vite,
+  // the native webview and several Chromium contexts — so a case can lose a
+  // race it wins comfortably against a deployed environment. Observed locally:
+  // three runs, three different assertions, none reproducible. Retry those.
+  //
+  // This cannot hide a real regression: a deterministic break fails every
+  // attempt. It only absorbs contention. Locally retries stay off so a flake
+  // is visible while you are looking at it (attn-6q7b).
+  retries: process.env.CI ? 2 : 0,
   forbidOnly: true,
   reporter: [['list']],
   use: {

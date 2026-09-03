@@ -4797,29 +4797,52 @@ pub(crate) fn local_owner_display_path(
     let Some(record) = all.get(room_id.as_str()) else {
         return Ok(None);
     };
-    if record.selected_paths.is_empty() {
+    // Mirror `selected_share_wire_path`, which this inverts: the root is the
+    // shared directory, or a shared file's own parent, and membership of the
+    // curated list authorises a name when there is one, containment in the
+    // root when there is not (attn-x2zq).
+    //
+    // Bailing on an empty curated list is what broke `attn review share
+    // <path>`. Publishing had already moved to root-relative wire paths for
+    // those shares, so the owner's window was handed `hosted.md` where it
+    // expected `/abs/path/hosted.md`. `ownerFileIdForPath` then matched
+    // nothing, the focus-following effect concluded the open file was
+    // unshared and cleared the review scope, and the rail went blank while
+    // the comments sat in the store.
+    let record_root = std::path::Path::new(&record.path);
+    let root_for_wire = if record.is_dir {
+        record_root.to_path_buf()
+    } else {
+        record_root
+            .parent()
+            .map(std::path::Path::to_path_buf)
+            .unwrap_or_else(|| record_root.to_path_buf())
+    };
+    let canonical_root = root_for_wire.canonicalize().map_err(|error| {
+        BootstrapError::Store(format!(
+            "canonicalize selected share root {}: {error}",
+            root_for_wire.display()
+        ))
+    })?;
+    if !record.selected_paths.is_empty()
+        && !record.selected_paths.iter().any(|selected| {
+            normalized_relative_share_path(&canonical_root, std::path::Path::new(selected))
+                .is_ok_and(|relative| relative == wire_path)
+        })
+    {
         return Ok(None);
     }
-    let canonical_root = std::path::Path::new(&record.path)
-        .canonicalize()
-        .map_err(|error| {
-            BootstrapError::Store(format!(
-                "canonicalize selected share root {}: {error}",
-                record.path
-            ))
-        })?;
-    for selected in &record.selected_paths {
-        let selected_path = std::path::Path::new(selected);
-        if normalized_relative_share_path(&canonical_root, selected_path)? == wire_path {
-            let local_path = wire_path
-                .split('/')
-                .fold(PathBuf::from(&record.path), |path, segment| {
-                    path.join(segment)
-                });
-            return Ok(Some(local_path.to_string_lossy().to_string()));
+    // Rebuild the name one segment at a time. Only plain forward segments are
+    // nameable, so a wire path that tried to climb out of the root resolves to
+    // nothing rather than to a file beside it.
+    let mut local_path = root_for_wire;
+    for segment in wire_path.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return Ok(None);
         }
+        local_path.push(segment);
     }
-    Ok(None)
+    Ok(Some(local_path.to_string_lossy().to_string()))
 }
 
 fn manifest_entry_for_snapshot(
@@ -6299,6 +6322,78 @@ mod tests {
             "small fixture stays on the inline mailbox lane"
         );
         assert_eq!(node_ref.byte_length, blob_bytes.len() as u64);
+    }
+
+    /// `attn review share <dir>` records no curated list, and since attn-x2zq
+    /// its snapshots travel under root-relative wire paths like any other
+    /// share. The owner's window matches those against the absolute path of
+    /// the file it has open, so the wire path has to survive the round trip
+    /// back. It did not: `local_owner_display_path` bailed whenever the
+    /// curated list was empty, the owner's review scope was cleared as though
+    /// the open file were unshared, and the review rail rendered nothing while
+    /// the comments sat in the store.
+    ///
+    /// The forward direction is covered by the curated test above; this is the
+    /// half that had no coverage, which is why the asymmetry shipped.
+    #[test]
+    fn uncurated_share_round_trips_a_wire_path_back_to_its_local_path() {
+        let store_tmp = TempDir::new().expect("store");
+        let store_root = store_tmp.path().to_path_buf();
+        std::fs::create_dir_all(shares_dir(&store_root)).expect("shares dir");
+
+        let project = TempDir::new().expect("project");
+        let nested = project.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(project.path().join("hosted.md"), "# Hosted\n").unwrap();
+        std::fs::write(nested.join("child.md"), "# Child\n").unwrap();
+        let canonical_project = project.path().canonicalize().expect("canonicalize project");
+
+        // Exactly what `attn review share <dir>` writes: a root, no selection.
+        let room = "OD3XSQIjzX_KZnKC6i9ChA";
+        std::fs::write(
+            local_shares_index_path(&store_root),
+            serde_json::json!({
+                room: {
+                    "path": canonical_project.to_string_lossy(),
+                    "createdAt": 1_700_000_000_000u64,
+                    "isDir": true,
+                }
+            })
+            .to_string(),
+        )
+        .expect("write local shares");
+        let room_id = RoomId::new(room.to_string());
+
+        assert_eq!(
+            local_owner_display_path(&store_root, &room_id, "hosted.md")
+                .expect("local path")
+                .as_deref(),
+            Some(
+                canonical_project
+                    .join("hosted.md")
+                    .to_string_lossy()
+                    .as_ref()
+            ),
+            "a top-level file in an uncurated share resolves to its local path"
+        );
+        assert_eq!(
+            local_owner_display_path(&store_root, &room_id, "nested/child.md")
+                .expect("local path")
+                .as_deref(),
+            Some(
+                canonical_project
+                    .join("nested")
+                    .join("child.md")
+                    .to_string_lossy()
+                    .as_ref()
+            ),
+            "a nested file keeps its subdirectory"
+        );
+        assert_eq!(
+            local_owner_display_path(&store_root, &room_id, "../escape.md").expect("local path"),
+            None,
+            "a wire path that climbs out of the root names nothing"
+        );
     }
 
     #[tokio::test]

@@ -188,3 +188,15 @@ tasks:
     cmds:
       - ATTN_DEFAULT_RELAY_URL="${ATTN_DEFAULT_RELAY_URL:-https://relay.attn.sh}" cargo build --release
       - scripts/check-binary-size.sh
+
+  refresh:icons:
+    desc: "Re-fetch the pinned icon packs and regenerate the committed icon output. Run after changing a pin in web/scripts/icon-pack-pins.mjs; commit the resulting diff. With pins unchanged this must produce NO diff."
+    dir: web
+    cmds:
+      - npm run refresh:icons
+
+  check:icons:
+    desc: "Verify the committed icon output is self-consistent (every icon a pack module imports exists, no orphans). Never re-runs the generator — passes with nothing fetched."
+    dir: web
+    cmds:
+      - npm run check:icons

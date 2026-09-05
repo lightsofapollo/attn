@@ -6,3 +6,13 @@ site/static/**/*.webp filter=lfs diff=lfs merge=lfs -text
 site/static/**/*.avif filter=lfs diff=lfs merge=lfs -text
 site/static/**/*.ico filter=lfs diff=lfs merge=lfs -text
 site/static/**/*.mp4 filter=lfs diff=lfs merge=lfs -text
+
+# Committed generated icon output (attn-6q7b). Marked generated so GitHub
+# collapses these in PR diffs and keeps them out of language/diff stats —
+# a pin bump touches hundreds of SVGs and the review belongs on the pin,
+# not the payload. Deliberately NOT in LFS, unlike site/static above: the
+# whole point of committing them is that a bare clone + npm registry is a
+# working build, and LFS would put a second fetch dependency back in.
+web/src/lib/icons/vscode-generated/** linguist-generated=true
+web/src/lib/vscode-icon-packs/*.generated.ts linguist-generated=true
+web/src/lib/vscode-icon-map.generated.ts linguist-generated=true

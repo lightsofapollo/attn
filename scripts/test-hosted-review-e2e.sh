@@ -43,6 +43,15 @@ OWNER_PID=""
 kill_pid() {
   local pid="$1"
   [ -z "$pid" ] && return 0
+  # Kill descendants first. The relay and web servers are started via `npm run`
+  # / `npx`, which fork the real server as a CHILD — killing only the wrapper
+  # leaves that child holding the port, and the next run then either trips the
+  # port guard above or (before it existed) silently tested against a stale
+  # server from a previous run.
+  local child
+  for child in $(pgrep -P "$pid" 2>/dev/null); do
+    kill_pid "$child"
+  done
   kill "$pid" 2>/dev/null || true
   wait "$pid" 2>/dev/null || true
 }
@@ -62,6 +71,41 @@ wait_http() {
   done
   return 1
 }
+
+# In local mode this script owns its ports. If something else already holds
+# one, we would silently test against a stranger's server: a stale Vite from an
+# earlier run answers on 5173 and serves a DIFFERENT build, which is how a
+# local run once failed 3 of 4 cases for reasons that had nothing to do with
+# the code under test (attn-6q7b). Fail loudly instead.
+port_in_use() {
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
+  else
+    # No lsof on the GH Actions runner image; /dev/tcp is a bash builtin.
+    (exec 3<>"/dev/tcp/127.0.0.1/$1") >/dev/null 2>&1
+  fi
+}
+
+require_free_port() {
+  local port="$1" what="$2"
+  if port_in_use "$port"; then
+    echo "port $port is already in use, and this run needs it for the $what." >&2
+    echo "stop whatever is listening there (or set ${3} to another port) and retry." >&2
+    exit 1
+  fi
+}
+
+# Same reasoning as the port guard: `npx wrangler` in relay/ would happily
+# download a wrangler that is not the pinned one and run the relay on it.
+if [ -z "${E2E_RELAY_URL:-}" ] && [ ! -d "$PROJECT_DIR/relay/node_modules" ]; then
+  echo "local mode runs the relay from relay/, whose dependencies are not installed." >&2
+  echo "run: npm --prefix relay ci" >&2
+  echo "(or set E2E_RELAY_URL and E2E_WEB_ORIGIN to test against a deployed environment)" >&2
+  exit 1
+fi
+
+[ -n "${E2E_RELAY_URL:-}" ] || require_free_port "$RELAY_PORT" "local relay" RELAY_PORT
+[ -n "${E2E_WEB_ORIGIN:-}" ] || require_free_port "$WEB_PORT" "hosted web app" WEB_PORT
 
 mkdir -p "$ATTN_HOME" "$SHARE_DIR" "$RELAY_STATE"
 printf '# Hosted review canary\n\n- [ ] Read-only browser task\n\nCiphertext boundary marker: NARWHAL-TEAK-7429.\n\nShared by native, rendered in the hosted reviewer.\n' >"$DOC"

@@ -54,7 +54,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: web/package-lock.json
 
@@ -116,7 +116,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: web/package-lock.json
 
@@ -169,7 +169,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: web/package-lock.json
 
@@ -208,7 +208,7 @@ jobs:
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
-          node-version: "20"
+          node-version: "22"
           cache: npm
           cache-dependency-path: relay/package-lock.json
 
@@ -223,3 +223,68 @@ jobs:
 
       - name: Test
         run: npm test
+
+  parity-e2e:
+    name: Native/Hosted Parity (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install native dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev xvfb
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            relay/package-lock.json
+
+      - name: Install dependencies
+        working-directory: web
+        run: npm ci
+
+      # Local mode runs the relay from relay/, so its deps have to be installed
+      # or `npx wrangler` silently fetches whatever is newest from the registry
+      # — a different major than the pinned one, resolved at run time. That is
+      # the non-hermeticity this whole change removes; don't reintroduce it here.
+      - name: Install relay dependencies
+        working-directory: relay
+        run: npm ci
+
+      - name: Install Playwright Chromium
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: parity-e2e
+
+      # build.rs embeds web/dist/index.html, so the frontend has to exist
+      # before cargo or the daemon runs a stale UI. Debug build on purpose:
+      # the suite drives the window through --eval/--wait-for, which release
+      # builds strip.
+      - name: Build frontend and owner
+        run: |
+          npm --prefix web run build
+          cargo build --locked
+
+      # Local mode: the script boots its own Miniflare relay, Vite server and
+      # native owner, so this needs no deployed environment and gates the PR
+      # rather than the deploy.
+      #
+      # This suite is the only thing that exercises the owner<->reviewer round
+      # trip end to end. While it lived solely in the dispatch-only deploy
+      # workflow, a real regression in the owner's review rail (attn-6q7b,
+      # fixed in #19) sat on main through two merges and a version bump.
+      - name: Native/hosted parity
+        run: xvfb-run -a scripts/test-hosted-review-e2e.sh

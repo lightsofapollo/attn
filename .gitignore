@@ -9,9 +9,6 @@ web/dist/
 web/dist-browser/
 web/playwright-report/
 web/test-results/
-web/src/lib/icons/vscode-generated/
-web/src/lib/vscode-icon-map.generated.ts
-web/src/lib/vscode-icon-packs/
 
 # wrangler dev state
 web/.wrangler/
@@ -28,3 +25,4 @@ web/.wrangler/
 # description — resolves only on the machine that produced it. Quote the finding
 # in the citing document rather than pointing at a path here.
 .impeccable/critique/
+web/.icon-packs/

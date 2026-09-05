@@ -113,6 +113,38 @@ tab/profile for the joiner UX. `ATTN_DEV_RELAY_TARGET` and
 `VITE_ATTN_SHARE_ORIGIN` remain available when testing a different explicit
 relay/public-origin pairing.
 
+## Toolchain
+
+Node **22** everywhere — `.nvmrc` pins it, `web/package.json` declares
+`engines.node >=22`, and CI and the staging deploy both run it. The floor comes
+from wrangler 4 in `web/`, which refuses anything older. (The root
+`package.json` stays `>=18`: `attnmd` is the end-user CLI wrapper and its
+consumers should not inherit our build floor.)
+
+`npm ci` in `web/` is hermetic — the lockfile and the npm registry are all it
+needs. Keep it that way: **no `github:` dependencies.** Three icon packs used to
+be exactly that, and because npm resolves a git dependency's own floating
+`package.json` at install time, an unrelated upstream publish could break every
+install here with no change in this repo (attn-6q7b).
+
+### Icon packs
+
+`eyecons`, `catppuccin-vsc-icons` and `vscode-icons` are not usable from npm, so
+their **generated output is committed** under `web/src/lib/icons/vscode-generated/`
+(2,776 SVGs), `web/src/lib/vscode-icon-packs/` and
+`web/src/lib/vscode-icon-map.generated.ts`. The build reads those files and needs
+no pack installed, which is why generation is not part of `build` or `check`.
+
+To change or upgrade a pack, edit the pin in `web/scripts/icon-pack-pins.mjs`,
+then:
+
+```bash
+cd web && npm run refresh:icons   # fetch pinned tarballs, regenerate, commit the diff
+npm run check:icons               # verify the committed tree is self-consistent
+```
+
+`check:icons` never re-runs the generator — it must pass with nothing fetched.
+
 ## Build
 
 ```bash
@@ -265,6 +297,30 @@ scripts/test-apply-e2e.sh
 ```
 
 Drives the full owner-side accept/reject pipeline end-to-end: snapshot + UserEdit drift forces the suggestion to REMAP, `apply_ready_verdict` writes the file, the `LocalRevision` journal lands UserEdit + AcceptedSuggestion in order, and a `SuggestionAccepted` (or `SuggestionRejected`) envelope round-trips through the outbox with `resulting_hash` matching the on-disk hash. The Rust E2E cases live in `src/review/apply.rs` as `e2e_*` tests; the bash wrapper also probes the running daemon for the same end-state via the `--eval` bridge (daemon-layer assertions print `PEND` until attn-nnj.8.5 wires the `AcceptSuggestion` command — flip via `ATTN_APPLY_E2E_REQUIRE_DAEMON=1`).
+
+### Native ↔ hosted parity (`scripts/test-hosted-review-e2e.sh`)
+
+The owner↔reviewer round trip end to end: a native owner shares a document, a
+hosted browser reviewer joins through a real invite, and comments have to travel
+both ways and *render* on both sides.
+
+```bash
+scripts/test-hosted-review-e2e.sh          # local: own relay, Vite and owner
+E2E_RELAY_URL=https://relay-staging.attn.sh \
+E2E_WEB_ORIGIN=https://staging.attn.sh \
+  scripts/test-hosted-review-e2e.sh        # against deployed staging
+```
+
+**This runs in CI on every PR** (`parity-e2e` in ci.yml, local mode). It used to
+run only inside the dispatch-only staging deploy, which is how a regression that
+left the owner's review rail empty on uncurated shares survived two merges and a
+version bump (attn-6q7b, fixed in #19).
+
+Local mode owns ports 8787 and 5173 and refuses to start if either is taken —
+a leaked server from an earlier run would otherwise be silently tested against.
+The suite retries in CI only (`playwright.config.ts`), because everything shares
+one machine there; a real regression still fails every attempt. See attn-6q7b.6
+for making local mode deterministic.
 
 ### WebRTC end-to-end test (attn-nnj.7.7)
 

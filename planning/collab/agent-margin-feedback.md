@@ -2,7 +2,7 @@
 
 **Proposal for review · 7 September 2026 · attn-qiwt**
 
-[Interactive companion](agent-margin-feedback.html) · Product implementation follows review.
+[Visual product mockup](agent-margin-feedback.html) · [Still preview](agent-margin-feedback-preview.png) · Try marking, copying and live replies. Product implementation follows review.
 
 **Outcome.** Mark margin comments **For agent**, copy one or a batch into any agent conversation, and get useful changes without re-explaining the document. An optional live mode delivers the same feedback automatically and brings replies back into the original threads.
 

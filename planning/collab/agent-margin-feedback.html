@@ -227,10 +227,6 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
     .intro { display: flex; justify-content: space-between; gap: 24px; align-items: end; margin: 7px 0 25px; }
     h1 { font: 500 35px/1.2 var(--serif); letter-spacing: -.03em; margin: 0 0 8px; }
     .intro p { margin: 0; color: var(--muted); font-size: 14px; }
-    .scenes { display: flex; gap: 3px; padding: 4px; background: #dcd7cc; border-radius: 8px; flex-shrink: 0; }
-    .scenes button { border: 0; background: transparent; color: #5b5b50; padding: 9px 13px; font-size: 13px; }
-    .scenes button[aria-pressed="true"] { background: var(--card); color: var(--ink); box-shadow: 0 1px 4px #403a2214; }
-    .scenes span { color: var(--accent); margin-right: 7px; font-size: 11px; }
     .app { border: 1px solid #c6c0b4; border-radius: 12px; background: var(--paper); box-shadow: 0 20px 55px #38302217, 0 3px 8px #38302209; overflow: hidden; }
     .titlebar { height: 42px; display: flex; align-items: center; padding: 0 17px; background: #e2ded3; border-bottom: 1px solid var(--line); gap: 20px; }
     .traffic { display: flex; gap: 7px; }
@@ -266,7 +262,6 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
     .annotation:hover { background: #e1cca1; }
     .annotation.active { background: #e0c99e; box-shadow: 0 2px 0 var(--accent); }
     .annotation:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
-    .annotation.accepted { background: #dce7d7; box-shadow: 0 2px 0 #6f906e; }
     .margin-number { font: 9px var(--sans); vertical-align: super; color: var(--accent); margin-left: 2px; }
     .checklist { padding: 0; list-style: none; font: 14px/1.9 var(--serif); margin: 13px 0 0; }
     .checklist li { display: flex; gap: 9px; align-items: baseline; }
@@ -300,7 +295,6 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
     .hex { clip-path: polygon(25% 0%,75% 0%,100% 50%,75% 100%,25% 100%,0% 50%); width: 21px; height: 21px; display: grid; place-items: center; color: #fff; background: var(--violet); font-size: 13px; flex-shrink: 0; }
     .reply p { font-size: 12px; margin: 0 0 9px; }
     .diff { color: #35553e; background: #e9eee2; border-radius: 4px; padding: 9px; font: 12px/1.6 var(--serif); margin-bottom: 9px; }
-    .accept { background: #e1ead9; color: #35533b; border-color: #b8c8ae; min-height: 29px; padding: 4px 9px; font-size: 11px; }
     .delivery { color: var(--violet); font-size: 11px; margin: 10px 0 0; display: flex; gap: 7px; align-items: center; }
     .delivery::before { content: ""; height: 5px; width: 5px; border-radius: 50%; background: currentColor; }
     .margin-footer { margin-top: auto; padding: 10px 0 0; border-top: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 11px; color: var(--muted); }
@@ -313,7 +307,6 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
     .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
     .app-status { padding: 7px 18px; border-top: 1px solid var(--line); font-size: 10px; color: var(--muted); display: flex; justify-content: space-between; gap: 12px; background: #e9e5db; }
     .caption { padding: 21px 0 22px; display: flex; gap: 17px; align-items: baseline; }
-    .caption .index { font: 22px var(--serif); color: var(--accent); }
     .caption h2 { font: 600 15px var(--sans); margin: 0 0 4px; }
     .caption p { margin: 0; color: var(--muted); font-size: 13px; max-width: 95ch; }
     .caption button { margin-left: auto; min-height: 31px; white-space: nowrap; background: transparent; font-size: 11px; }
@@ -323,19 +316,18 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
     .dialog-head h2 { font: 550 25px/1.2 var(--serif); letter-spacing: -.02em; margin: 0 0 6px; }
     .dialog-head p { color: var(--muted); font-size: 12px; margin: 0; }
     .close { width: 30px; min-height: 30px; height: 30px; padding: 3px; background: transparent; border: 0; }
-    .handoff-grid { display: grid; grid-template-columns: 285px 1fr; }
-    .handoff-list { padding: 18px; border-right: 1px solid var(--line); background: var(--rail); }
     .field-label { display: block; font-size: 11px; font-weight: 600; color: var(--muted); margin-bottom: 6px; }
     select { padding: 7px 9px; background: var(--card); border: 1px solid #ccc4b5; border-radius: 4px; color: var(--ink); font-size: 12px; min-height: 35px; }
-    #scope { width: 100%; margin-bottom: 15px; }
-    .export-comment { display: flex; gap: 8px; align-items: start; border: 1px solid var(--line); padding: 11px; border-radius: 5px; margin-bottom: 9px; background: var(--card); }
-    .export-comment input { margin-top: 3px; accent-color: var(--accent); width: 14px; height: 14px; flex-shrink: 0; }
-    .export-comment strong { font-size: 11px; font-weight: 600; display: block; }
-    .export-comment p { font-size: 12px; margin: 4px 0; }
-    .export-comment small { font-size: 10px; color: var(--muted); }
-    .copy-preview { min-width: 0; padding: 18px; }
-    .preview-head { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 11px; font-size: 11px; color: var(--muted); }
-    #packet { width: 100%; min-height: 302px; resize: vertical; display: block; padding: 14px; background: var(--card); border: 1px solid var(--line); border-radius: 5px; color: #48493d; font: 11px/1.7 ui-monospace, monospace; }
+    .scope-row { display: flex; align-items: center; gap: 10px; margin: -8px 0 18px; color: var(--muted); font-size: 11px; }
+    #scope { flex: 1; min-width: 0; min-height: 31px; font-size: 11px; }
+    .select-comment { width: 15px; height: 15px; margin: 0 3px 0 0; accent-color: var(--accent); }
+    .source-path { font-size: 10px; color: var(--muted); margin: -3px 0 9px; overflow-wrap: anywhere; }
+    .margin-footer { flex-direction: column; align-items: stretch; gap: 8px; }
+    .batch-actions { display: flex; gap: 8px; }
+    .batch-actions button { flex: 1; min-height: 37px; font-size: 12px; }
+    #clipboard-fallback { margin-top: 14px; }
+    #clipboard-fallback label { font-size: 11px; color: var(--muted); display: block; margin-bottom: 6px; }
+    #clipboard-text { width: 100%; min-height: 302px; resize: vertical; display: block; padding: 14px; background: var(--card); border: 1px solid var(--line); border-radius: 5px; color: #48493d; font: 11px/1.7 ui-monospace, monospace; }
     .dialog-foot { padding: 15px 22px; border-top: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 20px; }
     .dialog-foot p { font-size: 11px; color: var(--muted); margin: 0; }
     .dialog-foot button { white-space: nowrap; }
@@ -351,21 +343,21 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
     [hidden] { display: none !important; }
     .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
     @media (min-width: 1400px) { .workspace { grid-template-columns: 190px minmax(0, 1fr) 370px; } .document { padding-left: 58px; padding-right: 58px; } .document .prose { font-size: 16px; } }
-    @media (max-width: 1150px) { .frame { width: calc(100% - 36px); } .workspace { grid-template-columns: 150px minmax(0, 1fr) 310px; } .document { padding: 32px 27px; } .document h2 { font-size: 32px; } .intro { align-items: start; } h1 { font-size: 30px; } .scenes button { padding: 8px; font-size: 12px; } .intro p { max-width: 40ch; } }
-    @media (max-width: 900px) { .workspace { grid-template-columns: minmax(0, 1fr) 320px; } .files { display: none; } .intro { display: block; } .intro p { max-width: none; } .scenes { margin-top: 20px; width: max-content; } .saved, .owner-avatar { display: none; } }
+    @media (max-width: 1150px) { .frame { width: calc(100% - 36px); } .workspace { grid-template-columns: 150px minmax(0, 1fr) 310px; } .document { padding: 32px 27px; } .document h2 { font-size: 32px; } .intro { align-items: start; } h1 { font-size: 30px; }  .intro p { max-width: 40ch; } }
+    @media (max-width: 900px) { .workspace { grid-template-columns: minmax(0, 1fr) 320px; } .files { display: none; } .intro { display: block; } .intro p { max-width: none; }  .saved, .owner-avatar { display: none; } }
     @media (max-width: 650px) {
       .frame { width: calc(100% - 24px); } .page-head { padding: 15px 0; } .page-head .identity { gap: 10px; } .page-head .identity span + span { padding-left: 10px; font-size: 11px; } .page-head a { font-size: 11px; }
-      h1 { font-size: 29px; } .intro { margin-top: 14px; margin-bottom: 20px; } .intro p { font-size: 13px; } .scenes { width: 100%; } .scenes button { flex: 1; min-height: 42px; padding: 6px; font-size: 11px; } .scenes span { margin-right: 4px; }
+      h1 { font-size: 29px; } .intro { margin-top: 14px; margin-bottom: 20px; } .intro p { font-size: 13px; }
       .titlebar { padding: 0 12px; height: 33px; } .window-title { display: none; } .mock-label { font-size: 8px; } .traffic i { width: 8px; height: 8px; }
       .app-toolbar { padding: 10px 12px; gap: 10px; flex-wrap: wrap; } .breadcrumb { font-size: 11px; } .toolbar-actions { gap: 7px; } .toolbar-actions button { font-size: 10px; min-height: 33px; padding: 6px 8px; } .toolbar-actions .icon { width: 13px; }
       .workspace { display: block; } .document { padding: 27px 26px; } .document h2 { font-size: 31px; } .document .prose { font-size: 15px; } .doc-description { font-size: 14px; }
       .margin { border-left: 0; border-top: 1px solid var(--line); padding: 20px; } .margin-heading h2 { font-size: 16px; } .comment { padding: 15px; } .comment .body { font-size: 14px; } .comment blockquote { font-size: 13px; } .route, .copy-one, .resolve { min-height: 40px; } .comment-head { font-size: 12px; } .route { font-size: 12px; } .copy-one { font-size: 12px; } .comment::before { width: 17px; }
       .reply p, .diff { font-size: 13px; } .connection strong { font-size: 12px; } .connection p { font-size: 11px; } .connection button { min-height: 35px; } .margin-footer { margin-top: 15px; } .app-status span:last-child { display: none; }
       .caption { align-items: start; gap: 11px; } .caption p { font-size: 12px; } .caption button { font-size: 10px; padding: 5px; }
-      dialog { width: calc(100% - 22px); max-height: calc(100dvh - 28px); } .dialog-head { padding: 19px; } .dialog-head h2 { font-size: 23px; } .handoff-grid { grid-template-columns: 1fr; } .handoff-list { border-right: 0; border-bottom: 1px solid var(--line); padding: 14px; } #export-list { max-height: 170px; overflow: auto; } .copy-preview { padding: 14px; } #packet { min-height: 190px; } .dialog-foot { padding: 14px; gap: 12px; } .dialog-foot p { font-size: 10px; max-width: 20ch; }
+      dialog { width: calc(100% - 22px); max-height: calc(100dvh - 28px); } .dialog-head { padding: 19px; } .dialog-head h2 { font-size: 23px; }     #clipboard-text { min-height: 190px; } .dialog-foot { padding: 14px; gap: 12px; } .dialog-foot p { font-size: 10px; max-width: 20ch; }
     }
     @media (prefers-reduced-motion: no-preference) { .app { animation: arrive .4s ease-out both; } @keyframes arrive { from { opacity: .6; transform: translateY(7px); } to { opacity: 1; transform: none; } } }
-    @media print { .frame { width: 100%; } .scenes, .page-head a, #notice, .caption button { display: none; } .app { box-shadow: none; } .workspace { min-height: auto; } body { background: white; } }
+    @media print { .frame { width: 100%; } .page-head a, #notice, .caption button { display: none; } .app { box-shadow: none; } .workspace { min-height: auto; } body { background: white; } }
   </style>
 </head>
 <body>
@@ -380,20 +372,19 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
   </defs></svg>
   <main class="frame">
     <header class="page-head"><div class="identity"><span class="wordmark">attn.</span><span>Agent feedback / Visual proposal</span></div><a href="agent-margin-feedback.md">Read the one-pager ↗</a></header>
-    <section class="intro" aria-labelledby="page-title"><div><h1>From your margin to your agent.</h1><p>A working mockup. Try marking a comment, copying feedback, or previewing a live reply.</p></div><nav class="scenes" aria-label="Prototype views"><button data-scene="mark" aria-pressed="true"><span>01</span>Mark comments</button><button data-scene="copy" aria-pressed="false"><span>02</span>Copy feedback</button><button data-scene="live" aria-pressed="false"><span>03</span>Live replies</button></nav></section>
+    <section class="intro" aria-labelledby="page-title"><div><h1 id="page-title">From your margin to your agent.</h1><p>Mark comments for your agent, then copy one, selected comments, or all.</p></div></section>
     <section class="app" aria-label="Proposed attn interface">
       <div class="titlebar"><div class="traffic" aria-hidden="true"><i></i><i></i><i></i></div><span class="window-title">Launch workspace — attn</span><span class="mock-label">Interactive mockup · changes stay in this page</span></div>
-      <div class="app-toolbar"><span class="breadcrumb"><svg class="icon" aria-hidden="true"><use href="#i-file"/></svg><span>docs</span><span>/</span><strong id="active-filename">launch-plan.md</strong></span><span class="saved"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>Saved locally</span><div class="toolbar-actions"><span class="owner-avatar" title="You">AB</span><button id="agent-toggle"><svg class="icon" aria-hidden="true"><use href="#i-agent"/></svg><span id="agent-button-text">Connect agent</span></button><button class="primary" id="open-copy"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span id="copy-button-text">Copy for agent (2)</span></button></div></div>
+      <div class="app-toolbar"><span class="breadcrumb"><svg class="icon" aria-hidden="true"><use href="#i-file"/></svg><span>docs</span><span>/</span><strong id="active-filename">launch-plan.md</strong></span><span class="saved"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>Saved locally</span><div class="toolbar-actions"><span class="owner-avatar" title="You">AB</span><button id="agent-toggle"><svg class="icon" aria-hidden="true"><use href="#i-agent"/></svg><span id="agent-button-text">Connect agent</span></button><button class="primary" id="copy-all-toolbar"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>Copy all</span></button></div></div>
       <div class="workspace">
         <nav class="files" aria-label="Workspace files"><div class="project"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg>Launch workspace</div><div class="folder">⌄ <span>docs</span></div><button class="file" data-doc="launch" aria-current="page"><svg class="icon" aria-hidden="true"><use href="#i-file"/></svg>launch-plan.md<span class="file-count">3</span></button><button class="file" data-doc="operations"><svg class="icon" aria-hidden="true"><use href="#i-file"/></svg>operations.md<span class="file-count">1</span></button><div class="files-bottom"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>Local workspace<p>Your files. Your review.<br>Your choice of agent.</p></div></nav>
         <article class="document" id="document" aria-label="Document preview"></article>
-        <aside class="margin" aria-label="Review margin"><div class="margin-heading"><h2>Comments <span id="comment-count" class="count-badge">3</span></h2><button class="ghost" id="new-note">+ Add comment</button></div><div class="filter-tabs" aria-label="Comment filter"><button data-filter="all" aria-pressed="true">All comments</button><button data-filter="agent" aria-pressed="false">For agent <span id="agent-count">2</span></button></div><div class="connection" id="connection" hidden><span class="dot" aria-hidden="true"></span><div><strong id="connection-title">My agent is listening</strong><p>Scripted preview · no model connected</p></div><button id="pause">Pause</button></div><div id="comments"></div><div class="margin-footer"><span id="margin-status">2 comments for your agent</span><button id="copy-footer">Review & copy →</button></div></aside>
+        <aside class="margin" aria-label="Review margin"><div class="margin-heading"><h2>Comments <span id="comment-count" class="count-badge">3</span></h2><button class="ghost" id="new-note">+ Add comment</button></div><div class="filter-tabs" aria-label="Comment filter"><button data-filter="all" aria-pressed="true">All comments</button><button data-filter="agent" aria-pressed="false">For agent <span id="agent-count">2</span></button></div><div class="scope-row"><label for="scope">Scope</label><select id="scope"><option value="document">This document</option><option value="workspace">Whole workspace</option></select></div><div class="connection" id="connection" hidden><span class="dot" aria-hidden="true"></span><div><strong id="connection-title">My agent is listening</strong><p>Scripted preview · no model connected</p></div><button id="pause">Pause</button></div><div id="comments"></div><div class="margin-footer"><span id="margin-status">1 selected · 2 for agent</span><div class="batch-actions"><button id="copy-selected">Copy selected</button><button class="primary" id="copy-all">Copy all</button></div></div><div id="clipboard-fallback" hidden><label for="clipboard-text">Clipboard unavailable. Select and copy this text.</label><textarea id="clipboard-text" readonly spellcheck="false"></textarea></div></aside>
       </div>
       <div class="app-status"><span id="status-left">Shared review · launch workspace</span><span>For agent is a personal mark · copied comments stay open</span></div>
     </section>
-    <section class="caption" aria-live="polite"><span class="index" id="caption-number">01</span><div><h2 id="caption-title">Same comment. A clear recipient.</h2><p id="caption-body">“For agent” marks the feedback you want to hand off. Your name stays on the comment; the source passage travels with it. Click a highlighted sentence to add a note.</p></div><button id="reset">Reset mockup</button></section>
+    <section class="caption"><div><h2>Copy. Copy selected. Copy all.</h2><p>Each action copies straight to your clipboard, with the source path, quoted passage and comment included. Paste into your agent conversation.</p></div><button id="reset">Reset mockup</button></section>
   </main>
-  <dialog id="handoff" aria-labelledby="handoff-title"><div class="dialog-head"><div><h2 id="handoff-title">Copy feedback for your agent</h2><p>Everything needed to find the passage and make the change.</p></div><button class="close" id="close-copy" aria-label="Close copy panel"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></div><div class="handoff-grid"><div class="handoff-list"><label for="scope" class="field-label">Include comments from</label><select id="scope"><option value="document">This document</option><option value="workspace">Whole workspace</option></select><div id="export-list"></div></div><div class="copy-preview"><div class="preview-head"><label for="packet">Exact clipboard preview</label><label class="sr-only" for="format">Feedback format</label><select id="format"><option value="markdown">Markdown</option><option value="json">JSON</option></select></div><textarea id="packet" readonly spellcheck="false"></textarea></div></div><div class="dialog-foot"><p>Paste into any agent conversation.<br>Your comments will remain open.</p><button class="primary" id="copy-selected">Copy 2 comments</button></div></dialog>
   <dialog id="composer" aria-labelledby="composer-title"><form id="compose-form"><div class="dialog-head"><div><h2 id="composer-title">Leave a comment</h2><p>On the selected passage</p></div><button class="close" type="button" id="close-composer" aria-label="Close comment composer"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></div><div class="composer-body"><blockquote id="composer-quote"></blockquote><label class="sr-only" for="new-comment">Your comment</label><textarea id="new-comment" required maxlength="1200" placeholder="What would you like to change?"></textarea><label class="composer-choice"><input id="new-for-agent" type="checkbox" checked>For agent</label></div><div class="dialog-foot"><p>The author stays you.</p><button class="primary" type="submit">Post comment</button></div></form></dialog>
   <div id="notice" role="status" aria-live="polite" popover="manual"></div>
   <noscript><p class="frame">Enable JavaScript to see the interactive product mockup. <a href="agent-margin-feedback.md">Read the Markdown plan.</a></p></noscript>
@@ -404,23 +395,22 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
     const icon = name => '<svg class="icon" aria-hidden="true"><use href="#i-' + name + '"/></svg>';
     const seed = [
       {id:'F-12', doc:'launch', path:'docs/launch-plan.md', section:'The rollout', quote:'Release to every workspace on Monday.', body:'Let’s start with an opt-in pilot. Add a clear trigger for rolling back before we open this to everyone.', marked:true, selected:true, replacement:'Start with a five-workspace opt-in pilot on Monday. Roll back if the error rate exceeds 1% for five minutes.'},
-      {id:'F-13', doc:'launch', path:'docs/launch-plan.md', section:'A way back', quote:'Keep the previous version available.', body:'Who owns the rollback? And how quickly should we be able to recover?', marked:true, selected:true, replacement:'The on-call engineer owns rollback. Keep the previous version ready and target recovery within ten minutes.'},
-      {id:'F-14', doc:'launch', path:'docs/launch-plan.md', section:'Before we begin', quote:'Share the pilot checklist with the team.', body:'This is ready to share once we’ve agreed on the pilot group.', marked:false, selected:true},
-      {id:'F-15', doc:'operations', path:'docs/operations.md', section:'Backups', quote:'Backups run each night.', body:'Add a restore drill before the pilot starts.', marked:true, selected:true, replacement:'Backups run nightly. Complete and document a restore drill before starting the pilot.'}
+      {id:'F-13', doc:'launch', path:'docs/launch-plan.md', section:'A way back', quote:'Keep the previous version available.', body:'Who owns the rollback? And how quickly should we be able to recover?', marked:true, selected:false, replacement:'The on-call engineer owns rollback. Keep the previous version ready and target recovery within ten minutes.'},
+      {id:'F-14', doc:'launch', path:'docs/launch-plan.md', section:'Before we begin', quote:'Share the pilot checklist with the team.', body:'This is ready to share once we’ve agreed on the pilot group.', marked:false, selected:false},
+      {id:'F-15', doc:'operations', path:'docs/operations.md', section:'Backups', quote:'Backups run each night.', body:'Add a restore drill before the pilot starts.', marked:true, selected:false, replacement:'Backups run nightly. Complete and document a restore drill before starting the pilot.'}
     ];
-    let comments = structuredClone(seed), currentDoc = 'launch', filter = 'all', scene = 'mark', activeId = 'F-12', listening = false, connected = false, sequence = 16, selectedQuote = seed[0], noticeTimer;
+    let comments = structuredClone(seed), currentDoc = 'launch', filter = 'all', activeId = 'F-12', listening = false, connected = false, sequence = 16, selectedQuote = seed[0], noticeTimer;
     const timers = new Map();
-    function openComments() { return comments.filter(c => c.doc === currentDoc && !c.resolved); }
+    function openComments() { return comments.filter(c => !c.resolved && ($('scope').value === 'workspace' || c.doc === currentDoc)); }
     function marked() { return openComments().filter(c => c.marked); }
     function exportable() { return comments.filter(c => c.marked && !c.resolved && ($('scope').value === 'workspace' || c.doc === currentDoc)); }
     function packet(items) { return {schema:'attn.feedback.v1', workspace:'launch-workspace', instructions:['Address this feedback in the available source files.','Check each quote against the current source before editing.','If a source is unavailable or ambiguous, report it instead of guessing.','Return changes and questions by feedback ID.'], feedback:[...items].sort((a,b)=>a.path.localeCompare(b.path)||Number(a.id.slice(2))-Number(b.id.slice(2))).map(c=>({id:c.id, threadId:'t-'+c.id.slice(2), revision:1, sourcePath:c.path, snapshotId:'s-4', section:c.section, anchorStatus:'exact', quote:c.quote, request:c.body, replies:c.replied?[{author:'My agent (simulation)',body:c.replacement||'I would inspect the source and propose an update here.'}]:[]}))}; }
     function serialize(items) {
       const data=packet(items);
-      if($('format').value==='json') return JSON.stringify(data,null,2);
       return '# attn feedback v1\nWorkspace: '+data.workspace+'\n\n'+data.instructions.join('\n')+'\n\n'+data.feedback.map(c=>'['+c.id+'] '+c.sourcePath+'\nThread: '+c.threadId+' · Snapshot: '+c.snapshotId+'\nSection: '+c.section+' · Anchor: '+c.anchorStatus+'\n\n> '+c.quote+'\n\nRequest: '+c.request+c.replies.map(r=>'\n\nReply ('+r.author+'): '+r.body).join('')).join('\n\n---\n\n');
     }
     function notify(message) { clearTimeout(noticeTimer); $('notice').textContent=message; if(!$('notice').matches(':popover-open')) $('notice').showPopover(); noticeTimer=setTimeout(()=>{$('notice').hidePopover();$('notice').textContent='';},4000); }
-    function annotation(c) { return '<button class="annotation '+(activeId===c.id?'active ':'')+(c.accepted?'accepted':'')+'" data-anchor="'+c.id+'" aria-label="Comment on: '+esc(c.accepted?c.replacement:c.quote)+'">'+esc(c.accepted?c.replacement:c.quote)+'</button><sup class="margin-number">'+c.id.slice(2)+'</sup>'; }
+    function annotation(c) { return '<button class="annotation '+(activeId===c.id?'active':'')+'" data-anchor="'+c.id+'" aria-label="Comment on: '+esc(c.quote)+'">'+esc(c.quote)+'</button><sup class="margin-number">'+c.id.slice(2)+'</sup>'; }
     function renderDocument() {
       if(currentDoc==='launch') {
         const [a,b,c]=comments;
@@ -432,16 +422,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
     }
     function renderComments() {
       const shown=openComments().filter(c=>filter==='all'||c.marked);
-      $('comments').innerHTML=shown.map(c=>'<article class="comment '+(c.marked?'marked ':'')+(activeId===c.id?'active':'')+'" aria-label="Comment '+c.id+'"><header class="comment-head"><span class="avatar" aria-hidden="true">AB</span><strong>You</strong><time>just now</time><button class="resolve" data-action="resolve" data-id="'+c.id+'" aria-label="Resolve '+c.id+'">'+icon('check')+'</button></header><blockquote>'+esc(c.quote)+'</blockquote><p class="body">'+esc(c.body)+'</p><div class="comment-actions"><button class="route" id="mark-'+c.id+'" data-action="mark" data-id="'+c.id+'" aria-label="For agent: '+c.id+'" aria-pressed="'+c.marked+'">'+(c.marked?'↗ For agent':'↗ Mark for agent')+'</button><button class="copy-one" id="copy-'+c.id+'" data-action="copy" data-id="'+c.id+'" aria-label="Copy '+c.id+'" '+(c.marked?'':'disabled')+'>'+icon('copy')+' Copy</button></div>'+(c.replied?'<div class="reply"><div class="agent-author"><span class="hex" aria-hidden="true">⊳</span>My agent <span>· preview</span></div><p>'+ (c.replacement?'Here’s a proposed update:':'I would inspect the source and propose a change for this feedback. This response is simulated.')+'</p>'+(c.replacement?'<div class="diff">+ '+esc(c.replacement)+'</div><button class="accept" data-action="accept" data-id="'+c.id+'" '+(c.accepted?'disabled':'')+'>'+(c.accepted?'✓ Applied to preview':'Accept in preview')+'</button>':'')+'</div>':c.status?'<p class="delivery">'+esc(c.status)+'</p>':'')+'</article>').join('')||'<p class="empty">'+(filter==='agent'?'Mark a comment “For agent” to see it here.':'All comments in this document are resolved.')+'</p>';
-    }
-    function renderExport() {
-      const focused=document.activeElement?.id;
-      $('export-list').innerHTML=exportable().map(c=>'<label class="export-comment"><input id="select-'+c.id+'" data-select="'+c.id+'" type="checkbox" '+(c.selected?'checked':'')+' aria-label="Include '+c.id+'"><span><strong>'+esc(c.path)+'</strong><p>'+esc(c.body)+'</p><small>'+c.id+' · '+esc(c.section)+'</small></span></label>').join('')||'<p class="empty">No open comments marked for agent in this scope.</p>';
-      const selected=exportable().filter(c=>c.selected);
-      $('packet').value=serialize(selected);
-      $('copy-selected').textContent='Copy '+selected.length+(selected.length===1?' comment':' comments');
-      $('copy-selected').disabled=!selected.length;
-      if(focused&&$(focused)) $(focused).focus({preventScroll:true});
+      $('comments').innerHTML=shown.map(c=>'<article class="comment '+(c.marked?'marked ':'')+(activeId===c.id?'active':'')+'" aria-label="Comment '+c.id+'"><header class="comment-head">'+(c.marked?'<input class="select-comment" id="select-'+c.id+'" data-select="'+c.id+'" type="checkbox" '+(c.selected?'checked':'')+' aria-label="Select '+c.id+'">':'')+'<span class="avatar" aria-hidden="true">AB</span><strong>You</strong><time>just now</time><button class="resolve" data-action="resolve" data-id="'+c.id+'" aria-label="Resolve '+c.id+'">'+icon('check')+'</button></header>'+($('scope').value==='workspace'?'<p class="source-path">'+esc(c.path)+'</p>':'')+'<blockquote>'+esc(c.quote)+'</blockquote><p class="body">'+esc(c.body)+'</p><div class="comment-actions"><button class="route" id="mark-'+c.id+'" data-action="mark" data-id="'+c.id+'" aria-label="For agent: '+c.id+'" aria-pressed="'+c.marked+'">'+(c.marked?'↗ For agent':'↗ Mark for agent')+'</button><button class="copy-one" id="copy-'+c.id+'" data-action="copy" data-id="'+c.id+'" aria-label="Copy '+c.id+'" '+(c.marked?'':'disabled')+'>'+icon('copy')+' Copy</button></div>'+(c.replied?'<div class="reply"><div class="agent-author"><span class="hex" aria-hidden="true">⊳</span>My agent <span>· preview</span></div><p>'+ (c.replacement?'Here’s a proposed update:':'I would inspect the source and propose a change for this feedback. This response is simulated.')+'</p>'+(c.replacement?'<div class="diff">+ '+esc(c.replacement)+'</div>':'')+'</div>':c.status?'<p class="delivery">'+esc(c.status)+'</p>':'')+'</article>').join('')||'<p class="empty">'+(filter==='agent'?'Mark a comment “For agent” to see it here.':'All comments in this document are resolved.')+'</p>';
     }
     function render() {
       const focused=document.activeElement?.id;
@@ -449,18 +430,15 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
       $('active-filename').textContent=currentDoc==='launch'?'launch-plan.md':'operations.md';
       $('comment-count').textContent=openComments().length;
       $('agent-count').textContent=marked().length;
-      $('copy-button-text').textContent='Copy for agent ('+marked().length+')';
-      $('margin-status').textContent=marked().length+' comments for your agent';
+      $('copy-all').disabled=$('copy-all-toolbar').disabled=!exportable().length;
+      $('copy-selected').disabled=!exportable().some(c=>c.selected);
+      $('margin-status').textContent=exportable().filter(c=>c.selected).length+' selected · '+exportable().length+' for agent';
       $('connection').hidden=!connected;
       $('connection-title').textContent=listening?'My agent is listening':'My agent is paused';
       $('pause').textContent=listening?'Pause':'Resume';
       $('agent-button-text').textContent=connected?(listening?'Listening':'Paused'):'Connect agent';
       document.querySelectorAll('[data-doc]').forEach(b=>{if(b.dataset.doc===currentDoc)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});
       document.querySelectorAll('[data-filter]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.filter===filter)));
-      document.querySelectorAll('[data-scene]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.scene===scene)));
-      const captions={mark:['01','Same comment. A clear recipient.','“For agent” marks the feedback you want to hand off. Your name stays on the comment; the source passage travels with it. Click a highlighted sentence to add a note.'],copy:['02','A useful handoff, in one paste.','Choose one comment or collect the open feedback across your workspace. The packet includes source paths, exact quotes and your requests, ready for any agent conversation.'],live:['03','A conversation beside the work.','A connected agent receives marked comments and responds in the original thread. Try accepting a proposed change in the preview. Replies here are scripted; no agent or model is connected.']};
-      [$('caption-number').textContent,$('caption-title').textContent,$('caption-body').textContent]=captions[scene];
-      if($('handoff').open) renderExport();
       if(focused&&$(focused)) $(focused).focus({preventScroll:true});
     }
     function schedule(c) {
@@ -473,15 +451,15 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
       },500));
     }
     function cancel(c) {clearTimeout(timers.get(c.id));timers.delete(c.id);c.status='';}
-    function connect() {connected=true;listening=true;scene='live';comments.forEach(schedule);render();}
-    function openCopy() {scene='copy';$('scope').value='document';render();$('handoff').showModal();renderExport();}
+    function connect() {connected=true;listening=true;comments.forEach(schedule);render();}
     function compose(c) {selectedQuote=c;$('composer-quote').textContent=c.quote;$('new-comment').value='';$('new-for-agent').checked=true;$('composer').showModal();$('new-comment').focus();}
     async function copy(items) {
+      if(!items.length)return;
+      $('clipboard-fallback').hidden=true;
       const text=serialize(items);
       try {if(!navigator.clipboard?.writeText)throw new Error('Clipboard unavailable');await navigator.clipboard.writeText(text);notify('Copied '+items.length+(items.length===1?' comment.':' comments.')+' Threads stay open.');}
-      catch {if(!$('handoff').open){$('handoff').showModal();renderExport();}$('packet').value=text;$('packet').focus();$('packet').select();notify('Preview selected. Use your Copy shortcut to copy the text.');}
+      catch {$('clipboard-fallback').hidden=false;$('clipboard-text').value=text;$('clipboard-text').focus();$('clipboard-text').select();notify('Use your Copy shortcut to copy the selected text.');}
     }
-    document.querySelectorAll('[data-scene]').forEach(b=>b.addEventListener('click',()=>{if(b.dataset.scene==='copy')openCopy();else if(b.dataset.scene==='live')connect();else{scene='mark';listening=false;comments.forEach(cancel);render();}}));
     document.querySelectorAll('[data-doc]').forEach(b=>b.addEventListener('click',()=>{currentDoc=b.dataset.doc;activeId=comments.find(c=>c.doc===currentDoc).id;render();}));
     document.querySelectorAll('[data-filter]').forEach(b=>b.addEventListener('click',()=>{filter=b.dataset.filter;render();}));
     $('document').addEventListener('click',e=>{const b=e.target.closest('[data-anchor],[data-compose]');if(!b)return;const id=b.dataset.anchor||b.dataset.compose;activeId=id;render();compose(comments.find(c=>c.id===id));});
@@ -490,19 +468,18 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
       if(b.dataset.action==='mark'){c.marked=!c.marked;c.marked?schedule(c):cancel(c);render();}
       if(b.dataset.action==='copy')copy([c]);
       if(b.dataset.action==='resolve'){c.resolved=true;cancel(c);render();notify('Comment resolved in this preview.');}
-      if(b.dataset.action==='accept'){c.accepted=true;render();notify('Applied to the document preview. The comment remains open.');}
     });
-    $('open-copy').addEventListener('click',openCopy);$('copy-footer').addEventListener('click',openCopy);
-    $('close-copy').addEventListener('click',()=>$('handoff').close());
+    $('copy-all-toolbar').addEventListener('click',()=>copy(exportable()));
+    $('copy-all').addEventListener('click',()=>copy(exportable()));
     $('close-composer').addEventListener('click',()=>$('composer').close());
-    $('scope').addEventListener('change',renderExport);$('format').addEventListener('change',renderExport);
-    $('export-list').addEventListener('change',e=>{if(!e.target.dataset.select)return;comments.find(c=>c.id===e.target.dataset.select).selected=e.target.checked;renderExport();});
+    $('scope').addEventListener('change',render);
+    $('comments').addEventListener('change',e=>{if(!e.target.dataset.select)return;comments.find(c=>c.id===e.target.dataset.select).selected=e.target.checked;render();});
     $('copy-selected').addEventListener('click',()=>copy(exportable().filter(c=>c.selected)));
     $('agent-toggle').addEventListener('click',()=>{if(!connected)connect();else{listening=!listening;comments.forEach(c=>listening?schedule(c):cancel(c));render();}});
     $('pause').addEventListener('click',()=>{listening=!listening;comments.forEach(c=>listening?schedule(c):cancel(c));render();});
     $('new-note').addEventListener('click',()=>compose(comments.find(c=>c.doc===currentDoc)));
     $('compose-form').addEventListener('submit',e=>{e.preventDefault();const body=$('new-comment').value.trim();if(!body)return;const c={id:'F-'+sequence++,doc:currentDoc,path:selectedQuote.path,section:selectedQuote.section,quote:selectedQuote.quote,body,marked:$('new-for-agent').checked,selected:true};comments.push(c);activeId=c.id;filter='all';$('composer').close();schedule(c);render();notify('Comment posted'+(c.marked?' for agent.':'.'));});
-    $('reset').addEventListener('click',()=>{comments.forEach(cancel);comments=structuredClone(seed);currentDoc='launch';filter='all';scene='mark';activeId='F-12';listening=false;connected=false;sequence=16;$('scope').value='document';$('format').value='markdown';$('handoff').close();$('composer').close();render();notify('Mockup reset.');});
+    $('reset').addEventListener('click',()=>{comments.forEach(cancel);comments=structuredClone(seed);currentDoc='launch';filter='all';activeId='F-12';listening=false;connected=false;sequence=16;$('scope').value='document';$('clipboard-fallback').hidden=true;$('composer').close();render();notify('Mockup reset.');});
     render();
   </script>
 </body>

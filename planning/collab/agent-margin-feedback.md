@@ -2,14 +2,14 @@
 
 **Proposal for review · 7 September 2026 · attn-qiwt**
 
-[Visual product mockup](agent-margin-feedback.html) · [Still preview](agent-margin-feedback-preview.png) · Try marking, copying and live replies. Product implementation follows review.
+[Visual product mockup](agent-margin-feedback.html) · [Still preview](agent-margin-feedback-preview.png) · Copy directly from the margin. Product implementation follows review.
 
 **Outcome.** Mark margin comments **For agent**, copy one or a batch into any agent conversation, and get useful changes without re-explaining the document. An optional live mode delivers the same feedback automatically and brings replies back into the original threads.
 
 ## The experience
 
 - Add **For agent** to the comment composer and existing thread menu. Keep the human author; show a small recipient badge. A marked thread includes its quoted passage and conversation.
-- Offer **Copy for agent**, **Copy selected**, and **Copy all open**, scoped to a document or workspace. Show the count and exact preview. Exclude resolved threads by default; copying never resolves a comment.
+- Offer **Copy** on each marked comment, inline checkboxes for **Copy selected**, and **Copy all**, scoped to a document or workspace. Each action writes directly to the clipboard: no review panel, preview step or confirmation. Show the selection count; exclude resolved threads by default. Copying never resolves a comment.
 - Persist personal routing separately from shared events, keyed by workspace, room and thread. Marks survive reload on that device; comments retain their room visibility. Cross-device routing sync comes later.
 - Support native, hosted-owner and reviewer surfaces, including Markdown and HTML comments. V1 uses existing review rooms; commenting on unshared local documents is a separate extension.
 
@@ -35,7 +35,7 @@ Editing requires source access. Browser-only documents include excerpts and requ
 
 | Stage | Deliverable | Exit evidence |
 | --- | --- | --- |
-| **1 · Mark and copy** | Durable personal routing, shared packet builder, composer/card actions, document/workspace bulk selection and clipboard fallback. | One and many comments export with correct context across native/hosted/reviewer; reload, stale anchors, HTML, empty selection and large batches verified. |
+| **1 · Mark and copy** | Durable personal routing, shared packet builder, direct Copy / Copy selected / Copy all actions, inline selection, document/workspace scope and clipboard fallback. | All three actions copy immediately with correct context across native/hosted/reviewer; reload, stale anchors, HTML, empty selection and large batches verified. |
 | **2 · Agent tools** | Provider-neutral CLI to list/export feedback, wait after a cursor, acknowledge receipt, reply by thread ID and submit a diff. Add an MCP adapter over that same service. | A shell consumer and an MCP client use the same contract; replies land under the correct comment and suggestions retain human acceptance. |
 | **3 · Listen** | Explicit workspace/session connection, pause/resume, queue and status. Native first; hosted comments require an explicitly paired local bridge or connected agent runner. | Two independent agent hosts, reconnect/replay, cancellation, duplicate delivery and follow-up feedback exercised end to end. |
 

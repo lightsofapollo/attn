@@ -290,21 +290,8 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
     .route[aria-pressed="true"] { background: var(--tint); border-color: #d7bea2; color: #7d4029; }
     .copy-one { background: transparent; border: 0; margin-left: auto; padding: 3px 5px; min-height: 28px; font-size: 11px; color: var(--muted); }
     .copy-one .icon { width: 13px; }
-    .reply { border-top: 1px solid var(--line); padding-top: 11px; margin-top: 12px; }
-    .agent-author { display: flex; gap: 7px; align-items: center; color: var(--violet); font-size: 11px; font-weight: 600; margin-bottom: 8px; }
-    .hex { clip-path: polygon(25% 0%,75% 0%,100% 50%,75% 100%,25% 100%,0% 50%); width: 21px; height: 21px; display: grid; place-items: center; color: #fff; background: var(--violet); font-size: 13px; flex-shrink: 0; }
-    .reply p { font-size: 12px; margin: 0 0 9px; }
-    .diff { color: #35553e; background: #e9eee2; border-radius: 4px; padding: 9px; font: 12px/1.6 var(--serif); margin-bottom: 9px; }
-    .delivery { color: var(--violet); font-size: 11px; margin: 10px 0 0; display: flex; gap: 7px; align-items: center; }
-    .delivery::before { content: ""; height: 5px; width: 5px; border-radius: 50%; background: currentColor; }
     .margin-footer { margin-top: auto; padding: 10px 0 0; border-top: 1px solid var(--line); display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 11px; color: var(--muted); }
     .margin-footer button { min-height: 31px; padding: 4px 7px; font-size: 11px; }
-    .connection { display: flex; gap: 9px; align-items: center; background: #e6e9dc; border: 1px solid #c4cbb9; border-radius: 5px; padding: 10px; margin-bottom: 15px; }
-    .connection div { flex: 1; }
-    .connection strong { color: #3b5c42; font-size: 11px; font-weight: 600; display: block; }
-    .connection p { font-size: 10px; margin: 3px 0 0; color: #53634c; }
-    .connection button { min-height: 27px; padding: 3px 7px; font-size: 10px; background: transparent; border-color: #bac4ad; }
-    .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--green); flex-shrink: 0; }
     .app-status { padding: 7px 18px; border-top: 1px solid var(--line); font-size: 10px; color: var(--muted); display: flex; justify-content: space-between; gap: 12px; background: #e9e5db; }
     .caption { padding: 21px 0 22px; display: flex; gap: 17px; align-items: baseline; }
     .caption h2 { font: 600 15px var(--sans); margin: 0 0 4px; }
@@ -342,6 +329,52 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
     .empty { font-size: 13px; color: var(--muted); padding: 18px 0; }
     [hidden] { display: none !important; }
     .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+    .agent-guide { font-size: 12px; white-space: nowrap; padding: 8px 0; }
+    .agent-plan { border-top: 1px solid #bcb4a4; margin-top: 20px; padding: 42px 0 55px; scroll-margin-top: 24px; }
+    .plan-heading { display: grid; grid-template-columns: 1fr 1fr; gap: 45px; align-items: end; margin-bottom: 30px; }
+    .eyebrow { color: var(--accent); text-transform: uppercase; font: 600 10px/1.5 var(--sans); letter-spacing: .12em; margin: 0 0 12px; }
+    .plan-heading h2 { font: 500 42px/1.12 var(--serif); letter-spacing: -.03em; margin: 0; }
+    .plan-lede { max-width: 50ch; font: 18px/1.65 var(--serif); color: var(--muted); margin: 0 0 3px; }
+    .plan-lede strong { color: var(--ink); font-weight: 500; }
+    code { font: .88em/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; overflow-wrap: anywhere; }
+    .flow { list-style: none; display: grid; grid-template-columns: repeat(4,1fr); margin: 0 0 35px; padding: 0; border: 1px solid #c6c0b4; border-radius: 7px; background: var(--paper); }
+    .flow li { position: relative; padding: 23px 26px; border-right: 1px solid var(--line); }
+    .flow li:last-child { border-right: 0; }
+    .flow li:not(:last-child)::after { content: '→'; position: absolute; right: -11px; top: 47%; z-index: 1; width: 21px; text-align: center; color: var(--accent); background: var(--paper); }
+    .step { color: var(--accent); font-size: 9px; letter-spacing: .13em; font-weight: 650; }
+    .flow h3 { font: 600 19px/1.2 var(--serif); margin: 11px 0 9px; }
+    .flow p { font-size: 13px; line-height: 1.6; margin: 0; color: var(--muted); }
+    .command-demo { display: grid; grid-template-columns: minmax(0, .75fr) minmax(0, 1.25fr); gap: 45px; align-items: start; padding: 10px 0 35px; }
+    .command-notes h3 { font: 500 31px/1.15 var(--serif); letter-spacing: -.025em; margin: 0 0 19px; }
+    .command-notes p:not(.eyebrow) { font-size: 14px; color: var(--muted); max-width: 51ch; }
+    .command-actions { display: flex; flex-wrap: wrap; gap: 9px; margin: 22px 0 12px; }
+    .command-notes .demo-hint, .command-notes #watch-status { font-size: 12px !important; line-height: 1.6; }
+    #watch-status { color: var(--green) !important; font-weight: 550; }
+    .terminal { min-width: 0; background: #282c25; color: #eee9d9; border: 1px solid #3c4235; border-radius: 8px; overflow: hidden; box-shadow: 0 10px 25px #38302212; }
+    .terminal-head { display: flex; align-items: center; gap: 8px; padding: 12px 18px; border-bottom: 1px solid #525749; color: #c4c9b4; font-size: 11px; }
+    .terminal-head span:last-child { margin-left: auto; font-size: 10px; }
+    .terminal-dot { width: 6px; height: 6px; border-radius: 50%; background: #c4c9b4; }
+    .terminal-command { padding: 17px 20px 7px; color: #e9c99c; }
+    .terminal pre { font: 11px/1.8 ui-monospace, SFMono-Regular, Menlo, monospace; margin: 0; padding: 10px 20px 22px; max-height: 325px; min-height: 290px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .terminal pre:focus-visible { outline: 2px solid #e9c99c; outline-offset: -4px; }
+    .terminal-foot { border-top: 1px solid #525749; color: #c4c9b4; margin: 0; padding: 10px 18px; font-size: 10px; }
+    .implementation-notes { display: grid; grid-template-columns: repeat(4,1fr); gap: 30px; border-top: 1px solid var(--line); padding: 25px 0; }
+    .implementation-notes h3 { font-size: 13px; margin: 0 0 9px; }
+    .implementation-notes p { color: var(--muted); font-size: 12px; line-height: 1.7; margin: 0; }
+    .contract { border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); padding: 16px 0; }
+    .contract summary { cursor: pointer; font-size: 13px; font-weight: 550; width: fit-content; }
+    .contract-body { max-width: 110ch; color: var(--muted); font-size: 13px; line-height: 1.75; padding: 7px 0 0; }
+    .contract-body strong { color: var(--ink); }
+    .epic-note { display: flex; align-items: center; justify-content: space-between; gap: 15px; margin-top: 30px; }
+    .epic-note h3 { font: 550 23px/1.3 var(--serif); margin: 0 0 7px; }
+    .epic-note p { font-size: 12px; color: var(--muted); margin: 0; }
+    .epic-command { border: 1px solid var(--line); border-radius: 5px; padding: 10px 15px; background: var(--paper); white-space: nowrap; }
+    .epic-list { list-style: none; display: grid; grid-template-columns: repeat(3,1fr); gap: 10px 25px; padding: 18px 0 0; margin: 0; }
+    .epic-list li { display: flex; align-items: baseline; gap: 12px; padding: 10px 0; border-top: 1px solid var(--line); font-size: 12px; }
+    .epic-list code { color: var(--accent); white-space: nowrap; }
+    @media (max-width: 1000px) { .flow { grid-template-columns: repeat(2,1fr); } .flow li { border-bottom: 1px solid var(--line); } .flow li:nth-child(even) { border-right: 0; } .flow li:nth-child(2)::after { display: none; } .flow li:nth-child(n+3) { border-bottom: 0; } .implementation-notes { grid-template-columns: repeat(2,1fr); } .command-demo { gap: 25px; } .epic-list { grid-template-columns: repeat(2,1fr); } }
+    @media (max-width: 650px) { .agent-guide { font-size: 10px; } .agent-plan { padding-top: 30px; } .plan-heading, .command-demo { grid-template-columns: 1fr; gap: 24px; } .plan-heading h2 { font-size: 35px; } .plan-lede { font-size: 16px; } .flow li { padding: 20px 17px; } .flow h3 { font-size: 18px; } .flow p { font-size: 12px; } .implementation-notes { grid-template-columns: 1fr; gap: 22px; } .epic-note { align-items: start; flex-direction: column; } .epic-list { grid-template-columns: 1fr; } .terminal pre { font-size: 10px; padding-left: 14px; padding-right: 14px; } }
+    @media print { .command-actions { display: none; } .terminal pre { max-height: none; } .agent-plan { break-before: page; } }
     @media (min-width: 1400px) { .workspace { grid-template-columns: 190px minmax(0, 1fr) 370px; } .document { padding-left: 58px; padding-right: 58px; } .document .prose { font-size: 16px; } }
     @media (max-width: 1150px) { .frame { width: calc(100% - 36px); } .workspace { grid-template-columns: 150px minmax(0, 1fr) 310px; } .document { padding: 32px 27px; } .document h2 { font-size: 32px; } .intro { align-items: start; } h1 { font-size: 30px; }  .intro p { max-width: 40ch; } }
     @media (max-width: 900px) { .workspace { grid-template-columns: minmax(0, 1fr) 320px; } .files { display: none; } .intro { display: block; } .intro p { max-width: none; }  .saved, .owner-avatar { display: none; } }
@@ -352,7 +385,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
       .app-toolbar { padding: 10px 12px; gap: 10px; flex-wrap: wrap; } .breadcrumb { font-size: 11px; } .toolbar-actions { gap: 7px; } .toolbar-actions button { font-size: 10px; min-height: 33px; padding: 6px 8px; } .toolbar-actions .icon { width: 13px; }
       .workspace { display: block; } .document { padding: 27px 26px; } .document h2 { font-size: 31px; } .document .prose { font-size: 15px; } .doc-description { font-size: 14px; }
       .margin { border-left: 0; border-top: 1px solid var(--line); padding: 20px; } .margin-heading h2 { font-size: 16px; } .comment { padding: 15px; } .comment .body { font-size: 14px; } .comment blockquote { font-size: 13px; } .route, .copy-one, .resolve { min-height: 40px; } .comment-head { font-size: 12px; } .route { font-size: 12px; } .copy-one { font-size: 12px; } .comment::before { width: 17px; }
-      .reply p, .diff { font-size: 13px; } .connection strong { font-size: 12px; } .connection p { font-size: 11px; } .connection button { min-height: 35px; } .margin-footer { margin-top: 15px; } .app-status span:last-child { display: none; }
+      .margin-footer { margin-top: 15px; } .app-status span:last-child { display: none; }
       .caption { align-items: start; gap: 11px; } .caption p { font-size: 12px; } .caption button { font-size: 10px; padding: 5px; }
       dialog { width: calc(100% - 22px); max-height: calc(100dvh - 28px); } .dialog-head { padding: 19px; } .dialog-head h2 { font-size: 23px; }     #clipboard-text { min-height: 190px; } .dialog-foot { padding: 14px; gap: 12px; } .dialog-foot p { font-size: 10px; max-width: 20ch; }
     }
@@ -372,18 +405,40 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
   </defs></svg>
   <main class="frame">
     <header class="page-head"><div class="identity"><span class="wordmark">attn.</span><span>Agent feedback / Visual proposal</span></div><a href="agent-margin-feedback.md">Read the one-pager ↗</a></header>
-    <section class="intro" aria-labelledby="page-title"><div><h1 id="page-title">From your margin to your agent.</h1><p>Mark comments for your agent, then copy one, selected comments, or all.</p></div></section>
+    <section class="intro" aria-labelledby="page-title"><div><h1 id="page-title">From your margin to your agent.</h1><p>Mark comments for your agent. Copy them directly, or let your agent read them with attn feedback.</p></div></section>
     <section class="app" aria-label="Proposed attn interface">
       <div class="titlebar"><div class="traffic" aria-hidden="true"><i></i><i></i><i></i></div><span class="window-title">Launch workspace — attn</span><span class="mock-label">Interactive mockup · changes stay in this page</span></div>
-      <div class="app-toolbar"><span class="breadcrumb"><svg class="icon" aria-hidden="true"><use href="#i-file"/></svg><span>docs</span><span>/</span><strong id="active-filename">launch-plan.md</strong></span><span class="saved"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>Saved locally</span><div class="toolbar-actions"><span class="owner-avatar" title="You">AB</span><button id="agent-toggle"><svg class="icon" aria-hidden="true"><use href="#i-agent"/></svg><span id="agent-button-text">Connect agent</span></button><button class="primary" id="copy-all-toolbar"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>Copy all</span></button></div></div>
+      <div class="app-toolbar"><span class="breadcrumb"><svg class="icon" aria-hidden="true"><use href="#i-file"/></svg><span>docs</span><span>/</span><strong id="active-filename">launch-plan.md</strong></span><span class="saved"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>Saved locally</span><div class="toolbar-actions"><span class="owner-avatar" title="You">AB</span><a class="agent-guide" href="#agent-workflow">Agent commands ↗</a><button class="primary" id="copy-all-toolbar"><svg class="icon" aria-hidden="true"><use href="#i-copy"/></svg><span>Copy all</span></button></div></div>
       <div class="workspace">
         <nav class="files" aria-label="Workspace files"><div class="project"><svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg>Launch workspace</div><div class="folder">⌄ <span>docs</span></div><button class="file" data-doc="launch" aria-current="page"><svg class="icon" aria-hidden="true"><use href="#i-file"/></svg>launch-plan.md<span class="file-count">3</span></button><button class="file" data-doc="operations"><svg class="icon" aria-hidden="true"><use href="#i-file"/></svg>operations.md<span class="file-count">1</span></button><div class="files-bottom"><svg class="icon" aria-hidden="true"><use href="#i-check"/></svg>Local workspace<p>Your files. Your review.<br>Your choice of agent.</p></div></nav>
         <article class="document" id="document" aria-label="Document preview"></article>
-        <aside class="margin" aria-label="Review margin"><div class="margin-heading"><h2>Comments <span id="comment-count" class="count-badge">3</span></h2><button class="ghost" id="new-note">+ Add comment</button></div><div class="filter-tabs" aria-label="Comment filter"><button data-filter="all" aria-pressed="true">All comments</button><button data-filter="agent" aria-pressed="false">For agent <span id="agent-count">2</span></button></div><div class="scope-row"><label for="scope">Scope</label><select id="scope"><option value="document">This document</option><option value="workspace">Whole workspace</option></select></div><div class="connection" id="connection" hidden><span class="dot" aria-hidden="true"></span><div><strong id="connection-title">My agent is listening</strong><p>Scripted preview · no model connected</p></div><button id="pause">Pause</button></div><div id="comments"></div><div class="margin-footer"><span id="margin-status">1 selected · 2 for agent</span><div class="batch-actions"><button id="copy-selected">Copy selected</button><button class="primary" id="copy-all">Copy all</button></div></div><div id="clipboard-fallback" hidden><label for="clipboard-text">Clipboard unavailable. Select and copy this text.</label><textarea id="clipboard-text" readonly spellcheck="false"></textarea></div></aside>
+        <aside class="margin" aria-label="Review margin"><div class="margin-heading"><h2>Comments <span id="comment-count" class="count-badge">3</span></h2><button class="ghost" id="new-note">+ Add comment</button></div><div class="filter-tabs" aria-label="Comment filter"><button data-filter="all" aria-pressed="true">All comments</button><button data-filter="agent" aria-pressed="false">For agent <span id="agent-count">2</span></button></div><div class="scope-row"><label for="scope">Scope</label><select id="scope"><option value="document">This document</option><option value="workspace">Whole workspace</option></select></div><div id="comments"></div><div class="margin-footer"><span id="margin-status">1 selected · 2 for agent</span><div class="batch-actions"><button id="copy-selected">Copy selected</button><button class="primary" id="copy-all">Copy all</button></div></div><div id="clipboard-fallback" hidden><label for="clipboard-text">Clipboard unavailable. Select and copy this text.</label><textarea id="clipboard-text" readonly spellcheck="false"></textarea></div></aside>
       </div>
       <div class="app-status"><span id="status-left">Shared review · launch workspace</span><span>For agent is a personal mark · copied comments stay open</span></div>
     </section>
     <section class="caption"><div><h2>Copy. Copy selected. Copy all.</h2><p>Each action copies straight to your clipboard, with the source path, quoted passage and comment included. Paste into your agent conversation.</p></div><button id="reset">Reset mockup</button></section>
+    <section class="agent-plan" id="agent-workflow" aria-labelledby="agent-plan-title">
+      <div class="plan-heading"><div><p class="eyebrow">Agreed direction · 7 September 2026</p><h2 id="agent-plan-title">One source of feedback.<br>Two commands.</h2></div><p class="plan-lede">Your notes already live in attn. An agent reads them there, finds the original file and makes the change. <strong>No extra feedback document to maintain.</strong></p></div>
+      <ol class="flow" aria-label="How feedback reaches the source file">
+        <li><span class="step">01 / COMMENT</span><h3>You leave a note</h3><p>Mark a margin thread <strong>For agent</strong>. attn stores the note and its position.</p></li>
+        <li><span class="step">02 / READ</span><h3>The agent reads attn</h3><p><code>attn feedback</code> returns the file, quoted passage, note and thread context.</p></li>
+        <li><span class="step">03 / EDIT</span><h3>The agent edits the file</h3><p>It checks the current source and uses its usual editing tools and permissions.</p></li>
+        <li><span class="step">04 / REFRESH</span><h3>You see the change</h3><p>attn reloads the source and updates the anchor. You can leave the next note.</p></li>
+      </ol>
+      <div class="command-demo">
+        <div class="command-notes"><p class="eyebrow">Try the command view</p><h3>Read once.<br>Or keep watching.</h3><p><code>attn feedback</code> reads the current marked, unresolved notes and exits.</p><p><code>attn feedback --watch</code> stays running: a complete snapshot first, then changes as they happen. <strong>Watch, not wait.</strong></p><div class="command-actions"><button id="read-feedback">Read once</button><button class="primary" id="watch-feedback" aria-pressed="false">Start watch demo</button></div><p class="demo-hint">Start watching, then mark, add or resolve a comment above. This demo watches the whole sample workspace; the margin’s scope only controls copying.</p><p id="watch-status" role="status" aria-live="polite">Example snapshot · 3 notes</p></div>
+        <div class="terminal"><div class="terminal-head"><span class="terminal-dot" aria-hidden="true"></span><span>launch-workspace</span><span>Illustration only</span></div><div class="terminal-command"><span aria-hidden="true">$ </span><code id="command-name">attn feedback</code></div><pre id="command-output" tabindex="0" aria-label="Example feedback command output"></pre><p class="terminal-foot">Proposed output · no command or model is running in this page</p></div>
+      </div>
+      <div class="implementation-notes">
+        <article><h3>What the agent gets</h3><p>Stable feedback and thread IDs; the actual local file path when available; the quoted passage, heading or HTML selector; your note and replies; snapshot/hash and current anchor confidence. It verifies the passage before editing.</p></article>
+        <article><h3>How it stays simple</h3><p>Both commands read the existing local attn store. Personal marks live in attn’s own metadata. Readable text is the default; <code>--json</code> gives a structured snapshot. Watch emits one JSON record per line through the existing local daemon.</p></article>
+        <article><h3>Who runs the agent</h3><p>Your agent host keeps the watch process running and consumes its output. The host chooses the provider/model and when to act. Delivery can be prompt; interrupting an active model call depends on the host. Responses stay in your agent dialogue.</p></article>
+        <article><h3>What v1 can reach</h3><p>Existing room-backed comments on this machine. Browser-only marks stay in that browser and support direct copy; they need local import and native marking to reach this CLI. Unshared local commenting and cross-device mark sync are separate work.</p></article>
+      </div>
+      <details class="contract"><summary>Implementation contract &amp; boundaries</summary><div class="contract-body"><p><strong>Project scope.</strong> Run either command from the source project, or pass a file/project path. Scope resolves from local workspace bindings. No implicit scan of unrelated projects. Snapshot reads work from persisted data with the daemon stopped and report local freshness; watch requires the daemon.</p><p><strong>Continuous stream.</strong> Snapshot first, then <code>upsert</code> and <code>remove</code> records. Subscribe without a startup gap. Human follow-ups advance a durable feedback revision; agent replies and file reloads only update context/source revisions. Unmarking or resolving removes queued work; it cannot undo an edit already made.</p><p><strong>Recoverable delivery.</strong> A lost stream position or buffer overflow emits <code>reset</code> and a fresh snapshot. Daemon loss exits with an error; the host restarts the command. Deduplicate by scoped feedback ID and revision. No saved cursor file or acknowledgement command is needed. Ctrl-C stops watching.</p><p><strong>Original files.</strong> attn stays the source of notes; the filesystem stays the source of documents. Agents use their existing permissions and recheck stale/ambiguous anchors. attn preserves dirty editor buffers when external edits arrive. Reading, copying and watching leave threads open.</p><p><strong>Implementation scope.</strong> No additional exported Markdown inbox, public HTTP API, required MCP adapter, model runner, automatic agent replies or new review/acceptance step. Commands and output are proposed here; this artifact does not implement them.</p></div></details>
+      <div class="epic-note"><div><span class="eyebrow">Implementation epic</span><h3><code>attn-aysu</code> · Agent feedback CLI</h3><p>6 workstreams · 24 implementation tasks · explicit dependencies and acceptance criteria</p></div><code class="epic-command">bd show attn-aysu</code></div>
+      <ol class="epic-list"><li><code>attn-aysu.1</code><span>Persistent personal marks</span></li><li><code>attn-aysu.2</code><span>File and passage references</span></li><li><code>attn-aysu.3</code><span>Direct copying across surfaces</span></li><li><code>attn-aysu.4</code><span>Read-once snapshot command</span></li><li><code>attn-aysu.5</code><span>Continuous watch stream</span></li><li><code>attn-aysu.6</code><span>Source edits, host evidence and release</span></li></ol>
+    </section>
   </main>
   <dialog id="composer" aria-labelledby="composer-title"><form id="compose-form"><div class="dialog-head"><div><h2 id="composer-title">Leave a comment</h2><p>On the selected passage</p></div><button class="close" type="button" id="close-composer" aria-label="Close comment composer"><svg class="icon" aria-hidden="true"><use href="#i-close"/></svg></button></div><div class="composer-body"><blockquote id="composer-quote"></blockquote><label class="sr-only" for="new-comment">Your comment</label><textarea id="new-comment" required maxlength="1200" placeholder="What would you like to change?"></textarea><label class="composer-choice"><input id="new-for-agent" type="checkbox" checked>For agent</label></div><div class="dialog-foot"><p>The author stays you.</p><button class="primary" type="submit">Post comment</button></div></form></dialog>
   <div id="notice" role="status" aria-live="polite" popover="manual"></div>
@@ -394,20 +449,20 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
     const esc = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;'}[c]));
     const icon = name => '<svg class="icon" aria-hidden="true"><use href="#i-' + name + '"/></svg>';
     const seed = [
-      {id:'F-12', doc:'launch', path:'docs/launch-plan.md', section:'The rollout', quote:'Release to every workspace on Monday.', body:'Let’s start with an opt-in pilot. Add a clear trigger for rolling back before we open this to everyone.', marked:true, selected:true, replacement:'Start with a five-workspace opt-in pilot on Monday. Roll back if the error rate exceeds 1% for five minutes.'},
-      {id:'F-13', doc:'launch', path:'docs/launch-plan.md', section:'A way back', quote:'Keep the previous version available.', body:'Who owns the rollback? And how quickly should we be able to recover?', marked:true, selected:false, replacement:'The on-call engineer owns rollback. Keep the previous version ready and target recovery within ten minutes.'},
+      {id:'F-12', doc:'launch', path:'docs/launch-plan.md', section:'The rollout', quote:'Release to every workspace on Monday.', body:'Let’s start with an opt-in pilot. Add a clear trigger for rolling back before we open this to everyone.', marked:true, selected:true},
+      {id:'F-13', doc:'launch', path:'docs/launch-plan.md', section:'A way back', quote:'Keep the previous version available.', body:'Who owns the rollback? And how quickly should we be able to recover?', marked:true, selected:false},
       {id:'F-14', doc:'launch', path:'docs/launch-plan.md', section:'Before we begin', quote:'Share the pilot checklist with the team.', body:'This is ready to share once we’ve agreed on the pilot group.', marked:false, selected:false},
-      {id:'F-15', doc:'operations', path:'docs/operations.md', section:'Backups', quote:'Backups run each night.', body:'Add a restore drill before the pilot starts.', marked:true, selected:false, replacement:'Backups run nightly. Complete and document a restore drill before starting the pilot.'}
+      {id:'F-15', doc:'operations', path:'docs/operations.md', section:'Backups', quote:'Backups run each night.', body:'Add a restore drill before the pilot starts.', marked:true, selected:false}
     ];
-    let comments = structuredClone(seed), currentDoc = 'launch', filter = 'all', activeId = 'F-12', listening = false, connected = false, sequence = 16, selectedQuote = seed[0], noticeTimer;
-    const timers = new Map();
+    let comments = structuredClone(seed), currentDoc = 'launch', filter = 'all', activeId = 'F-12', watching = false, streamCursor = 0, sequence = 16, selectedQuote = seed[0], noticeTimer;
+    let streamRecords = [];
     function openComments() { return comments.filter(c => !c.resolved && ($('scope').value === 'workspace' || c.doc === currentDoc)); }
     function marked() { return openComments().filter(c => c.marked); }
     function exportable() { return comments.filter(c => c.marked && !c.resolved && ($('scope').value === 'workspace' || c.doc === currentDoc)); }
-    function packet(items) { return {schema:'attn.feedback.v1', workspace:'launch-workspace', instructions:['Address this feedback in the available source files.','Check each quote against the current source before editing.','If a source is unavailable or ambiguous, report it instead of guessing.','Return changes and questions by feedback ID.'], feedback:[...items].sort((a,b)=>a.path.localeCompare(b.path)||Number(a.id.slice(2))-Number(b.id.slice(2))).map(c=>({id:c.id, threadId:'t-'+c.id.slice(2), revision:1, sourcePath:c.path, snapshotId:'s-4', section:c.section, anchorStatus:'exact', quote:c.quote, request:c.body, replies:c.replied?[{author:'My agent (simulation)',body:c.replacement||'I would inspect the source and propose an update here.'}]:[]}))}; }
+    function packet(items) { return {schema:'attn.feedback.v1', workspace:'launch-workspace', projectRoot:'/projects/launch-workspace', freshness:'local', instructions:['Address this feedback in the available source files.','Check each quote against the current source before editing.','If a source is unavailable or ambiguous, report it instead of guessing.','Return changes and questions by feedback ID.'], feedback:[...items].sort((a,b)=>a.path.localeCompare(b.path)||Number(a.id.slice(2))-Number(b.id.slice(2))).map(c=>({id:c.id, roomId:'r-launch', threadId:'t-'+c.id.slice(2), revision:c.revision||1, author:'You', sourcePath:c.path, localPath:'/projects/launch-workspace/'+c.path, sourceAvailability:'local', sourceRevision:'demo-source-4', snapshotId:'s-4', section:c.section, anchorStatus:'exact', quote:c.quote, request:c.body, replies:[]}))}; }
     function serialize(items) {
       const data=packet(items);
-      return '# attn feedback v1\nWorkspace: '+data.workspace+'\n\n'+data.instructions.join('\n')+'\n\n'+data.feedback.map(c=>'['+c.id+'] '+c.sourcePath+'\nThread: '+c.threadId+' · Snapshot: '+c.snapshotId+'\nSection: '+c.section+' · Anchor: '+c.anchorStatus+'\n\n> '+c.quote+'\n\nRequest: '+c.request+c.replies.map(r=>'\n\nReply ('+r.author+'): '+r.body).join('')).join('\n\n---\n\n');
+      return '# attn feedback v1\nWorkspace: '+data.workspace+'\n\n'+data.instructions.join('\n')+'\n\n'+data.feedback.map(c=>'['+c.id+'] '+c.sourcePath+'\nThread: '+c.threadId+' · Revision: '+c.revision+' · Snapshot: '+c.snapshotId+'\nSection: '+c.section+' · Anchor: '+c.anchorStatus+'\n\n> '+c.quote+'\n\nRequest: '+c.request+c.replies.map(r=>'\n\nReply ('+r.author+'): '+r.body).join('')).join('\n\n---\n\n');
     }
     function notify(message) { clearTimeout(noticeTimer); $('notice').textContent=message; if(!$('notice').matches(':popover-open')) $('notice').showPopover(); noticeTimer=setTimeout(()=>{$('notice').hidePopover();$('notice').textContent='';},4000); }
     function annotation(c) { return '<button class="annotation '+(activeId===c.id?'active':'')+'" data-anchor="'+c.id+'" aria-label="Comment on: '+esc(c.quote)+'">'+esc(c.quote)+'</button><sup class="margin-number">'+c.id.slice(2)+'</sup>'; }
@@ -422,7 +477,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
     }
     function renderComments() {
       const shown=openComments().filter(c=>filter==='all'||c.marked);
-      $('comments').innerHTML=shown.map(c=>'<article class="comment '+(c.marked?'marked ':'')+(activeId===c.id?'active':'')+'" aria-label="Comment '+c.id+'"><header class="comment-head">'+(c.marked?'<input class="select-comment" id="select-'+c.id+'" data-select="'+c.id+'" type="checkbox" '+(c.selected?'checked':'')+' aria-label="Select '+c.id+'">':'')+'<span class="avatar" aria-hidden="true">AB</span><strong>You</strong><time>just now</time><button class="resolve" data-action="resolve" data-id="'+c.id+'" aria-label="Resolve '+c.id+'">'+icon('check')+'</button></header>'+($('scope').value==='workspace'?'<p class="source-path">'+esc(c.path)+'</p>':'')+'<blockquote>'+esc(c.quote)+'</blockquote><p class="body">'+esc(c.body)+'</p><div class="comment-actions"><button class="route" id="mark-'+c.id+'" data-action="mark" data-id="'+c.id+'" aria-label="For agent: '+c.id+'" aria-pressed="'+c.marked+'">'+(c.marked?'↗ For agent':'↗ Mark for agent')+'</button><button class="copy-one" id="copy-'+c.id+'" data-action="copy" data-id="'+c.id+'" aria-label="Copy '+c.id+'" '+(c.marked?'':'disabled')+'>'+icon('copy')+' Copy</button></div>'+(c.replied?'<div class="reply"><div class="agent-author"><span class="hex" aria-hidden="true">⊳</span>My agent <span>· preview</span></div><p>'+ (c.replacement?'Here’s a proposed update:':'I would inspect the source and propose a change for this feedback. This response is simulated.')+'</p>'+(c.replacement?'<div class="diff">+ '+esc(c.replacement)+'</div>':'')+'</div>':c.status?'<p class="delivery">'+esc(c.status)+'</p>':'')+'</article>').join('')||'<p class="empty">'+(filter==='agent'?'Mark a comment “For agent” to see it here.':'All comments in this document are resolved.')+'</p>';
+      $('comments').innerHTML=shown.map(c=>'<article class="comment '+(c.marked?'marked ':'')+(activeId===c.id?'active':'')+'" aria-label="Comment '+c.id+'"><header class="comment-head">'+(c.marked?'<input class="select-comment" id="select-'+c.id+'" data-select="'+c.id+'" type="checkbox" '+(c.selected?'checked':'')+' aria-label="Select '+c.id+'">':'')+'<span class="avatar" aria-hidden="true">AB</span><strong>You</strong><time>just now</time><button class="resolve" data-action="resolve" data-id="'+c.id+'" aria-label="Resolve '+c.id+'">'+icon('check')+'</button></header>'+($('scope').value==='workspace'?'<p class="source-path">'+esc(c.path)+'</p>':'')+'<blockquote>'+esc(c.quote)+'</blockquote><p class="body">'+esc(c.body)+'</p><div class="comment-actions"><button class="route" id="mark-'+c.id+'" data-action="mark" data-id="'+c.id+'" aria-label="For agent: '+c.id+'" aria-pressed="'+c.marked+'">'+(c.marked?'↗ For agent':'↗ Mark for agent')+'</button><button class="copy-one" id="copy-'+c.id+'" data-action="copy" data-id="'+c.id+'" aria-label="Copy '+c.id+'" '+(c.marked?'':'disabled')+'>'+icon('copy')+' Copy</button></div>'+'</article>').join('')||'<p class="empty">'+(filter==='agent'?'Mark a comment “For agent” to see it here.':'All comments in this document are resolved.')+'</p>';
     }
     function render() {
       const focused=document.activeElement?.id;
@@ -433,25 +488,36 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
       $('copy-all').disabled=$('copy-all-toolbar').disabled=!exportable().length;
       $('copy-selected').disabled=!exportable().some(c=>c.selected);
       $('margin-status').textContent=exportable().filter(c=>c.selected).length+' selected · '+exportable().length+' for agent';
-      $('connection').hidden=!connected;
-      $('connection-title').textContent=listening?'My agent is listening':'My agent is paused';
-      $('pause').textContent=listening?'Pause':'Resume';
-      $('agent-button-text').textContent=connected?(listening?'Listening':'Paused'):'Connect agent';
       document.querySelectorAll('[data-doc]').forEach(b=>{if(b.dataset.doc===currentDoc)b.setAttribute('aria-current','page');else b.removeAttribute('aria-current');});
       document.querySelectorAll('[data-filter]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.filter===filter)));
       if(focused&&$(focused)) $(focused).focus({preventScroll:true});
     }
-    function schedule(c) {
-      if(!listening||!c.marked||c.resolved||c.replied||timers.has(c.id))return;
-      c.status='Queued for agent';
-      timers.set(c.id,setTimeout(()=>{
-        if(!listening||!c.marked||c.resolved)return;
-        c.status='Agent is reviewing this passage…';render();
-        timers.set(c.id,setTimeout(()=>{timers.delete(c.id);if(!listening||!c.marked||c.resolved)return;c.status='';c.replied=true;render();notify('A simulated reply arrived on '+c.id+'.');},1200));
-      },500));
+    function projectFeedback() { return comments.filter(c=>c.marked&&!c.resolved); }
+    function streamRecord(type, payload) { return {schema:'attn.feedback.v1', workspace:'launch-workspace', cursor:'demo:'+streamCursor++, type, ...payload}; }
+    function renderStream() {
+      $('command-output').textContent=streamRecords.map(r=>JSON.stringify(r)).join('\n');
+      $('command-output').scrollTop=$('command-output').scrollHeight;
+      $('watch-status').textContent='Watch demo running · '+streamRecords.length+' records · '+projectFeedback().length+' current notes';
     }
-    function cancel(c) {clearTimeout(timers.get(c.id));timers.delete(c.id);c.status='';}
-    function connect() {connected=true;listening=true;comments.forEach(schedule);render();}
+    function readFeedback() {
+      watching=false;$('watch-feedback').textContent='Start watch demo';$('watch-feedback').setAttribute('aria-pressed','false');
+      $('command-name').textContent='attn feedback';$('command-output').textContent=serialize(projectFeedback());$('command-output').scrollTop=0;
+      $('watch-status').textContent='Example snapshot · '+projectFeedback().length+' notes';
+    }
+    function toggleWatch() {
+      watching=!watching;$('watch-feedback').setAttribute('aria-pressed',String(watching));
+      $('watch-feedback').textContent=watching?'Stop watch demo':'Start watch demo';
+      if(watching) {
+        streamCursor=0;streamRecords=[streamRecord('snapshot', {complete:true, freshness:'local', feedback:packet(projectFeedback()).feedback})];
+        $('command-name').textContent='attn feedback --watch';renderStream();
+      } else {$('watch-status').textContent='Watch demo stopped · start again for a fresh snapshot';}
+    }
+    function feedbackChanged(c, reason) {
+      c.revision=(c.revision??1)+1;
+      if(!watching||(!c.marked&&reason==='created'))return;
+      streamRecords.push(c.marked&&!c.resolved?streamRecord('upsert',{reason,feedback:packet([c]).feedback[0]}):streamRecord('remove',{id:c.id,revision:c.revision,reason}));
+      renderStream();
+    }
     function compose(c) {selectedQuote=c;$('composer-quote').textContent=c.quote;$('new-comment').value='';$('new-for-agent').checked=true;$('composer').showModal();$('new-comment').focus();}
     async function copy(items) {
       if(!items.length)return;
@@ -465,9 +531,9 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
     $('document').addEventListener('click',e=>{const b=e.target.closest('[data-anchor],[data-compose]');if(!b)return;const id=b.dataset.anchor||b.dataset.compose;activeId=id;render();compose(comments.find(c=>c.id===id));});
     $('comments').addEventListener('click',e=>{
       const b=e.target.closest('[data-action]');if(!b)return;const c=comments.find(c=>c.id===b.dataset.id);
-      if(b.dataset.action==='mark'){c.marked=!c.marked;c.marked?schedule(c):cancel(c);render();}
+      if(b.dataset.action==='mark'){c.marked=!c.marked;feedbackChanged(c,c.marked?'marked':'unmarked');render();}
       if(b.dataset.action==='copy')copy([c]);
-      if(b.dataset.action==='resolve'){c.resolved=true;cancel(c);render();notify('Comment resolved in this preview.');}
+      if(b.dataset.action==='resolve'){c.resolved=true;if(c.marked)feedbackChanged(c,'resolved');render();notify('Comment resolved in this preview.');}
     });
     $('copy-all-toolbar').addEventListener('click',()=>copy(exportable()));
     $('copy-all').addEventListener('click',()=>copy(exportable()));
@@ -475,12 +541,12 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
     $('scope').addEventListener('change',render);
     $('comments').addEventListener('change',e=>{if(!e.target.dataset.select)return;comments.find(c=>c.id===e.target.dataset.select).selected=e.target.checked;render();});
     $('copy-selected').addEventListener('click',()=>copy(exportable().filter(c=>c.selected)));
-    $('agent-toggle').addEventListener('click',()=>{if(!connected)connect();else{listening=!listening;comments.forEach(c=>listening?schedule(c):cancel(c));render();}});
-    $('pause').addEventListener('click',()=>{listening=!listening;comments.forEach(c=>listening?schedule(c):cancel(c));render();});
+    $('read-feedback').addEventListener('click',readFeedback);
+    $('watch-feedback').addEventListener('click',toggleWatch);
     $('new-note').addEventListener('click',()=>compose(comments.find(c=>c.doc===currentDoc)));
-    $('compose-form').addEventListener('submit',e=>{e.preventDefault();const body=$('new-comment').value.trim();if(!body)return;const c={id:'F-'+sequence++,doc:currentDoc,path:selectedQuote.path,section:selectedQuote.section,quote:selectedQuote.quote,body,marked:$('new-for-agent').checked,selected:true};comments.push(c);activeId=c.id;filter='all';$('composer').close();schedule(c);render();notify('Comment posted'+(c.marked?' for agent.':'.'));});
-    $('reset').addEventListener('click',()=>{comments.forEach(cancel);comments=structuredClone(seed);currentDoc='launch';filter='all';activeId='F-12';listening=false;connected=false;sequence=16;$('scope').value='document';$('clipboard-fallback').hidden=true;$('composer').close();render();notify('Mockup reset.');});
-    render();
+    $('compose-form').addEventListener('submit',e=>{e.preventDefault();const body=$('new-comment').value.trim();if(!body)return;const c={id:'F-'+sequence++,doc:currentDoc,path:selectedQuote.path,section:selectedQuote.section,quote:selectedQuote.quote,body,marked:$('new-for-agent').checked,selected:true,revision:0};comments.push(c);activeId=c.id;filter='all';$('composer').close();feedbackChanged(c,'created');render();notify('Comment posted'+(c.marked?' for agent.':'.'));});
+    $('reset').addEventListener('click',()=>{comments=structuredClone(seed);currentDoc='launch';filter='all';activeId='F-12';watching=false;streamRecords=[];streamCursor=0;sequence=16;$('scope').value='document';$('clipboard-fallback').hidden=true;$('composer').close();render();readFeedback();notify('Mockup reset.');});
+    render();readFeedback();
   </script>
 </body>
 </html>

@@ -1,48 +1,51 @@
-# For agent: feedback from the margin
+# For agent: notes where the agent can read them
 
-**Proposal for review · 7 September 2026 · attn-qiwt**
+**Agreed direction · 7 September 2026 · Implementation epic: attn-aysu**
 
-[Visual product mockup](agent-margin-feedback.html) · [Still preview](agent-margin-feedback-preview.png) · Copy directly from the margin. Product implementation follows review.
+[Interactive HTML artifact](agent-margin-feedback.html#agent-workflow) · [Still preview](agent-margin-feedback-preview.png). The artifact illustrates the proposal; the commands are not implemented yet.
 
-**Outcome.** Mark margin comments **For agent**, copy one or a batch into any agent conversation, and get useful changes without re-explaining the document. An optional live mode delivers the same feedback automatically and brings replies back into the original threads.
+**Outcome.** Mark a margin thread **For agent**. An agent reads the note, the file to edit and the passage it refers to directly from attn. It edits the original file with its usual tools; attn refreshes the document. No additional feedback Markdown file to maintain.
 
-## The experience
+## Two commands, one source of notes
 
-- Add **For agent** to the comment composer and existing thread menu. Keep the human author; show a small recipient badge. A marked thread includes its quoted passage and conversation.
-- Offer **Copy** on each marked comment, inline checkboxes for **Copy selected**, and **Copy all**, scoped to a document or workspace. Each action writes directly to the clipboard: no review panel, preview step or confirmation. Show the selection count; exclude resolved threads by default. Copying never resolves a comment.
-- Persist personal routing separately from shared events, keyed by workspace, room and thread. Marks survive reload on that device; comments retain their room visibility. Cross-device routing sync comes later.
-- Support native, hosted-owner and reviewer surfaces, including Markdown and HTML comments. V1 uses existing review rooms; commenting on unshared local documents is a separate extension.
-
-## One portable feedback format
-
-Render one versioned packet as Markdown for paste or JSON for integrations. Include stable comment/thread IDs, relative source path, document version/hash, quote, heading or HTML selector, anchor confidence, request and relevant replies. Group by file and position. Split oversized batches explicitly; never export invitation secrets.
-
-```text
-Address this attn feedback in the available source files.
-Verify each quote against the current file before editing.
-If a source is unavailable or ambiguous, report it instead of guessing.
-Return changes and unresolved questions by feedback ID.
-
-[F-12] docs/plan.md · thread t-12 · snapshot s-4
-Section: Rollout · anchor: exact
-Quote: “Release to every workspace on Monday.”
-Request: Start with an opt-in pilot and define the rollback trigger.
+```sh
+attn feedback          # Read current feedback and exit
+attn feedback --watch  # Keep streaming feedback changes
 ```
 
-Editing requires source access. Browser-only documents include excerpts and request a proposed patch when no source mapping exists. HTML retains selector/quote context; automatic HTML suggestions need separate support.
+Run from the source project, or pass a file/project path. Resolve scope through local workspace bindings; never silently include unrelated projects. `attn feedback` prints readable text; `--json` returns a versioned structured snapshot. A mapped project with no feedback is a successful empty result. An ambiguous or unmapped project gets an actionable error.
 
-## Delivery plan
+`--watch` emits newline-delimited JSON: a complete initial snapshot, then `upsert` and `remove` records as comments or marks change. It stays running, including when there are no notes. **Watch, not wait.** The agent host keeps the command alive and consumes its output; the host chooses the provider/model and when to act. Immediate interruption of an active model call depends on that host.
 
-| Stage | Deliverable | Exit evidence |
-| --- | --- | --- |
-| **1 · Mark and copy** | Durable personal routing, shared packet builder, direct Copy / Copy selected / Copy all actions, inline selection, document/workspace scope and clipboard fallback. | All three actions copy immediately with correct context across native/hosted/reviewer; reload, stale anchors, HTML, empty selection and large batches verified. |
-| **2 · Agent tools** | Provider-neutral CLI to list/export feedback, wait after a cursor, acknowledge receipt, reply by thread ID and submit a diff. Add an MCP adapter over that same service. | A shell consumer and an MCP client use the same contract; replies land under the correct comment and suggestions retain human acceptance. |
-| **3 · Listen** | Explicit workspace/session connection, pause/resume, queue and status. Native first; hosted comments require an explicitly paired local bridge or connected agent runner. | Two independent agent hosts, reconnect/replay, cancellation, duplicate delivery and follow-up feedback exercised end to end. |
+## What the agent receives
 
-Live mode batches posted comments marked by the connected user and queues follow-ups during work. Durable cursors, revisions and idempotency keys prevent duplicate replies/proposals. Agent replies never trigger themselves. States: **Queued → Received → Working → Responded / Needs input / Failed**; resolution stays human. Unmarking cancels queued work; in-flight cancellation is best effort. Human follow-ups create new feedback revisions.
+Each marked, unresolved thread includes stable feedback/room/thread/file IDs, the human author and ordered conversation, feedback revision, source path and local availability, original snapshot/hash, quoted passage, Markdown heading/ranges or HTML selector context, and current anchor confidence/source revision. Native bindings identify the actual file; browser names alone cannot establish a local path. HTML rendered-text offsets must never be presented as source-code offsets.
 
-**Provider independence.** attn delivers context; the agent host selects and runs the model. CLI/JSON is the baseline, MCP an adapter. Agents wait or check at task boundaries; immediate mid-run steering requires host support. A subscription cannot force arbitrary chat applications to run a model. [MCP interaction model](https://modelcontextprotocol.io/specification/2026-07-28/server/tools)
+The agent checks the quote against the current file, makes changes under its existing permissions, and reports by feedback ID in its dialogue. Missing or ambiguous source references remain explicit. Reading, copying and watching do not resolve a thread or claim an agent has acted. External file changes refresh attn while preserving any dirty editor buffer.
 
-**Implementation fit.** Extend [composers](../../web/src/lib/CommentComposer.svelte), [margin cards](../../web/src/lib/ReviewMarginCard.svelte) and native/browser persistence. Reuse existing thread anchors, replies and [diff/verdict tools](agent-cli-howto.md). The [headless client](../../src/review/agent.rs) supplies events; its placeholder anchors need a typed reply API. This refines the [earlier roadmap](agent-loop-roadmap.html).
+## Keep manual copying immediate
 
-**Review decisions.** Recommended defaults: personal routing, existing rooms for V1, source edits governed by the agent conversation's permissions, and human acceptance for attn suggestions. Ship Stage 1 independently; use its packet unchanged as the basis for Stages 2–3.
+- **For agent** is a durable personal mark in attn's storage. The human remains the author; room visibility stays the same.
+- **Copy**, **Copy selected**, and **Copy all** write directly to the clipboard with the same contextual records. Inline checkboxes and document/workspace scope determine the batch. No review, preview or confirmation step.
+- Exclude resolved/unmarked threads. Show a selectable-text fallback only when clipboard access fails. Never silently truncate a batch.
+
+## Implementation and boundaries
+
+Use the existing [room store](../../src/review/store.rs), snapshots and owner-private [file bindings/anchors](../../src/review/model.rs). Add local routing metadata and a common feedback projection. Snapshot reads use persisted local state; the watch command subscribes through the existing [native daemon](../../src/daemon.rs) and local Unix socket. No public HTTP API, required MCP adapter, agent registration, model runner or automatic reply API is needed for this workflow.
+
+Snapshot reads work with the daemon stopped and report persisted-local freshness. Watch requires the daemon. Capture the initial snapshot and subscription without a gap; flush each output record. Human follow-ups advance a durable feedback revision. Source reloads and agent replies update context without becoming new human requests. Consumers deduplicate by scoped feedback ID and revision. Lost continuity or buffer overflow produces `reset` plus a fresh snapshot; daemon loss exits with an error so the host can restart. Every restart begins with a snapshot. No saved cursor file, acknowledgement command or resume flag is required. Ctrl-C stops watching.
+
+V1 covers existing room-backed Markdown and HTML comments. Native marks are visible to the same machine's CLI. Hosted owner/reviewer marks persist in that browser and support direct copy; browser-only marks do not silently reach the native store. A shared comment must be imported and marked natively to reach this CLI. Cross-device mark sync, browser-to-local pairing and private comments on unshared documents remain outside this epic.
+
+## Implementation hierarchy
+
+| Epic | Workstream | Tasks |
+| --- | --- | ---: |
+| `attn-aysu.1` | Durable personal marks and contract | 4 |
+| `attn-aysu.2` | Thread projection, file mapping and Markdown/HTML references | 4 |
+| `attn-aysu.3` | Marking and direct copy across native/hosted/reviewer | 4 |
+| `attn-aysu.4` | Snapshot CLI and isolated subprocess tests | 3 |
+| `attn-aysu.5` | Continuous watch, recovery and stream tests | 4 |
+| `attn-aysu.6` | Original-file refresh, agent recipes and release evidence | 5 |
+
+`bd show attn-aysu` opens the root epic. Its 24 implementation tasks have explicit dependencies and acceptance criteria. Completion requires source-edit/refresh evidence in two independent shell-capable agent hosts, plus relevant Rust/web regression gates. Planning is recorded; implementation remains open.

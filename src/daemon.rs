@@ -1494,7 +1494,7 @@ fn stream_feedback(stream: &mut UnixStream, manager: &ReviewManager, path: &Path
                         schema: FEEDBACK_SCHEMA.to_owned(),
                         cursor,
                         reason: reason.to_owned(),
-                        feedback,
+                        feedback: Box::new(feedback),
                     },
                 )?;
             }

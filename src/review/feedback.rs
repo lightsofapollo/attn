@@ -167,7 +167,7 @@ pub enum FeedbackStreamRecord {
         schema: String,
         cursor: u64,
         reason: String,
-        feedback: FeedbackRecord,
+        feedback: Box<FeedbackRecord>,
     },
     Remove {
         schema: String,

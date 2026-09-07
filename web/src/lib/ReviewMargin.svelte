@@ -41,7 +41,7 @@
 -->
 
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { Selection } from 'prosemirror-state';
   import type { EditorView } from 'prosemirror-view';
   import ReviewMarginCard from './ReviewMarginCard.svelte';
@@ -225,9 +225,11 @@
     const roomId = feedbackRoomId;
     if (feedbackRouting !== 'browser' || roomId === null || typeof window === 'undefined') return;
     try {
-      reviewStore.applyFeedbackRouting(
-        feedbackRoutingUpdate(roomId, loadBrowserFeedbackRouting(roomId)),
-      );
+      untrack(() => {
+        reviewStore.applyFeedbackRouting(
+          feedbackRoutingUpdate(roomId, loadBrowserFeedbackRouting(roomId)),
+        );
+      });
       feedbackNotice = '';
     } catch (error) {
       feedbackNotice = error instanceof Error ? error.message : 'Could not load For-agent marks';

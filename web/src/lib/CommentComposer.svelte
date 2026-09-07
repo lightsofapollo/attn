@@ -26,7 +26,7 @@
     anchorContext: ConstructAnchorContext;
     roomId: RoomId;
     /** Hosted transport injection. Native callers omit this and use IPC. */
-    onCreateComment?: (anchor: Anchor, body: string) => Promise<void> | void;
+    onCreateComment?: (anchor: Anchor, body: string, forAgent: boolean) => Promise<void> | void;
     onClose: () => void;
     /** Fired on SUCCESSFUL submit, before onClose (attn-2aj). The parent
      *  collapses the editor selection here so the selection toolbar does
@@ -60,6 +60,7 @@
     ),
   );
   let textareaEl: HTMLTextAreaElement | undefined = $state(undefined);
+  let forAgent = $state(false);
 
   // Escape/outside-click keep the draft; Cancel and submit clear it
   // (the Topmost-Escape rule, attn-5bq).
@@ -85,8 +86,8 @@
     submitError = null;
     try {
       const anchor = anchorFromSelection(view, from, to, anchorContext);
-      if (onCreateComment) await onCreateComment(anchor, trimmed);
-      else await reviewCreateComment(roomId, anchor, trimmed);
+      if (onCreateComment) await onCreateComment(anchor, trimmed, forAgent);
+      else await reviewCreateComment(roomId, anchor, trimmed, undefined, forAgent);
       commentDraftCache = null;
       onSubmitted?.();
       onClose();
@@ -162,6 +163,10 @@
     placeholder="Add a comment&hellip;"
     onkeydown={handleBodyKeydown}
   ></textarea>
+  <label class="mt-2 flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+    <input bind:checked={forAgent} type="checkbox" class="accent-primary" />
+    Mark for agent
+  </label>
   {#if submitError}
     <p class="mt-2 text-xs text-destructive" role="alert" data-slot="comment-composer-error">
       {submitError}

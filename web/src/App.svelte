@@ -18,6 +18,7 @@
     ReviewStatus,
     ReviewUnreadChanged,
     ReviewNotificationMuteChanged,
+    ReviewFeedbackRoutingChanged,
     SearchResultItem,
     UpdatePayload,
   } from './lib/types';
@@ -3142,6 +3143,9 @@
       reviewNotificationMute(payload: ReviewNotificationMuteChanged) {
         reviewStore.applyNotificationMute(payload);
       },
+      reviewFeedbackRouting(payload: ReviewFeedbackRoutingChanged) {
+        reviewStore.applyFeedbackRouting(payload);
+      },
       // Inbound live co-typing steps — route into the active collab session.
       reviewCollab(payload: import('./lib/types').ReviewCollabSignal) {
         collabController?.onInbound(payload.payload, payload.from);
@@ -3186,7 +3190,8 @@
             | 'reviewConnection'
             | 'reviewCollab'
             | 'reviewUnread'
-            | 'reviewNotificationMute';
+            | 'reviewNotificationMute'
+            | 'reviewFeedbackRouting';
           data: unknown;
         };
     const w = window as Window & { __attn_queue__?: QueuedMessage[] };
@@ -4191,7 +4196,7 @@
     fileId={htmlComposer.fileId}
     snapshotId={htmlComposer.snapshotId}
     baseHash={htmlComposer.baseHash}
-    onCreateComment={(anchor, body) => reviewCreateComment(htmlRoomId, anchor, body)}
+    onCreateComment={(anchor, body, forAgent) => reviewCreateComment(htmlRoomId, anchor, body, undefined, forAgent)}
     onClose={() => {
       htmlComposer = null;
       htmlBridge?.dismissSelection();

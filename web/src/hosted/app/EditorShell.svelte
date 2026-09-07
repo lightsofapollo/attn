@@ -23,6 +23,11 @@
   import { describeReviewTrouble } from './review-trouble';
   import { AutosaveController } from './autosave';
   import type { reviewStore as ReviewStoreInstance } from '../../lib/review/store.svelte';
+  import {
+    clearBrowserFeedbackRouting,
+    feedbackRoutingUpdate,
+    setBrowserFeedbackMark,
+  } from '../../lib/review/feedback-routing';
   import { buildManifest, buildWorkspaceZip, triggerDownload, zipFileName } from './export-zip';
   import { expandPicked } from './import-files';
   import { importIntoWorkspace } from './import-into-workspace';
@@ -1412,10 +1417,14 @@
     },
   };
 
-  async function createHtmlComment(anchor: ReviewAnchor, body: string): Promise<void> {
+  async function createHtmlComment(anchor: ReviewAnchor, body: string, forAgent = false): Promise<void> {
     const granted = session;
     if (!granted) throw new Error('The editing session is unavailable.');
-    await granted.createComment(anchor, body);
+    const event = await granted.createComment(anchor, body);
+    if (forAgent && event.body.type === 'comment_created') {
+      const routing = setBrowserFeedbackMark(event.meta.roomId, event.body.threadId, true);
+      reviewStoreRef?.applyFeedbackRouting(feedbackRoutingUpdate(event.meta.roomId, routing));
+    }
   }
 
   function ownerComposeSnapshot() {
@@ -1490,10 +1499,14 @@
     ownerToolbarSelection = null;
   }
 
-  async function createOwnerComment(anchor: ReviewAnchor, body: string): Promise<void> {
+  async function createOwnerComment(anchor: ReviewAnchor, body: string, forAgent = false): Promise<void> {
     const granted = session;
     if (!granted) throw new Error('The editing session is unavailable.');
-    await granted.createComment(anchor, body);
+    const event = await granted.createComment(anchor, body);
+    if (forAgent && event.body.type === 'comment_created') {
+      const routing = setBrowserFeedbackMark(event.meta.roomId, event.body.threadId, true);
+      reviewStoreRef?.applyFeedbackRouting(feedbackRoutingUpdate(event.meta.roomId, routing));
+    }
   }
 
   function collapseOwnerComposeSelection(): void {
@@ -3132,7 +3145,11 @@
             let view: WorkspaceShareView | null = null;
             if (msg.op === 'inspect') view = await owner.inspectShare();
             else if (msg.op === 'ensure') view = await owner.ensureShare(msg.request!);
-            else await owner.stopShare();
+            else {
+              const roomId = reviewStoreRef?.currentRoomId ?? null;
+              await owner.stopShare();
+              if (roomId) clearBrowserFeedbackRouting(roomId);
+            }
             channel.postMessage({ kind: 'share-op-result', id: msg.id, workspaceId: wsId, ok: true, view } satisfies ShareOpsMessage);
           } catch (error) {
             channel.postMessage({
@@ -3210,12 +3227,15 @@
   }
 
   async function stopWorkspaceShare(): Promise<void> {
+    const roomId = reviewStoreRef?.currentRoomId ?? null;
     const granted = await ensureOwnerSession();
     if (granted) {
       await granted.stopShare();
+      if (roomId) clearBrowserFeedbackRouting(roomId);
       return;
     }
     await proxyShareOp('stop', undefined, 30_000);
+    if (roomId) clearBrowserFeedbackRouting(roomId);
   }
 
   function closeFilesSheet(): void {
@@ -3733,6 +3753,7 @@
       </div>
     {/if}
     <ReviewMarginComponent
+      feedbackRouting="browser"
       view={activeEntry?.presentation === 'html' ? undefined : pmViewForReview}
       anchorTops={activeEntry?.presentation === 'html' ? htmlAnchorTops : undefined}
       readOnly={reviewFollowerTab ? false : !ownerState?.liveEditingAvailable}
@@ -4135,6 +4156,7 @@
     {#if reviewRoomActive && ReviewMarginComponent}
       <div class="review-sheet-margin">
         <ReviewMarginComponent
+          feedbackRouting="browser"
           view={activeEntry?.presentation === 'html' ? undefined : pmViewForReview}
           anchorTops={activeEntry?.presentation === 'html' ? htmlAnchorTops : undefined}
           layout="stacked"

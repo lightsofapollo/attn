@@ -50,6 +50,8 @@ import type {
   RequiresThreeWayVerdict,
   ReviewAnchorResolutionUpdate,
   ReviewErrorStatus,
+  FeedbackRoute,
+  ReviewFeedbackRoutingChanged,
   ReviewEvent,
   ReviewSnapshot,
   ReviewStatus,
@@ -145,6 +147,20 @@ export class ReviewStore {
 
   /** Native-owned persisted mute preferences, keyed by room. */
   notificationMutedByRoom = $state<Record<string, boolean>>({});
+
+  /** Private per-runtime marks. Hosted callers hydrate this from localStorage. */
+  feedbackRoutingByRoom = $state<Record<string, Record<string, FeedbackRoute>>>({});
+
+  applyFeedbackRouting(payload: ReviewFeedbackRoutingChanged): void {
+    this.feedbackRoutingByRoom = {
+      ...this.feedbackRoutingByRoom,
+      [payload.roomId]: { ...payload.routing.threads },
+    };
+  }
+
+  feedbackRoute(roomId: RoomId, threadId: string): FeedbackRoute | undefined {
+    return this.feedbackRoutingByRoom[roomId]?.[threadId];
+  }
 
   currentRoomUnread: number = $derived(
     this.currentRoomId === null ? 0 : (this.unreadByRoom[this.currentRoomId] ?? 0),
@@ -1365,6 +1381,8 @@ export class ReviewStore {
     this.localGrantTiers = remainingGrantTiers;
     const { [roomId]: _unread, ...remainingUnread } = this.unreadByRoom;
     this.unreadByRoom = remainingUnread;
+    const { [roomId]: _feedback, ...remainingFeedback } = this.feedbackRoutingByRoom;
+    this.feedbackRoutingByRoom = remainingFeedback;
     this.events = this.events.filter((event) => event.meta.roomId !== roomId);
     this.snapshots = this.snapshots.filter((snapshot) => snapshot.roomId !== roomId);
     this.anchorResolutions = Object.fromEntries(

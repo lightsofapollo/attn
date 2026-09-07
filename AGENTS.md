@@ -31,6 +31,24 @@ Optional overrides:
 * `DEV_PORT` (default `auto`, set explicit port like `5173` to force one)
 * `ATTN_PATH` (default `.`)
 
+## Acting on attn feedback
+
+When a user routes margin comments to a coding agent, read them directly from
+the source project:
+
+```bash
+attn feedback             # one readable snapshot
+attn feedback --json      # structured snapshot
+attn feedback --watch     # flushed NDJSON change stream; keep it running
+```
+
+Treat `roomId:threadId` plus `feedbackRevision` as the request identity. Source
+changes have their own `sourceRevision` and do not create a new human request.
+Verify the quoted/anchored context against the current source, edit the original
+file, and report the feedback IDs you handled. Reading or acting does not
+resolve the thread. Watch mode requires the attn daemon; reconnect after an
+unexpected EOF and consume the new complete snapshot.
+
 ## Landing the Plane (Session Completion)
 
 **When ending a work session**, you MUST complete ALL steps below. Work is NOT complete until `git push` succeeds.

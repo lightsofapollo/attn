@@ -2,7 +2,7 @@
 
 **Agreed direction · 7 September 2026 · Implementation epic: attn-aysu**
 
-[Interactive HTML artifact](agent-margin-feedback.html#agent-workflow) · [Still preview](agent-margin-feedback-preview.png). The artifact illustrates the proposal; the commands are not implemented yet.
+[Interactive HTML artifact](agent-margin-feedback.html#agent-workflow) · [Still preview](agent-margin-feedback-preview.png) · [Implementation evidence](agent-feedback-implementation-evidence.md). The implementation is available on `angus/agentic-enhancements` for review.
 
 **Outcome.** Mark a margin thread **For agent**. An agent reads the note, the file to edit and the passage it refers to directly from attn. It edits the original file with its usual tools; attn refreshes the document. No additional feedback Markdown file to maintain.
 
@@ -48,4 +48,4 @@ V1 covers existing room-backed Markdown and HTML comments. Native marks are visi
 | `attn-aysu.5` | Continuous watch, recovery and stream tests | 4 |
 | `attn-aysu.6` | Original-file refresh, agent recipes and release evidence | 5 |
 
-`bd show attn-aysu` opens the root epic. Its 24 implementation tasks have explicit dependencies and acceptance criteria. Completion requires source-edit/refresh evidence in two independent shell-capable agent hosts, plus relevant Rust/web regression gates. Planning is recorded; implementation remains open.
+`bd show attn-aysu` opens the root epic. Its 24 implementation tasks have explicit dependencies and acceptance criteria. The branch contains the shared projection, native/browser routing, direct copy UI, snapshot CLI, daemon watch stream, process tests, and agent recipe. The linked evidence records complete Rust/web gates and live original-file edits through Codex CLI and Claude Code.

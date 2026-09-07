@@ -113,6 +113,16 @@ pub enum IpcMessage {
         /// (attn-1rm); absent/null opens a new thread.
         #[serde(default)]
         parent_thread_id: Option<String>,
+        /// Create the root comment and private For-agent mark as one intent.
+        #[serde(default)]
+        for_agent: bool,
+    },
+
+    #[serde(rename = "review_set_feedback_mark", rename_all = "camelCase")]
+    ReviewSetFeedbackMark {
+        room_id: RoomId,
+        thread_id: String,
+        marked: bool,
     },
 
     #[serde(rename = "review_create_suggestion", rename_all = "camelCase")]
@@ -499,6 +509,7 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
                 anchor,
                 body,
                 parent_thread_id,
+                for_agent,
             } => {
                 submit_review_command(
                     state,
@@ -507,9 +518,22 @@ pub fn handle_message(body: &str, state: &Arc<Mutex<AppState>>, proxy: &EventLoo
                         anchor,
                         body,
                         parent_thread_id,
+                        for_agent,
                     },
                 );
             }
+            IpcMessage::ReviewSetFeedbackMark {
+                room_id,
+                thread_id,
+                marked,
+            } => submit_review_command(
+                state,
+                ReviewCommand::SetFeedbackMark {
+                    room_id,
+                    thread_id,
+                    marked,
+                },
+            ),
             IpcMessage::ReviewCreateSuggestion { room_id, draft } => {
                 submit_review_command(state, ReviewCommand::CreateSuggestion { room_id, draft });
             }
@@ -1009,8 +1033,13 @@ mod tests {
         let msg: IpcMessage = serde_json::from_str(reply).expect("parse reply comment");
         match msg {
             IpcMessage::ReviewCreateComment {
-                parent_thread_id, ..
-            } => assert_eq!(parent_thread_id.as_deref(), Some("thread-1")),
+                parent_thread_id,
+                for_agent,
+                ..
+            } => {
+                assert_eq!(parent_thread_id.as_deref(), Some("thread-1"));
+                assert!(!for_agent);
+            }
             other => panic!("expected ReviewCreateComment, got {other:?}"),
         }
         // Root comment: no parentThreadId → None (serde default), so old
@@ -1019,10 +1048,36 @@ mod tests {
         let msg: IpcMessage = serde_json::from_str(root).expect("parse root comment");
         match msg {
             IpcMessage::ReviewCreateComment {
-                parent_thread_id, ..
-            } => assert!(parent_thread_id.is_none()),
+                parent_thread_id,
+                for_agent,
+                ..
+            } => {
+                assert!(parent_thread_id.is_none());
+                assert!(!for_agent);
+            }
             other => panic!("expected ReviewCreateComment, got {other:?}"),
         }
+
+        let marked = r#"{"type":"review_create_comment","roomId":"room-abc","anchor":{"v":2,"fileId":"f1","snapshotId":"s1","baseHash":"h1","position":{"byteRange":[0,3],"lineRange":[1,1]}},"body":"fix this","forAgent":true}"#;
+        let msg: IpcMessage = serde_json::from_str(marked).expect("parse marked comment");
+        assert!(matches!(
+            msg,
+            IpcMessage::ReviewCreateComment {
+                for_agent: true,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn ipc_message_feedback_mark_parses_private_routing_intent() {
+        let raw = r#"{"type":"review_set_feedback_mark","roomId":"room-abc","threadId":"thread-1","marked":true}"#;
+        let msg: IpcMessage = serde_json::from_str(raw).expect("parse feedback mark");
+        assert!(matches!(
+            msg,
+            IpcMessage::ReviewSetFeedbackMark { thread_id, marked: true, .. }
+                if thread_id == "thread-1"
+        ));
     }
 
     #[test]
@@ -1152,11 +1207,22 @@ mod tests {
                 anchor,
                 body,
                 parent_thread_id,
+                for_agent,
             } => ReviewCommand::CreateComment {
                 room_id,
                 anchor,
                 body,
                 parent_thread_id,
+                for_agent,
+            },
+            IpcMessage::ReviewSetFeedbackMark {
+                room_id,
+                thread_id,
+                marked,
+            } => ReviewCommand::SetFeedbackMark {
+                room_id,
+                thread_id,
+                marked,
             },
             IpcMessage::ReviewCreateSuggestion { room_id, draft } => {
                 ReviewCommand::CreateSuggestion { room_id, draft }

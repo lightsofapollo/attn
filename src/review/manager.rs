@@ -118,6 +118,15 @@ pub enum ReviewCommand {
         anchor: Anchor,
         body: String,
         parent_thread_id: Option<String>,
+        /// Persist this thread in the local, private agent-feedback routing
+        /// overlay once comment creation succeeds.
+        for_agent: bool,
+    },
+    /// Change the current runtime profile's private routing for one thread.
+    SetFeedbackMark {
+        room_id: RoomId,
+        thread_id: String,
+        marked: bool,
     },
     /// Create a new suggestion (replace/insert/delete) from a frontend draft.
     CreateSuggestion {
@@ -347,6 +356,11 @@ pub enum ReviewUpdate {
     UnreadChanged { room_id: RoomId, unread_count: u32 },
     /// Durable native notification preference for the focused room.
     NotificationMuteChanged { room_id: RoomId, muted: bool },
+    /// Complete private routing state for one room. It is never relayed.
+    FeedbackRoutingChanged {
+        room_id: RoomId,
+        routing: crate::review::store::FeedbackRoutingState,
+    },
     /// A command failed; surfaced to the frontend for toast/error UI.
     Error {
         room_id: Option<RoomId>,
@@ -378,6 +392,7 @@ impl ReviewUpdate {
             ReviewUpdate::OutboxChanged { .. } => "reviewStatus",
             ReviewUpdate::UnreadChanged { .. } => "reviewUnread",
             ReviewUpdate::NotificationMuteChanged { .. } => "reviewNotificationMute",
+            ReviewUpdate::FeedbackRoutingChanged { .. } => "reviewFeedbackRouting",
             ReviewUpdate::Error { .. } => "reviewStatus",
         }
     }
@@ -669,6 +684,29 @@ impl ReviewManager {
         Ok(crate::review::store::VerdictsReport { rooms })
     }
 
+    /// Project the agent-facing view for a local project or file.
+    pub fn feedback_snapshot(
+        &self,
+        path: &std::path::Path,
+        freshness: crate::review::feedback::FeedbackFreshness,
+    ) -> anyhow::Result<crate::review::feedback::FeedbackSnapshot> {
+        crate::review::feedback::feedback_snapshot(&self.store, path, freshness)
+    }
+
+    fn emit_feedback_routing(&self, room_id: &RoomId) {
+        match self.store.load_feedback_routing(room_id) {
+            Ok(routing) => (self.update_tx)(ReviewUpdate::FeedbackRoutingChanged {
+                room_id: room_id.clone(),
+                routing,
+            }),
+            Err(error) => (self.update_tx)(ReviewUpdate::Error {
+                room_id: Some(room_id.clone()),
+                code: "ATTN_FEEDBACK_ROUTING".into(),
+                message: error.to_string(),
+            }),
+        }
+    }
+
     /// Wait until a fixed suggestion set has accepted/rejected verdicts.
     ///
     /// With `suggestion_ids = None`, the target is every currently pending
@@ -899,6 +937,28 @@ impl ReviewManager {
             return;
         }
 
+        if let ReviewCommand::SetFeedbackMark {
+            room_id,
+            thread_id,
+            marked,
+        } = &cmd
+        {
+            match self.store.set_feedback_mark(
+                room_id,
+                thread_id,
+                *marked,
+                unix_now_ms_for_manager(),
+            ) {
+                Ok(_) => self.emit_feedback_routing(room_id),
+                Err(error) => (self.update_tx)(ReviewUpdate::Error {
+                    room_id: Some(room_id.clone()),
+                    code: "ATTN_FEEDBACK_ROUTING".into(),
+                    message: error.to_string(),
+                }),
+            }
+            return;
+        }
+
         // Bootstrap pipeline owns Share + Join when wired in. Everything else
         // still goes through `stub_update_for` (filled in by follow-up issues).
         match (&cmd, self.bootstrap.as_ref(), self.runtime.as_ref()) {
@@ -1041,6 +1101,7 @@ impl ReviewManager {
                     anchor,
                     body,
                     parent_thread_id,
+                    for_agent,
                 },
                 Some(bootstrapper),
                 Some(_runtime),
@@ -1065,12 +1126,27 @@ impl ReviewManager {
                 // A reply reuses the parent's thread id; a new comment mints one.
                 let thread_id = parent_thread_id.clone().unwrap_or_else(mint_thread_id);
                 let event_body = crate::review::model::ReviewEventBody::CommentCreated {
-                    thread_id,
+                    thread_id: thread_id.clone(),
                     anchor: anchor.clone(),
                     body: body.clone(),
                 };
                 let result =
                     bootstrapper.send_event_sync(room_id, event_body, unix_now_ms_for_manager());
+                if *for_agent && result.is_ok() {
+                    match self.store.set_feedback_mark(
+                        room_id,
+                        &thread_id,
+                        true,
+                        unix_now_ms_for_manager(),
+                    ) {
+                        Ok(_) => self.emit_feedback_routing(room_id),
+                        Err(error) => (self.update_tx)(ReviewUpdate::Error {
+                            room_id: Some(room_id.clone()),
+                            code: "ATTN_FEEDBACK_ROUTING".into(),
+                            message: error.to_string(),
+                        }),
+                    }
+                }
                 self.emit_event_outcome(room_id.clone(), result);
                 return;
             }
@@ -3332,6 +3408,7 @@ impl ReviewManager {
                 room_id.as_str()
             ),
         }
+        self.emit_feedback_routing(room_id);
     }
 
     /// Push a freshly-resolved anchor to the frontend.
@@ -3859,6 +3936,7 @@ fn review_command_name(cmd: &ReviewCommand) -> &'static str {
         ReviewCommand::Stop { .. } => "Stop",
         ReviewCommand::Inbox => "Inbox",
         ReviewCommand::CreateComment { .. } => "CreateComment",
+        ReviewCommand::SetFeedbackMark { .. } => "SetFeedbackMark",
         ReviewCommand::CreateSuggestion { .. } => "CreateSuggestion",
         ReviewCommand::AcceptSuggestion { .. } => "AcceptSuggestion",
         ReviewCommand::RejectSuggestion { .. } => "RejectSuggestion",
@@ -3962,6 +4040,10 @@ fn stub_update_for(cmd: &ReviewCommand) -> ReviewUpdate {
                     body: body.clone(),
                 },
             ),
+        },
+        ReviewCommand::SetFeedbackMark { room_id, .. } => ReviewUpdate::FeedbackRoutingChanged {
+            room_id: room_id.clone(),
+            routing: crate::review::store::FeedbackRoutingState::default(),
         },
         ReviewCommand::CreateSuggestion { room_id, draft } => ReviewUpdate::EventImported {
             room_id: room_id.clone(),
@@ -6045,7 +6127,8 @@ mod tests {
 
         // "Session 2": replay must re-emit both events through the same
         // EventImported push the live inbound pipeline uses, in log order,
-        // with the snapshot's plaintext rehydrated from the blob store.
+        // with the snapshot's plaintext rehydrated from the blob store. The
+        // private feedback route follows as a separate state update.
         mgr.replay_room_to_webview(&room_id);
 
         let first = rx.try_recv().expect("first replayed update");
@@ -6074,15 +6157,28 @@ mod tests {
             }
             other => panic!("expected EventImported, got {other:?}"),
         }
-        assert!(
-            rx.try_recv().is_err(),
-            "replay must emit exactly the persisted events"
-        );
+        let routing = rx.try_recv().expect("feedback routing update");
+        assert!(matches!(
+            routing,
+            ReviewUpdate::FeedbackRoutingChanged {
+                room_id: rid,
+                routing
+            } if rid == room_id && routing.threads.is_empty()
+        ));
+        assert!(rx.try_recv().is_err(), "replay emitted an extra update");
 
-        // A room with no persisted log replays nothing (fresh join).
+        // A room with no persisted log still establishes its empty private
+        // routing state so a reused webview cannot retain another room's mark.
         let empty_room: RoomId = dummy_id("room-empty");
         mgr.replay_room_to_webview(&empty_room);
-        assert!(rx.try_recv().is_err(), "empty room must replay nothing");
+        assert!(matches!(
+            rx.try_recv().expect("empty routing update"),
+            ReviewUpdate::FeedbackRoutingChanged {
+                room_id: rid,
+                routing
+            } if rid == empty_room && routing.threads.is_empty()
+        ));
+        assert!(rx.try_recv().is_err(), "empty room emitted an extra update");
     }
 
     /// Build a `(ReviewManager, receiver)` pair backed by an std::mpsc channel
@@ -7020,6 +7116,7 @@ mod tests {
             anchor: dummy_anchor(),
             body: "looks great".to_string(),
             parent_thread_id: None,
+            for_agent: false,
         });
         let update = rx.try_recv().expect("expected one update");
         match update {
@@ -7039,6 +7136,34 @@ mod tests {
             }
             other => panic!("expected EventImported, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn set_feedback_mark_persists_private_state_and_emits_full_routing() {
+        let (mgr, rx, _tmp) = make_manager();
+        let room_id: RoomId = dummy_id("room-feedback-routing");
+        mgr.submit(ReviewCommand::SetFeedbackMark {
+            room_id: room_id.clone(),
+            thread_id: "thread-one".to_owned(),
+            marked: true,
+        });
+
+        let update = rx.try_recv().expect("routing update");
+        let ReviewUpdate::FeedbackRoutingChanged {
+            room_id: updated_room,
+            routing,
+        } = update
+        else {
+            panic!("expected feedback routing update")
+        };
+        assert_eq!(updated_room, room_id);
+        assert!(routing.threads["thread-one"].marked);
+        assert_eq!(
+            mgr.store
+                .load_feedback_routing(&room_id)
+                .expect("persisted routing"),
+            routing
+        );
     }
 
     #[test]

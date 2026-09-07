@@ -344,6 +344,19 @@ defineCase('submit emits review_create_comment IPC with anchor + body', async ()
   assert(quote?.exact === 'Hello', `expected anchor.quote.exact="Hello", got "${String(quote?.exact)}"`);
 });
 
+defineCase('For-agent intent is carried only when selected', async () => {
+  ipc.reset();
+  const stub = buildStub({ selection: { from: 1, to: 6 } });
+  const anchor = anchorFromSelection(stub.view, 1, 6, stub.ctx);
+  await reviewCreateComment('room-1' as RoomId, anchor, 'Agent task', undefined, true);
+  assert(ipc.messages.length === 1, `expected 1 IPC, got ${ipc.messages.length}`);
+  assert(ipc.messages[0]!.forAgent === true, 'expected explicit forAgent=true');
+
+  ipc.reset();
+  await reviewCreateComment('room-1' as RoomId, anchor, 'Human note');
+  assert(!('forAgent' in ipc.messages[0]!), 'default comments must preserve the legacy wire shape');
+});
+
 // (3b) Composer is closed after submit.
 defineCase('composer closes after submit', async () => {
   ipc.reset();

@@ -66,6 +66,11 @@
   import { htmlImageSources, markdownImageSources } from './lib/review/document-image-sources';
   import { reviewStore } from './lib/review/store.svelte';
   import {
+    clearBrowserFeedbackRouting,
+    feedbackRoutingUpdate,
+    setBrowserFeedbackMark,
+  } from './lib/review/feedback-routing';
+  import {
     applyReviewHoverHighlight,
     clearPendingAnchorRange,
     pendingAnchorHighlightPlugin,
@@ -1337,8 +1342,12 @@
     }
   }
 
-  async function createBrowserComment(anchor: Anchor, body: string): Promise<void> {
-    await session.createComment(anchor, body);
+  async function createBrowserComment(anchor: Anchor, body: string, forAgent = false): Promise<void> {
+    const event = await session.createComment(anchor, body);
+    if (forAgent && event.body.type === 'comment_created') {
+      const routing = setBrowserFeedbackMark(event.meta.roomId, event.body.threadId, true);
+      reviewStore.applyFeedbackRouting(feedbackRoutingUpdate(event.meta.roomId, routing));
+    }
   }
 
   async function createBrowserSuggestion(draft: SuggestionDraft): Promise<void> {
@@ -1362,11 +1371,13 @@
   }
 
   async function forgetBrowserRoom(): Promise<void> {
+    const roomId = sessionState.roomId;
     if (pushCapable && pushConsent.enabled) {
       await (session as DurableShareBrowserSessionFacade).disablePushFromUserGesture();
       if ((session as DurableShareBrowserSessionFacade).getPushConsentState().status !== 'off') return;
     }
     await session.forgetRoom();
+    if (roomId) clearBrowserFeedbackRouting(roomId);
   }
 
   async function togglePushConsent(): Promise<void> {
@@ -1794,6 +1805,7 @@
               >
                 <div class="review-rail-panel" data-expanded={railVisible}>
                   <ReviewMargin
+                    feedbackRouting="browser"
                     view={displayedDocType === 'html' ? undefined : pmViewForReview}
                     anchorTops={htmlAnchorTops}
                     readOnly={true}
@@ -1833,6 +1845,7 @@
         >
           <div class="review-sheet-margin">
             <ReviewMargin
+              feedbackRouting="browser"
               view={displayedDocType === 'html' ? undefined : pmViewForReview}
               anchorTops={htmlAnchorTops}
               layout="stacked"

@@ -101,13 +101,20 @@ export function markdownSourceUrl(path: string): string {
   return `attn://localhost${encodeURI(path)}`;
 }
 
-export async function loadMarkdownFromPath(path: string): Promise<string> {
+// The attn:// protocol serves ANY absolute path as its raw bytes (src/main.rs
+// picks the MIME from the extension and never rejects by type), so this is a
+// generic "read this file as text" for the native shell — HTML, JSON, plain
+// text — not just markdown. `loadMarkdownFromPath` keeps the name the
+// markdown callers grew up with.
+export async function loadFileTextFromPath(path: string): Promise<string> {
   const response = await fetch(markdownSourceUrl(path), { cache: 'no-store' });
   if (!response.ok) {
-    throw new Error(`failed to fetch markdown: ${response.status}`);
+    throw new Error(`failed to fetch file: ${response.status}`);
   }
   return response.text();
 }
+
+export const loadMarkdownFromPath = loadFileTextFromPath;
 
 // --------------------------------------------------------------------------
 // Relative image resolution (attn-cgev)

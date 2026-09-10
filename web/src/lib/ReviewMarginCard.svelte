@@ -69,11 +69,23 @@
 </script>
 
 <script lang="ts">
+  import AnchorIcon from '@lucide/svelte/icons/anchor';
   import CheckIcon from '@lucide/svelte/icons/check';
+  import CopyIcon from '@lucide/svelte/icons/copy';
+  import ReplyIcon from '@lucide/svelte/icons/reply';
+  import Trash2Icon from '@lucide/svelte/icons/trash-2';
+  import Undo2Icon from '@lucide/svelte/icons/undo-2';
+  import UserCheckIcon from '@lucide/svelte/icons/user-check';
+  import UserRoundXIcon from '@lucide/svelte/icons/user-round-x';
+  import XIcon from '@lucide/svelte/icons/x';
 
   import AmbiguousAnchorPicker from './AmbiguousAnchorPicker.svelte';
   import { AGENT_GLYPH, monogramFor } from './peer-strip-format';
   import { shouldSubmitOnEnter } from './review/composer-keys';
+  import {
+    createCopyFeedbackController,
+    type CopyFeedbackAction,
+  } from './review/copy-feedback-port';
   import {
     runSuggestionAction,
     type SuggestionActionFeedback,
@@ -147,14 +159,16 @@
     awaitingReanchor?: boolean;
     /** Cancel the in-flight reanchor for this card. */
     onCancelReanchor?: () => void;
-    /** Hosted receiver mode: render content/navigation but no mutations. */
     /** This private thread is exposed by `attn feedback`. */
     forAgent?: boolean;
-    /** Included in the current Copy selected batch. */
-    selectedForAgent?: boolean;
+    /** Assign / unassign the thread to the agent. The toggle renders only
+     *  when this is supplied. */
     onToggleForAgent?: (marked: boolean) => void | Promise<void>;
-    onToggleFeedbackSelection?: (selected: boolean) => void;
-    onCopyFeedback?: () => void | Promise<void>;
+    /** Copy this comment for pasting into an agent prompt. Any result other
+     *  than `false` (or a throw) counts as a successful copy and shows the
+     *  check for a moment. */
+    onCopyFeedback?: CopyFeedbackAction;
+    /** Hosted receiver mode: render content/navigation but no mutations. */
     readOnly?: boolean;
     /** Hosted reviewer may reply/resolve comments, but never apply/re-anchor. */
     reviewerAuthoring?: boolean;
@@ -183,9 +197,7 @@
     awaitingReanchor = false,
     onCancelReanchor,
     forAgent = false,
-    selectedForAgent = false,
     onToggleForAgent,
-    onToggleFeedbackSelection,
     onCopyFeedback,
     readOnly = false,
     reviewerAuthoring = false,
@@ -356,14 +368,39 @@
     if (onResolve) onResolve();
   }
 
+  /** Reply/Resolve/Unresolve are authoring: the owner, or a hosted
+   *  reviewer who has been granted authoring. */
+  const canAuthor = $derived(!readOnly || reviewerAuthoring);
+
+  /** The agent-assignment toggle sits in the same row as Reply/Resolve
+   *  and is independent of authoring: it is a local marker, not a
+   *  protocol event, so a read-only shell may still offer it. */
+  const showAgentToggle = $derived(
+    kind === 'comment' && cardState !== 'resolved' && onToggleForAgent !== undefined,
+  );
+
+  const agentToggleLabel = $derived(
+    forAgent ? 'Assigned to agent (click to unassign)' : 'Assign to agent',
+  );
+
   function toggleForAgent(e: MouseEvent): void {
     e.stopPropagation();
     void onToggleForAgent?.(!forAgent);
   }
 
+  // --- Copy (header) ------------------------------------------------------------
+  // The glyph flips to a check for a moment after a successful copy, and the
+  // live region says "Copied" so the change is not visual-only.
+  let copied = $state(false);
+  const copyLabel = $derived(copied ? 'Copied' : 'Copy comment');
+  const copyController = createCopyFeedbackController((next) => {
+    copied = next;
+  });
+  $effect(() => () => copyController.dispose());
+
   function copyForAgent(e: MouseEvent): void {
     e.stopPropagation();
-    void onCopyFeedback?.();
+    void copyController.run(onCopyFeedback);
   }
 
   function handleUnresolve(e: MouseEvent): void {
@@ -484,6 +521,26 @@
   }
 </script>
 
+{#snippet agentToggle()}
+  <button
+    type="button"
+    class="rmc-btn rmc-icon-btn rmc-feedback-mark"
+    class:active={forAgent}
+    aria-pressed={forAgent}
+    data-action="for-agent"
+    data-for-agent={forAgent ? 'true' : 'false'}
+    title={agentToggleLabel}
+    aria-label={agentToggleLabel}
+    onclick={toggleForAgent}
+  >
+    {#if forAgent}
+      <UserCheckIcon size={14} aria-hidden="true" />
+    {:else}
+      <UserRoundXIcon size={14} aria-hidden="true" />
+    {/if}
+  </button>
+{/snippet}
+
 <!--
   We intentionally render a focusable, clickable `<div>` here so the card
   reads as a group of related controls (the inner buttons own their own
@@ -571,6 +628,32 @@
         {/if}
       </span>
     {/if}
+    {#if kind === 'comment'}
+      <!--
+        Copy lives beside the meta chip, on every comment card in every
+        state (resolved included): copying a comment for an agent prompt
+        is not gated on the thread being assigned to one.
+      -->
+      <button
+        type="button"
+        class="rmc-btn rmc-icon-btn rmc-icon-btn-header rmc-copy"
+        data-action="copy-feedback"
+        data-copied={copied ? 'true' : 'false'}
+        title={copyLabel}
+        aria-label={copyLabel}
+        onclick={copyForAgent}
+        disabled={!onCopyFeedback}
+      >
+        {#if copied}
+          <CheckIcon size={14} strokeWidth={2.5} aria-hidden="true" />
+        {:else}
+          <CopyIcon size={14} aria-hidden="true" />
+        {/if}
+      </button>
+      <span class="rmc-sr-only" role="status" aria-live="polite" data-slot="copy-feedback-status">
+        {copied ? 'Copied' : ''}
+      </span>
+    {/if}
   </header>
 
   {#if cardState === 'stale'}
@@ -632,7 +715,14 @@
     </p>
   {/if}
 
-  {#if !readOnly || reviewerAuthoring}
+  <!--
+    Action row: icon-only buttons, each with a `title` and a matching
+    `aria-label`. The agent-assignment toggle sits in this same row for
+    comments — it is not a second tier of action, so it does not get a
+    second row or a divider. Its two glyphs differ, so the assigned state
+    never rides on the accent tint alone (PRODUCT.md).
+  -->
+  {#if canAuthor || showAgentToggle}
   <footer class="rmc-actions">
     {#if cardState === 'resolved'}
       <!-- A resolved card used to carry no action row at all (attn-42y).
@@ -640,139 +730,131 @@
            was one-way until `CommentReopened` existed, so "read-only" was
            a statement about the protocol, not a design choice. Clicking the
            card (or Escape) still shrinks it back to its chip. -->
-      {#if onUnresolve && kind === 'comment'}
+      {#if canAuthor && onUnresolve && kind === 'comment'}
         <button
           type="button"
-          class="rmc-btn"
+          class="rmc-btn rmc-icon-btn"
           data-action="unresolve"
           data-testid="review-margin-card-unresolve"
+          title="Unresolve"
+          aria-label="Unresolve"
           onclick={handleUnresolve}
           disabled={pendingDismiss}
         >
-          Unresolve
+          <Undo2Icon size={14} aria-hidden="true" />
         </button>
       {/if}
     {:else if cardState === 'stale' && !readOnly}
       {#if awaitingReanchor}
         <button
           type="button"
-          class="rmc-btn"
+          class="rmc-btn rmc-icon-btn"
           data-action="cancel-reanchor"
           data-testid="review-margin-card-cancel-reanchor"
+          title="Cancel"
+          aria-label="Cancel"
           onclick={handleCancelReanchor}
         >
-          Cancel
+          <XIcon size={14} aria-hidden="true" />
         </button>
       {:else}
         <button
           type="button"
-          class="rmc-btn rmc-btn-primary"
+          class="rmc-btn rmc-btn-primary rmc-icon-btn"
           data-action="reanchor"
           data-testid="review-margin-card-reanchor"
+          title="Re-anchor manually"
+          aria-label="Re-anchor manually"
           onclick={handleRequestReanchor}
           disabled={pendingDismiss}
         >
-          Re-anchor manually
+          <AnchorIcon size={14} aria-hidden="true" />
         </button>
         <button
           type="button"
-          class="rmc-btn"
+          class="rmc-btn rmc-icon-btn"
           data-action="discard-stale"
           data-testid="review-margin-card-discard-stale"
+          title="Discard"
+          aria-label="Discard"
           onclick={handleDiscardStale}
           disabled={pendingDismiss}
         >
-          Discard
+          <Trash2Icon size={14} aria-hidden="true" />
         </button>
+      {/if}
+      {#if showAgentToggle}
+        {@render agentToggle()}
       {/if}
     {:else if kind === 'suggestion' && !readOnly}
       {#if onAccept}
+        {@const acceptLabel =
+          suggestionFeedback.status === 'pending' && suggestionFeedback.action === 'accept'
+            ? 'Accepting…'
+            : 'Accept'}
         <button
           type="button"
-          class="rmc-btn rmc-btn-primary"
+          class="rmc-btn rmc-btn-primary rmc-icon-btn"
           data-action="accept"
+          title={acceptLabel}
+          aria-label={acceptLabel}
           onclick={handleAccept}
           disabled={pendingDismiss || suggestionPending}
         >
-          {suggestionFeedback.status === 'pending' && suggestionFeedback.action === 'accept'
-            ? 'Accepting…'
-            : 'Accept'}
+          <CheckIcon size={14} strokeWidth={2.5} aria-hidden="true" />
         </button>
       {/if}
       {#if onReject}
+        {@const rejectLabel =
+          suggestionFeedback.status === 'pending' && suggestionFeedback.action === 'reject'
+            ? 'Rejecting…'
+            : 'Reject'}
         <button
           type="button"
-          class="rmc-btn"
+          class="rmc-btn rmc-icon-btn"
           data-action="reject"
+          title={rejectLabel}
+          aria-label={rejectLabel}
           onclick={handleReject}
           disabled={pendingDismiss || suggestionPending}
         >
-          {suggestionFeedback.status === 'pending' && suggestionFeedback.action === 'reject'
-            ? 'Rejecting…'
-            : 'Reject'}
+          <XIcon size={14} aria-hidden="true" />
         </button>
       {/if}
     {:else if kind === 'comment'}
-      {#if onReply}
+      {#if canAuthor && onReply}
         <button
           type="button"
-          class="rmc-btn"
+          class="rmc-btn rmc-icon-btn"
           data-action="reply"
           data-slot="review-reply-toggle"
+          title="Reply"
+          aria-label="Reply"
+          aria-expanded={replying}
           onclick={toggleReply}
           disabled={pendingDismiss}
         >
-          Reply
+          <ReplyIcon size={14} aria-hidden="true" />
         </button>
       {/if}
-      {#if onResolve}
+      {#if canAuthor && onResolve}
         <button
           type="button"
-          class="rmc-btn"
+          class="rmc-btn rmc-icon-btn"
           data-action="resolve"
+          title="Resolve"
+          aria-label="Resolve"
           onclick={handleResolve}
           disabled={pendingDismiss}
         >
-          Resolve
+          <CheckIcon size={14} strokeWidth={2.5} aria-hidden="true" />
         </button>
+      {/if}
+      {#if showAgentToggle}
+        {@render agentToggle()}
       {/if}
     {/if}
   </footer>
-  {/if}
-
-  {#if kind === 'comment' && cardState !== 'resolved'}
-    <div class="rmc-feedback-actions" data-slot="feedback-actions">
-      {#if forAgent}
-        <label class="rmc-feedback-select" title="Include in Copy selected">
-          <input
-            type="checkbox"
-            checked={selectedForAgent}
-            aria-label={`Select feedback from ${authorName}`}
-            onchange={(e) => onToggleFeedbackSelection?.(e.currentTarget.checked)}
-            onclick={(e) => e.stopPropagation()}
-          />
-        </label>
-      {/if}
-      <button
-        type="button"
-        class="rmc-btn rmc-feedback-mark"
-        class:active={forAgent}
-        aria-pressed={forAgent}
-        data-action="for-agent"
-        onclick={toggleForAgent}
-      >
-        {forAgent ? 'For agent' : 'Mark for agent'}
-      </button>
-      <button
-        type="button"
-        class="rmc-btn"
-        data-action="copy-feedback"
-        disabled={!forAgent}
-        onclick={copyForAgent}
-      >
-        Copy
-      </button>
-    </div>
   {/if}
 
   {#if suggestionFeedback.status === 'error'}
@@ -891,30 +973,15 @@
     pointer-events: none;
   }
 
-  .rmc-feedback-actions {
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    margin-top: 8px;
-    padding-top: 7px;
-    border-top: 1px solid color-mix(in oklch, var(--border) 72%, transparent);
-  }
-
-  .rmc-feedback-select {
-    display: inline-flex;
-    align-items: center;
-    padding: 3px 2px;
-    cursor: pointer;
-  }
-
-  .rmc-feedback-select input {
-    accent-color: var(--primary);
-  }
-
-  .rmc-feedback-mark.active {
-    background: color-mix(in oklch, var(--primary) 14%, var(--background));
-    border-color: color-mix(in oklch, var(--primary) 48%, var(--border));
-    color: var(--foreground);
+  /* Assigned-to-agent: the accent tint reinforces a glyph that already
+     differs (user-check vs user-round-x), so colour is never the only
+     signal. */
+  /* Assigned: primary ink on a primary tint. The glyph also changes
+     (user-check vs user-round-x), so the state never rides on colour alone. */
+  .rmc-feedback-mark.active,
+  .rmc-feedback-mark.active:hover:not(:disabled) {
+    background: color-mix(in oklch, var(--primary) 16%, transparent);
+    color: var(--primary);
   }
 
   /* Kind accents — fallbacks when no inline author color is set. */
@@ -1203,9 +1270,13 @@
     margin-top: 6px;
   }
 
+  /* Actions sit at the card's trailing edge — the body text owns the left. */
   .rmc-actions {
     display: flex;
-    gap: 6px;
+    align-items: center;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 2px;
   }
 
   .rmc-action-feedback {
@@ -1233,9 +1304,68 @@
     background: var(--muted);
   }
 
+  /* Theme-token focus ring, same treatment as the reply textarea — the
+     native WebKit ring is blue on every theme. */
+  .rmc-btn:focus-visible {
+    outline: none;
+    border-color: var(--ring);
+    box-shadow: 0 0 0 3px color-mix(in oklch, var(--ring) 50%, transparent);
+  }
+
   .rmc-btn:disabled {
     cursor: not-allowed;
     opacity: 0.5;
+  }
+
+  /* Icon-only variant: a borderless 24px ghost square. The glyph is the
+     label; `title` + `aria-label` carry the words. A tint appears on hover,
+     so the row reads as quiet tools rather than a strip of boxes. */
+  .rmc-icon-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 0;
+    border-radius: 6px; /* rounded.sm */
+    background: transparent;
+    color: var(--muted-foreground, currentColor);
+    transition: background-color 120ms ease, color 120ms ease;
+  }
+
+  .rmc-icon-btn:hover:not(:disabled) {
+    background: var(--muted);
+    color: var(--foreground, inherit);
+  }
+
+  .rmc-icon-btn:focus-visible {
+    box-shadow: 0 0 0 2px color-mix(in oklch, var(--ring) 70%, transparent);
+  }
+
+  /* The emphasised action (Accept, Re-anchor) keeps its weight through the
+     primary ink rather than a filled box. */
+  .rmc-icon-btn.rmc-btn-primary {
+    background: transparent;
+    color: var(--primary);
+    filter: none;
+  }
+
+  .rmc-icon-btn.rmc-btn-primary:hover:not(:disabled) {
+    background: color-mix(in oklch, var(--primary) 16%, transparent);
+    color: var(--primary);
+    filter: none;
+  }
+
+  /* The header copy button shares the size; pulled in so the 0.7rem header
+     row keeps its height and the avatar and chips stay on one centreline. */
+  .rmc-icon-btn-header {
+    margin: -4px -4px -4px 0;
+  }
+
+  .rmc-copy[data-copied='true'] {
+    color: var(--primary);
   }
 
   .rmc-btn-primary {

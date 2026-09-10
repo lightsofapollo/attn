@@ -741,7 +741,11 @@ test('native share opens in hosted reviewer without leaking plaintext or keys', 
     });
   }).toBe(true);
   await expect.poll(async () => (await nativeEval<string>('document.body.innerText')).includes(suggestionCanary)).toBe(true);
-  await expect.poll(async () => (await nativeEval<string>('document.body.innerText')).includes('Accept')).toBe(true);
+  // Card actions are icon buttons (attn-926b): the owner's Accept control is
+  // found by its data-action hook, not by visible text.
+  await expect.poll(async () =>
+    nativeEval<number>("document.querySelectorAll('[data-testid=review-margin-card] [data-action=accept]').length"),
+  ).toBeGreaterThan(0);
   const peerSuggestionCard = peerPage
     .locator('[data-testid="review-margin-card"]')
     .filter({ hasText: suggestionCanary });

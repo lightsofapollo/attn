@@ -37,6 +37,33 @@ export interface KeyboardConfig {
    * expand card is currently open. Wire to `() => reviewStore.activeThreeWayApply !== null`.
    */
   isApplyExpandOpen?: () => boolean;
+  /**
+   * Enter / leave annotate mode on a rendered HTML document (attn-wrf3).
+   * Bound to `Cmd/Ctrl+Shift+N` — see {@link isHtmlAnnotateHotkey}. The shell
+   * decides whether the displayed document can take a note; this only fires.
+   */
+  onToggleHtmlAnnotate?: () => void;
+}
+
+/**
+ * `Cmd/Ctrl+Shift+N` — the annotate-mode toggle for HTML documents.
+ *
+ * One predicate for all three shells (native App, hosted reviewer, hosted
+ * owner), so the chord cannot drift between them. Free on every surface: the
+ * review chords are ⌘J / ⌘. / ⌘⇧. / ⌘⇧S, the globals are ⌘K / ⌘/ / ⌘W /
+ * ⌘[ / ⌘], and nothing binds N. Matched on `code` first so it survives
+ * non-Latin layouts, then on `key` for the environments that report only that.
+ */
+export function isHtmlAnnotateHotkey(e: Pick<KeyboardEvent, 'metaKey' | 'ctrlKey' | 'shiftKey' | 'altKey' | 'key' | 'code'>): boolean {
+  if (!(e.metaKey || e.ctrlKey)) return false;
+  if (!e.shiftKey || e.altKey) return false;
+  return e.code === 'KeyN' || e.key === 'n' || e.key === 'N';
+}
+
+/** Human-readable chord for tooltips: `⌘⇧N` on a Mac, `Ctrl+Shift+N` elsewhere. */
+export function htmlAnnotateShortcutLabel(): string {
+  const isMac = typeof navigator !== 'undefined' && navigator.platform.includes('Mac');
+  return isMac ? '\u2318\u21e7N' : 'Ctrl+Shift+N';
 }
 
 function isEditableElement(target: EventTarget | null): boolean {
@@ -125,6 +152,13 @@ export function initKeyboard(config: KeyboardConfig): () => void {
       if (e.shiftKey && (key === 's' || key === 'S' || code === 'KeyS') && config.onShareOpen) {
         e.preventDefault();
         config.onShareOpen();
+        return;
+      }
+      // Annotate mode is a review chord too: a person typing a note can leave
+      // the mode without first clicking out of the composer.
+      if (config.onToggleHtmlAnnotate && isHtmlAnnotateHotkey(e)) {
+        e.preventDefault();
+        config.onToggleHtmlAnnotate();
         return;
       }
       // Palette, shortcuts help, and window/tab navigation are global chords:

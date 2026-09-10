@@ -23,6 +23,9 @@
 //   7. Cmd+. keybinding (via initKeyboard) fires `onCommentComposer`;
 //      Cmd+Shift+. fires `onSuggestionComposer` instead.
 
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { initKeyboard } from './keyboard';
 import { reviewCreateComment } from './ipc';
 import { anchorFromSelection, type ConstructAnchorContext } from './review/anchors';
@@ -355,6 +358,33 @@ defineCase('For-agent intent is carried only when selected', async () => {
   ipc.reset();
   await reviewCreateComment('room-1' as RoomId, anchor, 'Human note');
   assert(!('forAgent' in ipc.messages[0]!), 'default comments must preserve the legacy wire shape');
+});
+
+// The agent hand-off control reads "Assign to agent" in BOTH composers (the
+// markdown one and its HTML sibling). Both mount the one shared component, so
+// the two never drift apart. Source-text assertion: runes only compile through
+// Vite, so the component cannot be mounted here (see the header comment).
+defineCase('both composers render the shared "Assign to agent" checkbox', () => {
+  const libDir = path.dirname(fileURLToPath(import.meta.url));
+  for (const file of ['CommentComposer.svelte', 'HtmlCommentComposer.svelte']) {
+    const source = fs.readFileSync(path.join(libDir, file), 'utf8');
+    assert(!source.includes('Mark for agent'), `${file}: the old "Mark for agent" label must be gone`);
+    assert(source.includes('<AssignToAgentCheckbox bind:checked={forAgent} />'),
+      `${file}: must mount the shared checkbox bound to forAgent`);
+    assert(!source.includes('user-check'), `${file}: the label carries no glyph`);
+  }
+  const control = fs.readFileSync(path.join(libDir, 'AssignToAgentCheckbox.svelte'), 'utf8');
+  const label = /<label[^>]*data-slot="composer-assign-agent"[^>]*>([\s\S]*?)<\/label>/.exec(control);
+  assert(label !== null, 'the control must be one <label> wrapping the input');
+  assert(label[1]!.includes('Assign to agent'), 'the label must read "Assign to agent"');
+  assert(/<input[\s\S]*?bind:checked[\s\S]*?type="checkbox"/.test(label[1]!), 'a real checkbox sits inside the label');
+  assert(label[1]!.includes('appearance-none'), 'the platform checkbox chrome is replaced');
+  assert(label[1]!.includes('checked:bg-primary') && label[1]!.includes('checked:border-primary'),
+    'the checked box is drawn in the primary colour');
+  assert(label[1]!.includes('peer-checked:opacity-100'), 'the tick is a shape, revealed only when checked');
+  assert(label[1]!.includes('forced-colors:appearance-auto'), 'forced-colours mode gets the native control back');
+  assert(!control.includes('user-check'), 'no person glyph beside the label');
+  assert(/class="[^"]*\btext-sm\b[^"]*\btext-foreground\b/.test(label[0]), 'the label uses text-sm foreground ink');
 });
 
 // (3b) Composer is closed after submit.

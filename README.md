@@ -127,8 +127,9 @@ attn daemon is stopped. Watch mode uses the local daemon socket and exits with
 an actionable error if that daemon disconnects. Agents edit the original files
 with their normal tools; attn's file watcher refreshes the open document.
 
-Margin actions also support **Copy**, **Copy selected**, and **Copy all** with
-file or project scope. These actions keep threads open. Native For-agent marks
+Each comment card has a **Copy** icon next to its time badge, and a bar pinned
+to the bottom of the rail copies **all** agent-assigned comments with file or
+project scope. These actions keep threads open. Native For-agent marks
 are visible to the local CLI; hosted-browser marks remain private to that
 browser and can be copied there.
 

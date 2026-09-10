@@ -108,8 +108,10 @@ async function boot(page: import('@playwright/test').Page, doc = DOC) {
 
 /**
  * Turn on inspect mode, as the shell does once a document is genuinely under
- * review. Hover chrome and element clicks are both gated on it: a document that
- * cannot take a comment is left strictly alone.
+ * review AND the person has pressed the annotate toggle (attn-wrf3). Hover
+ * chrome and element clicks are both gated on it: a document that cannot take
+ * a comment — or whose reader has not asked to annotate — is left strictly
+ * alone.
  */
 async function inspect(page: import('@playwright/test').Page) {
   await page.evaluate(() => {
@@ -585,10 +587,10 @@ test.describe('HTML annotation runtime', () => {
 
     await frame.locator('p.intro').hover();
     await page.waitForTimeout(200);
-    // No chrome at all until the shell says the document is under review. The
-    // chip is opaque and painted OVER the page, so raising one here would
-    // occlude — and eat clicks on — a document that is only being read, to
-    // offer an affordance that could answer nothing but "share this first".
+    // No chrome at all until the shell says so — and the shell says so only
+    // for a document under review whose reader has turned annotate mode on.
+    // The chip is opaque and painted OVER the page, so raising one here would
+    // occlude — and eat clicks on — a document that is only being read.
     await expect(frame.locator('.attn-chip')).toBeHidden();
     await expect(frame.locator('.attn-outline')).toHaveCount(0);
 
@@ -638,6 +640,192 @@ test.describe('HTML annotation runtime', () => {
         (window as unknown as { __attn_last: (t: string) => unknown }).__attn_last('scopePicked'),
       ),
     ).toBeNull();
+  });
+
+  /**
+   * The mode switch a person actually works (attn-wrf3). Annotate mode is OFF
+   * by default — under review included — so a dashboard's tabs and a
+   * prototype's buttons keep working until someone presses the pinned toggle;
+   * pressing it again hands the clicks back. Each leg is asserted from both
+   * sides: what the page saw, and what the shell was sent.
+   */
+  test('leaves the page interactive until asked, and again once done', async ({ page }) => {
+    await boot(page);
+    const frame = page.frameLocator('#doc');
+    const send = (enabled: boolean) =>
+      page.evaluate((flag) => {
+        (window as unknown as { __attn_send: (m: unknown) => void }).__attn_send({
+          type: 'inspect',
+          v: 1,
+          enabled: flag,
+        });
+        (window as unknown as { __attn_clear: () => void }).__attn_clear();
+      }, enabled);
+    const lastPick = () =>
+      page.evaluate(() =>
+        (window as unknown as { __attn_last: (t: string) => unknown }).__attn_last('scopePicked'),
+      );
+
+    // (1) On open: the button's own handler runs, nothing is proposed.
+    await frame.locator('#ping').click();
+    await page.waitForTimeout(200);
+    expect(await pageState(page)).toMatchObject({ clicks: 1 });
+    expect(await lastPick()).toBeNull();
+
+    // (2) Mode on: the same click becomes a proposal and the handler does NOT run.
+    await send(true);
+    await frame.locator('#ping').click();
+    await page.waitForFunction(() =>
+      (window as unknown as { __attn_last: (t: string) => unknown }).__attn_last('scopePicked'),
+    );
+    expect(await pageState(page)).toMatchObject({ clicks: 1 });
+
+    // (3) Mode off: the handler runs again and nothing more is proposed.
+    await send(false);
+    await frame.locator('#ping').click();
+    await page.waitForTimeout(200);
+    expect(await pageState(page)).toMatchObject({ clicks: 2 });
+    expect(await lastPick()).toBeNull();
+
+    // And the mode re-enters cleanly: turning it off forgot the offered
+    // scopes, so a fresh hover has to offer them again before a click commits.
+    await send(true);
+    await frame.locator('#ping').click();
+    await page.waitForFunction(() =>
+      (window as unknown as { __attn_last: (t: string) => unknown }).__attn_last('scopePicked'),
+    );
+    expect(await pageState(page)).toMatchObject({ clicks: 2 });
+  });
+
+  /**
+   * The chip and the breadcrumb handle their own clicks, bypassing the
+   * document-level gate, and the shell can replay a `pickScope` of its own —
+   * so a press that lands after "Done annotating" has two routes past
+   * `onDocumentClick`. Both must be shut: a composer opening for a document the
+   * person just handed back to its scripts is the bug this pins.
+   */
+  test('cannot propose after the mode is off, whichever route a click takes', async ({ page }) => {
+    await boot(page);
+    await inspect(page);
+    const frame = page.frameLocator('#doc');
+
+    await frame.locator('p.intro').hover();
+    await expect(frame.locator('.attn-chip')).toBeVisible();
+    const hover = await page.evaluate(
+      () =>
+        (window as unknown as { __attn_last: (t: string) => { chain: { scopeId: string }[] } })
+          .__attn_last('scopeHover'),
+    );
+    const scopeId = hover.chain[0].scopeId;
+
+    await page.evaluate(() => {
+      (window as unknown as { __attn_send: (m: unknown) => void }).__attn_send({
+        type: 'inspect',
+        v: 1,
+        enabled: false,
+      });
+      (window as unknown as { __attn_clear: () => void }).__attn_clear();
+    });
+    await expect(frame.locator('.attn-chip')).toBeHidden();
+
+    // Route 1: the chip's own click handler (the element still exists, hidden).
+    await frame.locator('.attn-chip').dispatchEvent('click');
+    // Route 2: the shell replaying the scope it was offered a moment ago.
+    await page.evaluate((id) => {
+      (window as unknown as { __attn_send: (m: unknown) => void }).__attn_send({
+        type: 'pickScope',
+        v: 1,
+        scopeId: id,
+      });
+    }, scopeId);
+    await page.waitForTimeout(250);
+    expect(
+      await page.evaluate(() =>
+        (window as unknown as { __attn_last: (t: string) => unknown }).__attn_last('scopePicked'),
+      ),
+    ).toBeNull();
+  });
+
+  /**
+   * Mid-hover: the switch flips while the chip is up and a hide may be armed.
+   * Nothing may be stranded — no chip, no outline, no hover reports — and the
+   * mode must come back clean afterwards.
+   */
+  test('takes the hover down mid-gesture and raises it again on re-entry', async ({ page }) => {
+    await boot(page);
+    await inspect(page);
+    const frame = page.frameLocator('#doc');
+    const send = (enabled: boolean) =>
+      page.evaluate((flag) => {
+        (window as unknown as { __attn_send: (m: unknown) => void }).__attn_send({
+          type: 'inspect',
+          v: 1,
+          enabled: flag,
+        });
+        (window as unknown as { __attn_clear: () => void }).__attn_clear();
+      }, enabled);
+
+    await frame.locator('p.intro').hover();
+    await expect(frame.locator('.attn-chip')).toBeVisible();
+    // Leave the paragraph for unscoped space so the grace-period hide is
+    // armed, then flip the switch while it is pending.
+    await page.mouse.move(790, 590);
+    await send(false);
+    await expect(frame.locator('.attn-chip')).toBeHidden();
+    await expect(frame.locator('.attn-outline')).toHaveCount(0);
+
+    // Moving over another block while off raises nothing and reports nothing.
+    await frame.locator('p', { hasText: 'second paragraph' }).hover();
+    await page.waitForTimeout(250);
+    await expect(frame.locator('.attn-chip')).toBeHidden();
+    expect(
+      await page.evaluate(() =>
+        (window as unknown as { __attn_last: (t: string) => unknown }).__attn_last('scopeHover'),
+      ),
+    ).toBeNull();
+
+    await send(true);
+    await frame.locator('p', { hasText: 'second paragraph' }).hover();
+    await expect(frame.locator('.attn-chip')).toBeVisible();
+  });
+
+  /**
+   * The text-selection pill is independent of the mode: it works with the mode
+   * off, and a selection made with the mode on keeps its pill when the mode is
+   * turned off underneath it.
+   */
+  test('keeps the selection pill available in both modes', async ({ page }) => {
+    await boot(page);
+    const frame = page.frameLocator('#doc');
+    const explicitSelection = () =>
+      page.waitForFunction(
+        () =>
+          (window as unknown as { __attn_last: (t: string) => { explicit: boolean } | null })
+            .__attn_last('selection')?.explicit === true,
+      );
+
+    // Mode off (the default): select, press, and the shell hears an explicit ask.
+    await selectText(page, 'quick brown fox');
+    await expect(frame.locator('.attn-pill')).toBeVisible();
+    await frame.locator('.attn-pill').click();
+    await explicitSelection();
+
+    // Mode on, then off mid-selection: the pill stays and still answers.
+    await inspect(page);
+    await page.evaluate(() => (window as unknown as { __attn_clear: () => void }).__attn_clear());
+    await selectText(page, 'lazy dog again');
+    await expect(frame.locator('.attn-pill')).toBeVisible();
+    await page.evaluate(() => {
+      (window as unknown as { __attn_send: (m: unknown) => void }).__attn_send({
+        type: 'inspect',
+        v: 1,
+        enabled: false,
+      });
+    });
+    await page.waitForTimeout(100);
+    await expect(frame.locator('.attn-pill')).toBeVisible();
+    await frame.locator('.attn-pill').click();
+    await explicitSelection();
   });
 
   /**
@@ -1106,5 +1294,87 @@ test.describe('HtmlAnnotationBridge (shell side)', () => {
       undefined,
       { timeout: 15_000 },
     );
+  });
+
+  /**
+   * The shipped bridge, the shipped injector, and the default the shells rely
+   * on (attn-wrf3): a bridge that has not been told otherwise leaves the page
+   * fully interactive. The same three legs as the runtime suite, driven
+   * through the real classes.
+   */
+  test('leaves the page interactive until setInspect(true), and again after false', async ({ page }) => {
+    await bootBridge(page);
+    const frame = page.frameLocator('#doc');
+    const clicks = () =>
+      frame.locator('body').evaluate(() => (window as unknown as { __ping?: number }).__ping ?? 0);
+    const explicitCount = () =>
+      page.evaluate(() => (window as unknown as { __explicit: unknown[] }).__explicit.length);
+    const setInspect = (enabled: boolean) =>
+      page.evaluate((flag) => {
+        (window as unknown as { __inspect: (e: boolean) => void }).__inspect(flag);
+      }, enabled);
+
+    await frame.locator('#ping').click();
+    await page.waitForTimeout(200);
+    expect(await clicks()).toBe(1);
+    expect(await explicitCount()).toBe(0);
+
+    await setInspect(true);
+    await frame.locator('#ping').click();
+    await page.waitForFunction(
+      () => (window as unknown as { __explicit: unknown[] }).__explicit.length === 1,
+    );
+    expect(await clicks()).toBe(1);
+
+    await setInspect(false);
+    await frame.locator('#ping').click();
+    await page.waitForTimeout(200);
+    expect(await clicks()).toBe(2);
+    expect(await explicitCount()).toBe(1);
+  });
+
+  /**
+   * A frame reload (a watched file saved, a snapshot republished) rebuilds the
+   * runtime, which boots with the surface off. The bridge re-states the mode
+   * after every handshake, so a person mid-annotation keeps their mode — and
+   * a person who had turned it off is not handed a swallowing frame.
+   */
+  test('a reloaded frame comes back in the mode the shell holds', async ({ page }) => {
+    await bootBridge(page);
+    const frame = page.frameLocator('#doc');
+    const reload = async () => {
+      await page.evaluate(() => {
+        const target = window as unknown as { __ready: boolean };
+        target.__ready = false;
+        const doc = document.getElementById('doc') as HTMLIFrameElement;
+        doc.srcdoc = doc.srcdoc;
+      });
+      await page.waitForFunction(() => (window as unknown as { __ready: boolean }).__ready, {
+        timeout: 15_000,
+      });
+    };
+    const clicks = () =>
+      frame.locator('body').evaluate(() => (window as unknown as { __ping?: number }).__ping ?? 0);
+
+    await page.evaluate(() => {
+      (window as unknown as { __inspect: (e: boolean) => void }).__inspect(true);
+    });
+    await reload();
+    await frame.locator('#ping').click();
+    await page.waitForFunction(
+      () => (window as unknown as { __explicit: unknown[] }).__explicit.length === 1,
+    );
+    expect(await clicks()).toBe(0);
+
+    await page.evaluate(() => {
+      (window as unknown as { __inspect: (e: boolean) => void }).__inspect(false);
+    });
+    await reload();
+    await frame.locator('#ping').click();
+    await page.waitForTimeout(200);
+    expect(await clicks()).toBe(1);
+    expect(
+      await page.evaluate(() => (window as unknown as { __explicit: unknown[] }).__explicit.length),
+    ).toBe(1);
   });
 });

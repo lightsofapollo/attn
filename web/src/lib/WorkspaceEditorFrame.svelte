@@ -362,7 +362,10 @@
               </button>
             </div>
           {/if}
-          <div class="relative mb-2 min-h-0 flex-1 overflow-hidden">
+          <!-- No bottom margin: the rail body runs to the window edge so the
+               agent-comments dock pins flush. Cards keep their gap above the
+               bottom through the margin's own fitBottom clearance. -->
+          <div class="relative min-h-0 flex-1 overflow-hidden">
             {@render rail()}
           </div>
         </aside>

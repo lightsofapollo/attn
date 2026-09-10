@@ -26,7 +26,7 @@ The agent checks the quote against the current file, makes changes under its exi
 ## Keep manual copying immediate
 
 - **For agent** is a durable personal mark in attn's storage. The human remains the author; room visibility stays the same.
-- **Copy**, **Copy selected**, and **Copy all** write directly to the clipboard with the same contextual records. Inline checkboxes and document/workspace scope determine the batch. No review, preview or confirmation step.
+- **Copy** (per comment, next to the time badge) and **Copy all** (the bar pinned to the rail bottom) write directly to the clipboard with the same contextual records. Document/workspace scope determines the batch; there is no per-comment selection ("Copy selected" was dropped 2026-09-10). Success is shown by the icon turning into a check, never by text.
 - Exclude resolved/unmarked threads. Show a selectable-text fallback only when clipboard access fails. Never silently truncate a batch.
 
 ## Implementation and boundaries

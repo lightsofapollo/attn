@@ -130,7 +130,7 @@ export interface FitBottomOptions {
   /** Vertical gap kept between cascaded cards. Default 8. */
   gutter?: number;
   /** Gap kept between the lowest fitted card and the container bottom.
-   *  Default 0 — the rail's clip wrapper already supplies the visual gap. */
+   *  Default 0; ReviewMargin passes its own gap plus any pinned dock height. */
   bottomClearance?: number;
 }
 

@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>attn interactive HTML fixture</title>
+    <style>
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        font-family: system-ui, sans-serif;
+        background: #f6f1e7;
+        color: #1c1a17;
+      }
+      .card {
+        text-align: center;
+        padding: 2.5rem 3rem;
+        border-radius: 1rem;
+        background: #fffdf8;
+        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.12);
+      }
+      h1 { margin: 0 0 0.5rem; font-weight: 700; }
+      button {
+        font: inherit;
+        padding: 0.6rem 1.2rem;
+        border-radius: 0.5rem;
+        border: 1px solid #b4a48a;
+        background: #ede4d3;
+        cursor: pointer;
+      }
+      #count { font-variant-numeric: tabular-nums; font-weight: 700; }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>Interactive HTML fixture</h1>
+      <p>
+        A page with its own working controls. Under review, annotate mode is off
+        by default, so these keep working until someone presses the note toggle.
+      </p>
+      <p>
+        <a id="appendix-link" href="#appendix">Jump to the appendix</a>
+      </p>
+      <p>
+        <button id="action" type="button">Recalculate</button>
+        pressed <span id="count">0</span> times
+      </p>
+      <h2 id="appendix">Appendix</h2>
+      <p>Nothing to see here; the link above only moves the hash.</p>
+    </div>
+    <script>
+      // The page's own behaviour: the button writes to the DOM. Whether it
+      // still does under review is exactly what the E2E suite asserts.
+      let pressed = 0;
+      const count = document.getElementById('count');
+      const action = document.getElementById('action');
+      action.addEventListener('click', () => {
+        pressed += 1;
+        count.textContent = String(pressed);
+      });
+      document.body.setAttribute('data-script-ran', 'true');
+
+      // Test hooks. The document renders in an opaque-origin frame the shell's
+      // automation bridge cannot reach into, so the fixture answers the shell
+      // over postMessage instead. Two messages, both from the parent only:
+      //
+      //   { type: 'attn-fixture:press', target }  — hover then click `target`,
+      //       with the real event sequence the annotation runtime listens to
+      //       (mousemove on the element, then a bubbling, cancelable click), and
+      //       report state afterwards.
+      //   { type: 'attn-fixture:query' }           — report state.
+      //
+      // State goes back as { type: 'attn-fixture:state', pressed, hash }.
+      // The shell ignores anything that is not a `hello` on the window
+      // channel, so these never touch the annotation handshake.
+      function report() {
+        window.parent.postMessage(
+          { type: 'attn-fixture:state', pressed, hash: location.hash },
+          '*',
+        );
+      }
+      window.addEventListener('message', (event) => {
+        if (event.source !== window.parent) return;
+        const data = event.data;
+        if (!data || typeof data !== 'object') return;
+        if (data.type === 'attn-fixture:query') {
+          report();
+          return;
+        }
+        if (data.type !== 'attn-fixture:press' || typeof data.target !== 'string') return;
+        const el = document.querySelector(data.target);
+        if (!el) { report(); return; }
+        const rect = el.getBoundingClientRect();
+        const at = { clientX: rect.left + rect.width / 2, clientY: rect.top + rect.height / 2, bubbles: true };
+        el.dispatchEvent(new MouseEvent('mousemove', at));
+        // The runtime positions its chip synchronously on hover; give the
+        // click its own task so it lands on a settled hover, as a real one does.
+        setTimeout(() => {
+          el.dispatchEvent(new MouseEvent('click', { ...at, cancelable: true }));
+          setTimeout(report, 50);
+        }, 30);
+      });
+    </script>
+  </body>
+</html>

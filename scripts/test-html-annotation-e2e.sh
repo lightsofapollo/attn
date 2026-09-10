@@ -13,6 +13,9 @@
 #   5. Assert the runtime booted inside the opaque-origin frame, that the
 #      comment margin mounts for an annotatable HTML doc, and that the
 #      capability survived the encrypted round-trip.
+#   6. Annotate mode (attn-wrf3): on both sides, the page's own button keeps
+#      working under review; pressing the pinned note toggle turns the same
+#      click into a comment composer; pressing it again hands the click back.
 #
 # Why the assertions look indirect: the document renders in a cross-origin
 # sandboxed iframe, so the automation bridge (which evaluates in the SHELL's
@@ -21,14 +24,22 @@
 # capability on the received snapshot, the shell's own annotation wiring, and
 # the mounted margin — rather than pretending to inspect the frame's DOM.
 #
-# THE IN-FRAME INTERACTION LAYER IS NOT TESTED HERE, and pretending otherwise is
-# how the hover/click layer once shipped green while being unusable by hand.
-# Hovering, the label chip, element clicks and the Comment pill are driven with
-# a real mouse against a real opaque-origin frame in
+# THE IN-FRAME INTERACTION LAYER IS MOSTLY NOT TESTED HERE, and pretending
+# otherwise is how the hover/click layer once shipped green while being unusable
+# by hand. Hovering, the label chip, element clicks and the Comment pill are
+# driven with a real mouse against a real opaque-origin frame in
 # web/e2e/html-annotation-runtime.spec.ts (`npm run test:e2e:html-annotation`).
 # What this script uniquely proves is the part that needs two daemons and a
 # relay: that the capability, the bytes and the runtime survive the encrypted
 # round trip, and that both sides' shells wire an annotatable frame up.
+#
+# The one in-frame behaviour it does exercise is the annotate-mode switch, and
+# it does so through the FIXTURE: tests/fixtures/interactive.html answers a
+# postMessage from the shell by hovering and clicking its own button with the
+# event sequence the runtime listens to, then reports its DOM state back. That
+# is the only way to observe "the button's handler ran" from outside an opaque
+# frame; the shell-side halves (the toggle's aria-pressed, the composer) are
+# asserted directly.
 #
 # Honors ATTN_SKIP_HTML_ANNOTATION_E2E=1 as a CI escape hatch (relay + webview
 # need a display + loopback, flaky on some headless infra).
@@ -50,8 +61,8 @@ cd "$PROJECT_DIR"
 
 : "${ATTN_RELAY_URL:=http://localhost:8787}"
 : "${ATTN_BIN:=$PROJECT_DIR/target/debug/attn}"
-FIXTURE="$PROJECT_DIR/tests/fixtures/sample.html"
-MARKER="Hello from an HTML file"
+FIXTURE="$PROJECT_DIR/tests/fixtures/interactive.html"
+MARKER="Interactive HTML fixture"
 # The injected runtime carries this attribute; it is the only reliable
 # shell-visible proof that injection happened.
 RUNTIME_MARKER="data-attn-runtime"
@@ -266,6 +277,125 @@ esac
 __attn_dual_wait_one "$ATTN_DUAL_REVIEWER" '[data-slot="review-margin"]' 15000 \
     && pass "comment margin mounts for the annotatable HTML doc" \
     || pend "review margin not observed (attn-7ev: needs the rail expanded)"
+
+# ---- annotate mode: off by default; the pinned toggle enters and leaves it ---
+#
+# Both shells are the same App.svelte, so the same walk runs on the owner
+# (path-mode frame, runtime spliced by the attn:// handler) and on the reviewer
+# (srcdoc frame, runtime spliced by the shell). The fixture reports its own
+# state over postMessage — see the header comment for why.
+
+TOGGLE='[data-slot="html-annotate-toggle"]'
+COMPOSER='[data-slot="html-comment-composer"]'
+
+# $1: home. Evaluate JS in that shell; print the JSON result (or 'err').
+shell_eval() {
+    ATTN_HOME="$1" "$ATTN_BIN" --eval "$2" 2>/dev/null | jq -r . 2>/dev/null || echo 'err'
+}
+
+# Install the shell-side listener that captures the fixture's state reports.
+install_fixture_listener() {
+    shell_eval "$1" "(() => { if (!window.__attn_fixture_listener) { window.__attn_fixture_listener = true; window.__attn_fixture_state = null; window.addEventListener('message', (e) => { if (e.data && e.data.type === 'attn-fixture:state') window.__attn_fixture_state = { pressed: e.data.pressed, hash: e.data.hash }; }); } return true; })()" >/dev/null
+}
+
+# $1: home, $2: CSS selector inside the fixture. Hover + click it, as the
+# runtime would see a real pointer do, and wait for the state report.
+fixture_press() {
+    shell_eval "$1" "(() => { window.__attn_fixture_state = null; document.querySelector('[data-slot=\"html-viewer\"] iframe')?.contentWindow?.postMessage({ type: 'attn-fixture:press', target: '$2' }, '*'); return true; })()" >/dev/null
+    local i=0
+    while [ $i -lt 30 ]; do
+        local got
+        got="$(shell_eval "$1" "window.__attn_fixture_state !== null")"
+        [ "$got" = "true" ] && return 0
+        sleep 0.1; i=$((i + 1))
+    done
+    return 1
+}
+
+fixture_pressed() { shell_eval "$1" "window.__attn_fixture_state?.pressed ?? -1"; }
+toggle_pressed() { shell_eval "$1" "document.querySelector('$TOGGLE')?.getAttribute('aria-pressed') ?? 'missing'"; }
+composer_open()  { shell_eval "$1" "document.querySelector('$COMPOSER') !== null"; }
+
+# $1: home, $2: label
+assert_annotate_mode() {
+    local home="$1" who="$2"
+
+    __attn_dual_wait_one "$home" "$TOGGLE" 15000 \
+        && pass "$who: pinned annotate toggle shown for the annotatable doc" \
+        || { fail "$who: annotate toggle never rendered"; return; }
+    case "$(toggle_pressed "$home")" in
+        false) pass "$who: annotate mode is OFF by default" ;;
+        *) fail "$who: annotate mode not off by default (aria-pressed=$(toggle_pressed "$home"))" ;;
+    esac
+
+    install_fixture_listener "$home"
+
+    # (1) Off: the page's own handler runs and no composer appears.
+    if fixture_press "$home" '#action'; then
+        local pressed; pressed="$(fixture_pressed "$home")"
+        if [ "$pressed" = "1" ] && [ "$(composer_open "$home")" = "false" ]; then
+            pass "$who: (1) with the mode off, the page's button runs its handler and no composer opens"
+        else
+            fail "$who: (1) mode off — pressed=$pressed composer=$(composer_open "$home")"
+        fi
+    else
+        fail "$who: (1) fixture never reported after the press"
+    fi
+
+    # (2) On: the same click opens the composer and the handler does NOT run.
+    ATTN_HOME="$home" "$ATTN_BIN" --click "$TOGGLE" >/dev/null 2>&1 \
+        || fail "$who: could not click the annotate toggle"
+    sleep 0.4
+    case "$(toggle_pressed "$home")" in
+        true) pass "$who: toggle reports pressed after the click" ;;
+        *) fail "$who: toggle did not flip on (aria-pressed=$(toggle_pressed "$home"))" ;;
+    esac
+    local mode; mode="$(shell_eval "$home" "window.__attn_html_debug__?.annotateMode === true")"
+    [ "$mode" = "true" ] \
+        && pass "$who: shell mirrors annotate mode on" \
+        || fail "$who: shell debug mirror says annotateMode=$mode"
+    if fixture_press "$home" '#action'; then
+        local pressed; pressed="$(fixture_pressed "$home")"
+        if __attn_dual_wait_one "$home" "$COMPOSER" 5000 && [ "$pressed" = "1" ]; then
+            pass "$who: (2) with the mode on, the same click opens the composer and the handler does not run"
+        else
+            fail "$who: (2) mode on — pressed=$pressed composer=$(composer_open "$home")"
+        fi
+    else
+        fail "$who: (2) fixture never reported after the press"
+    fi
+
+    # Cancel the composer (by its label, not its position), then leave the mode.
+    shell_eval "$home" "(() => { const b = [...document.querySelectorAll('$COMPOSER button')].find((el) => el.textContent.trim() === 'Cancel'); b?.click(); return Boolean(b); })()" >/dev/null
+    sleep 0.2
+    [ "$(composer_open "$home")" = "false" ] \
+        && pass "$who: cancelling the composer closes it" \
+        || fail "$who: composer still open after Cancel"
+    ATTN_HOME="$home" "$ATTN_BIN" --click "$TOGGLE" >/dev/null 2>&1 \
+        || fail "$who: could not click the annotate toggle a second time"
+    sleep 0.4
+    case "$(toggle_pressed "$home")" in
+        false) pass "$who: toggle reports released after the second click" ;;
+        *) fail "$who: toggle did not flip off (aria-pressed=$(toggle_pressed "$home"))" ;;
+    esac
+
+    # (3) Off again: the handler runs and nothing proposes.
+    if fixture_press "$home" '#action'; then
+        local pressed; pressed="$(fixture_pressed "$home")"
+        if [ "$pressed" = "2" ] && [ "$(composer_open "$home")" = "false" ]; then
+            pass "$who: (3) with the mode off again, the page's button runs its handler"
+        else
+            fail "$who: (3) mode off again — pressed=$pressed composer=$(composer_open "$home")"
+        fi
+    else
+        fail "$who: (3) fixture never reported after the press"
+    fi
+}
+
+log "Annotate mode walk — owner"
+assert_annotate_mode "$ATTN_DUAL_OWNER" "owner"
+log "Annotate mode walk — reviewer"
+assert_annotate_mode "$ATTN_DUAL_REVIEWER" "reviewer"
 
 echo
 if [ "$FAILURES" -eq 0 ]; then

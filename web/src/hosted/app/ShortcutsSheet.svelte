@@ -32,6 +32,7 @@
         { keys: ['⌘', 'J'], label: 'Toggle the review rail' },
         { keys: ['⌘', '.'], label: 'Next comment' },
         { keys: ['⌘', '⇧', '.'], label: 'Previous comment' },
+        { keys: ['⌘', '⇧', 'N'], label: 'Annotate an HTML document' },
       ],
     },
     {

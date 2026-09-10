@@ -1,6 +1,6 @@
 # HTML document annotation — design note
 
-Status: **locked** (2026-08-04). Phase 0 of epic `attn-61t`.
+Status: **locked** (2026-08-04; §Goal and §5 `inspect` amended 2026-09-08 by `attn-wrf3`). Phase 0 of epic `attn-61t`.
 Prototype: [`prototypes/html-annotation.html`](prototypes/html-annotation.html) (validated UX — do not redesign).
 Supersedes: the "Design B / distinct localhost origin" decision recorded on `attn-61t` 2026-06-18. See §1.
 
@@ -10,7 +10,14 @@ Supersedes: the "Design B / distinct localhost origin" decision recorded on `att
 
 Bring attn's review surface — comments, replies, resolve, and (later) AI suggestions —
 to **rendered HTML documents**, for both *text-range* and *whole-element* targets
-(including the `cell ‹ row ‹ table` scope chain), with no mode switch.
+(including the `cell ‹ row ‹ table` scope chain).
+
+Element annotation is entered through one explicit switch — a shell-owned note toggle
+pinned to the document viewport — and is **off by default**, a document under review
+included (`attn-wrf3`, 2026-09-08). Text-range commenting via the selection pill needs no
+switch and works in both modes. The original note read "with no mode switch"; that
+coupled *under review* with *every click is a comment*, which broke the interactive
+artefacts (dashboards, prototypes, demos) this surface most needs to review.
 
 Read-only HTML *sharing* already ships (`attn-qgd`): `DocType::Html` snapshots publish
 over the encrypted transport and reviewers render them. This note covers the missing
@@ -210,7 +217,7 @@ ignored by both sides so the protocol can extend without a lockstep upgrade.
 | `setAnchorState` | `{ anchorId, state }` | `default` / `active` / `resolved` |
 | `focusAnchor` | `{ anchorId, scrollIntoView }` | rail card → document |
 | `dismissSelection` | `{}` | composer cancelled |
-| `inspect` | `{ enabled }` | this document is under review; annotate it (see below) |
+| `inspect` | `{ enabled }` | the person's annotate mode, gated by the shell (see below) |
 | `theme` | `{ mode, tokens }` | PAPER/INK switch |
 
 `explicit` separates *the person asked* (Comment pill, element click, breadcrumb entry)
@@ -219,17 +226,35 @@ from *the person is merely dragging a selection*. A shell must answer an explici
 explicit proposal is the failure mode attn-yqun.3 exists to close.
 
 `inspect` gates the whole element-annotation surface: hover outline, breadcrumb chip, and
-click-to-comment all appear together and only once the shell says the document can
-actually take a comment.
+click-to-comment all appear together. It is **gated by the person's annotate toggle,
+default off**: the shell sends `enabled: true` only when the document is annotatable
+(shared, capability declared) **and** the person has turned the mode on, and sends
+`false` the moment either half stops holding. The frame boots with the surface off, and
+the bridge re-states the current mode after every handshake, so a reloaded or
+republished frame lands in the mode the shell holds rather than whatever it last
+remembered. (Amended 2026-09-08, `attn-wrf3`; previously "under review" alone turned it
+on.)
 
 They are one switch rather than two because the chip is opaque and painted *over* the
 page. An always-visible chip occludes whatever sits above the hovered element and, being
 clickable, swallows clicks there — so on a document that is merely being read it would
 break the page's own links to offer an affordance that could answer nothing but "share
-this first". Under review, that same interception is the point: clicking a link means
-commenting on it, not following it. Before then the document behaves exactly like a
-document, and the text-selection pill remains the way to ask — it answers, with the
-reason.
+this first". And a document under review is, until someone asks to annotate it, still a
+document being read: a dashboard's tabs, a prototype's buttons and a demo's links have
+to keep working, or the artefact cannot be reviewed *as* the thing it is. Once the
+person asks, that same interception is the point: clicking a link means commenting on it,
+not following it. The text-selection pill is independent of the switch and remains the
+way to ask in either mode — it answers, with the reason.
+
+The switch itself is **shell-owned chrome**: a small note button pinned to the
+bottom-right of the document viewport (`HtmlAnnotateToggle.svelte`,
+`data-slot="html-annotate-toggle"`), rendered *outside* the frame, so the document can
+neither draw it nor press it (amendments.md #19/#20). It is shown only when the document
+is annotatable; `⌘⇧N` (`Ctrl+Shift+N`) toggles it and `Esc` leaves the mode when no
+composer or dialog sits above it. The mode stays on until the person turns it off —
+submitting or cancelling a note does not exit it. Turning it off mid-hover takes the chip
+and outline down; turning it off with a composer open keeps the composer (the person may
+be typing) and the frame refuses to propose again until the mode returns.
 
 Two invariants hold inside the frame. A click commits only to the element the chip is
 currently naming, so nothing is ever anchored to something the person could not see was

@@ -174,7 +174,9 @@ export class HtmlAnnotationBridge {
   /**
    * Retained for the same reason as `#rendered`: a reloaded frame boots with
    * inspection off, and a document that silently stopped answering clicks after
-   * a live-reload would read as broken.
+   * a live-reload would read as broken. Off until the shell says otherwise —
+   * the shell only says so while the document is annotatable AND the person
+   * has turned annotate mode on (attn-wrf3).
    */
   #inspect = false;
 
@@ -217,9 +219,19 @@ export class HtmlAnnotationBridge {
     // carries no secret; its only payload is the port itself.
     target.postMessage({ type: SHELL_INIT, v: DOC_PROTOCOL_VERSION }, '*', [channel.port2]);
 
-    if (this.#inspect) {
-      this.#port.postMessage({ type: 'inspect', v: DOC_PROTOCOL_VERSION, enabled: true });
-    }
+    // The current mode is ALWAYS stated, `false` included. A reloaded frame
+    // boots with inspection off, so an explicit false costs one message and
+    // changes nothing there — but a frame that did not reload (a document
+    // script re-sending `hello` to obtain a fresh port) keeps whatever state
+    // it had, and silence would leave a mode the shell has since turned off
+    // running against the shell's record of it. Stating it makes the
+    // handshake idempotent: after every establish, the frame is in the mode
+    // the shell says, whatever it was doing before.
+    this.#port.postMessage({
+      type: 'inspect',
+      v: DOC_PROTOCOL_VERSION,
+      enabled: this.#inspect,
+    });
 
     // A reloaded frame is a fresh document: it knows nothing of the pins the
     // shell is still showing, hover included.
@@ -412,12 +424,13 @@ export class HtmlAnnotationBridge {
   }
 
   /**
-   * Whether clicking an element in the document commits to commenting on it.
+   * Whether the frame's element-annotation surface is live: hover outline,
+   * breadcrumb chip, and click-to-comment.
    *
-   * The frame always offers hover chrome, so the annotation model is visible on
-   * any rendered document. Taking the click, though, means the page's own links
-   * and buttons stop working — only correct once the document is genuinely
-   * under review, which is a question only the shell can answer.
+   * Taking the click means the page's own links and buttons stop working, so
+   * the shell enables this only while the document can take a comment AND the
+   * person has entered annotate mode through the pinned toggle (attn-wrf3).
+   * Under review with the mode off, the page behaves exactly like a page.
    */
   setInspect(enabled: boolean): void {
     this.#inspect = enabled;

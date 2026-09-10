@@ -8,6 +8,7 @@
     hasCommentComposer?: boolean;
     hasSuggestionComposer?: boolean;
     hasToggleReviewPanel?: boolean;
+    hasHtmlAnnotate?: boolean;
   }
 
   let {
@@ -15,6 +16,7 @@
     hasCommentComposer = false,
     hasSuggestionComposer = false,
     hasToggleReviewPanel = false,
+    hasHtmlAnnotate = false,
   }: Props = $props();
 
   const isMac = navigator.platform.includes('Mac');
@@ -81,6 +83,9 @@
     }
     if (hasToggleReviewPanel) {
       reviewShortcuts.push({ keys: [mod, 'J'], description: 'Toggle review panel' });
+    }
+    if (hasHtmlAnnotate) {
+      reviewShortcuts.push({ keys: [mod, shift, 'N'], description: 'Annotate an HTML document' });
     }
     if (reviewShortcuts.length === 0) {
       return baseGroups;

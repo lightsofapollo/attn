@@ -8,6 +8,13 @@
   } from '../../lib/save-state-copy';
   import { appWorkspaceUrl } from '../../lib/hosted/routes';
   import SaveChip from '../../lib/SaveChip.svelte';
+  import CopyIcon from '@lucide/svelte/icons/copy';
+  import CheckIcon from '@lucide/svelte/icons/check';
+  import {
+    copyFileTitle,
+    createCopyFileController,
+    type CopyFileState,
+  } from '../../lib/copy-file-contents';
   import BrandMark from '../../lib/BrandMark.svelte';
   import type { EditorView } from 'prosemirror-view';
   import BottomSheet from './BottomSheet.svelte';
@@ -69,6 +76,8 @@
   import LoadingLine from './LoadingLine.svelte';
   import ImportChooser from './ImportChooser.svelte';
   import HtmlViewer from '../../lib/HtmlViewer.svelte';
+  import HtmlAnnotateToggle from '../../lib/HtmlAnnotateToggle.svelte';
+  import { isHtmlAnnotateHotkey } from '../../lib/keyboard';
   import HtmlCommentComposer from '../../lib/HtmlCommentComposer.svelte';
   import type {
     AnnotationBridgeEvents,
@@ -1352,11 +1361,34 @@
     bridge.setHoveredAnchor(thread?.id ?? null);
   });
 
-  // Hover chrome is always live in an annotating frame; taking the CLICK — so
-  // the page's own links stop firing — waits until the document is genuinely
-  // reviewable.
+  /**
+   * Annotate mode (attn-wrf3): OFF by default for every HTML document, a
+   * shared one included. The page stays fully interactive until the person
+   * presses the pinned note toggle (or ⌘⇧N); the mode then stays on until
+   * they turn it off — submitting or cancelling a note does not exit it.
+   * Reset when the displayed entry changes; kept across a republish of the
+   * same file. Parity with native and the hosted reviewer.
+   */
+  let htmlAnnotateMode = $state(false);
+  let lastHtmlAnnotateEntryPath: string | null = null;
   $effect(() => {
-    htmlBridge?.setInspect(htmlAnnotatable);
+    const path = activeEntry?.presentation === 'html' ? activeEntry.path : null;
+    if (path === lastHtmlAnnotateEntryPath) return;
+    lastHtmlAnnotateEntryPath = path;
+    htmlAnnotateMode = false;
+  });
+
+  function toggleHtmlAnnotateMode(): void {
+    if (!htmlAnnotatable) return;
+    htmlAnnotateMode = !htmlAnnotateMode;
+  }
+
+  // The frame's element-annotation surface (hover outline, breadcrumb chip,
+  // click-to-comment) is live only while the document can take a comment AND
+  // the person has asked to annotate. Either half alone leaves the page's own
+  // clicks with the page.
+  $effect(() => {
+    htmlBridge?.setInspect(htmlAnnotatable && htmlAnnotateMode);
   });
 
   $effect(() => {
@@ -2653,6 +2685,33 @@
     }
   }
 
+  // ————— "Copy file contents" (both headers) —————
+  // Reads the entry the way the canvas shows it: the live editor buffer for
+  // markdown (unsaved keystrokes included; `displayText`/`bodyText` cover the
+  // reader-mode frames where no editor is mounted), the stored source for
+  // HTML. Read on click, never cached — the buffer moves under the button.
+  let copyFileState = $state<CopyFileState>({ kind: 'idle' });
+  const copyFileTitleText = $derived(copyFileTitle(copyFileState));
+  const copyFileAvailable = $derived(
+    activeEntry?.presentation === 'editable' || activeEntry?.presentation === 'html',
+  );
+
+  async function readActiveEntryText(): Promise<string> {
+    const entry = activeEntry;
+    if (!entry) throw new Error('No file is open');
+    if (entry.presentation === 'editable') {
+      return editorRef?.getMarkdown() ?? displayText ?? bodyText ?? '';
+    }
+    if (entry.presentation === 'html') return bodyText ?? displayText ?? '';
+    throw new Error('This file has no text to copy');
+  }
+
+  const copyFileController = createCopyFileController({
+    source: readActiveEntryText,
+    onChange: (state) => { copyFileState = state; },
+  });
+  $effect(() => () => copyFileController.dispose());
+
   async function exitEdit(): Promise<void> {
     if (!editing) return;
     if (editorRef) displayText = editorRef.getMarkdown();
@@ -2937,6 +2996,14 @@
     /* "?" opens the shortcut list — the convention every keyboard-first tool
        this product is measured against uses (attn-08fa.11). Never while a text
        field owns the keyboard: "?" is an ordinary character in a document. */
+    // ⌘⇧N enters / leaves annotate mode on an HTML document (attn-wrf3). Same
+    // chord as the native shell; a no-op on a document that cannot take a note.
+    if (isHtmlAnnotateHotkey(event)) {
+      if (!htmlAnnotatable) return;
+      event.preventDefault();
+      toggleHtmlAnnotateMode();
+      return;
+    }
     if (event.key === '?' && !event.metaKey && !event.ctrlKey && !event.altKey) {
       if (shareOpen || filesSheetOpen || reviewSheetOpen || lightboxOpen || paletteOpen) return;
       const target = event.target;
@@ -2965,6 +3032,14 @@
     ) {
       const target = event.target;
       if (target instanceof HTMLElement && target.closest('input, textarea, [role="dialog"]')) return;
+      // Annotate mode is the layer beneath every composer and dialog: with
+      // nothing above it, Escape leaves the mode (Topmost-Escape) before it
+      // touches thread focus.
+      if (htmlAnnotateMode && !htmlComposer) {
+        event.preventDefault();
+        htmlAnnotateMode = false;
+        return;
+      }
       if (reviewStoreRef?.dismissFocusStep()) event.preventDefault();
     }
   }
@@ -3414,7 +3489,13 @@
         <div class="hosted-editor-loading" role="status"><LoadingLine text="Opening editor" /></div>
       {/if}
     {:else if activeEntry?.presentation === 'html'}
-      <div class="hosted-html-surface" data-slot="hosted-html-document">
+      <!-- On phones the thumb dock is fixed to the bottom of the window; the
+           toggle lifts by the dock's height so the two never meet. -->
+      <div
+        class="hosted-html-surface"
+        data-slot="hosted-html-document"
+        style={desktopLayout ? undefined : '--html-annotate-toggle-bottom: calc(var(--dock-h, 0px) + 1rem);'}
+      >
         <HtmlViewer
           content={bodyText ?? displayText ?? ''}
           allowScripts={false}
@@ -3422,7 +3503,13 @@
           annotate={htmlAnnotatable}
           annotationEvents={htmlAnnotationEvents}
           onBridge={(bridge) => (htmlBridge = bridge)}
-        />
+        >
+          <HtmlAnnotateToggle
+            active={htmlAnnotateMode}
+            hidden={!htmlAnnotatable}
+            onToggle={toggleHtmlAnnotateMode}
+          />
+        </HtmlViewer>
       </div>
     {:else if isNewDraft && (displayText === null || displayText.length === 0)}
       {#if !showCanvasInvite}
@@ -3611,6 +3698,31 @@
         <span class="review-trouble-dot" aria-hidden="true"></span>
         <span>{reviewTrouble.chip}</span>
       </button>
+    {/if}
+    {#if copyFileAvailable}
+      <!-- Same resting-ghost icon button as the frame's Share (one grammar
+           across the cluster). The glyph swaps copy → check on success and
+           "Copied" is real live-region text, so the state is never colour
+           alone; a failure keeps the copy glyph and carries the reason on
+           `title` for the same window. -->
+      <button
+        type="button"
+        class="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+        data-slot="hosted-copy-file"
+        data-state={copyFileState.kind}
+        aria-label={copyFileTitleText}
+        title={copyFileTitleText}
+        onclick={() => void copyFileController.copy()}
+      >
+        {#if copyFileState.kind === 'copied'}
+          <CheckIcon class="size-3.5" aria-hidden="true" />
+        {:else}
+          <CopyIcon class="size-3.5" aria-hidden="true" />
+        {/if}
+      </button>
+      <span class="sr-only" role="status" aria-live="polite">
+        {copyFileState.kind === 'copied' ? 'Copied' : ''}
+      </span>
     {/if}
     <SaveChip
       class="save-state"
@@ -3892,6 +4004,26 @@
       <!-- Chips cluster on the RIGHT together (user ruling: no stranded
            chip on the left with a gulf before Sharing). Same precedence as
            the desktop chip: a live share outranks the local save state. -->
+      {#if copyFileAvailable}
+        <button
+          class="icon-button"
+          type="button"
+          data-slot="hosted-copy-file"
+          data-state={copyFileState.kind}
+          aria-label={copyFileTitleText}
+          title={copyFileTitleText}
+          onclick={() => void copyFileController.copy()}
+        >
+          {#if copyFileState.kind === 'copied'}
+            <CheckIcon size={16} aria-hidden="true" />
+          {:else}
+            <CopyIcon size={16} aria-hidden="true" />
+          {/if}
+        </button>
+        <span class="sr-only" role="status" aria-live="polite">
+          {copyFileState.kind === 'copied' ? 'Copied' : ''}
+        </span>
+      {/if}
       <SaveChip
         class="save-state"
         dataSlot="hosted-mobile-save-chip"

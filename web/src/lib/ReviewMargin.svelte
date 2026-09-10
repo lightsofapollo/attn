@@ -45,6 +45,7 @@
   import { Selection } from 'prosemirror-state';
   import type { EditorView } from 'prosemirror-view';
   import ReviewMarginCard from './ReviewMarginCard.svelte';
+  import AgentFeedbackBar from './AgentFeedbackBar.svelte';
   import { positionAnchorFromSelection } from './review/anchors';
   import {
     fitBottom,
@@ -69,6 +70,7 @@
     type SuggestionActionPort,
   } from './review/suggestion-action-port';
   import CheckIcon from '@lucide/svelte/icons/check';
+  import type { FeedbackScope } from './review/agent-feedback-bar';
 
   import { isThreadActive } from './review/thread-visibility';
   import {
@@ -202,10 +204,12 @@
   const feedbackRoutes = $derived(
     feedbackRoomId === null ? {} : (reviewStore.feedbackRoutingByRoom[feedbackRoomId] ?? {}),
   );
-  let feedbackScope = $state<'file' | 'project'>('file');
-  let selectedFeedbackIds = $state<Set<string>>(new Set());
+  let feedbackScope = $state<FeedbackScope>('file');
+  /** Error text for the agent-comments bar (clipboard blocked, mark failed). */
   let feedbackNotice = $state('');
   let clipboardFallback = $state('');
+  /** Measured height of the pinned agent-comments dock; 0 while hidden. */
+  let feedbackDockHeight = $state(0);
 
   const projectScopeThreads = $derived.by(() => {
     const roomId = feedbackRoomId;
@@ -217,9 +221,15 @@
     markedFeedbackThreads(projectScopeThreads, feedbackRoutes),
   );
   const markedFeedback = $derived(markedFeedbackThreads(scopeThreads, feedbackRoutes));
-  const selectedFeedback = $derived(
-    markedFeedback.filter((thread) => selectedFeedbackIds.has(thread.id)),
-  );
+  const showFeedbackDock = $derived(projectMarkedFeedback.length > 0);
+  /** Height the pinned agent-comments dock takes from the rail's bottom. */
+  const feedbackDockClearance = $derived(showFeedbackDock ? feedbackDockHeight : 0);
+  /** Breathing room between the lowest card/chip and whatever ends the rail
+   *  (its bottom edge, or the dock). The rail body used to supply this as a
+   *  margin on its wrapper, which left a strip of backdrop under the dock;
+   *  the gap now belongs to the card layout so the dock sits flush. */
+  const RAIL_BOTTOM_GAP = 8;
+  const cardBottomClearance = $derived(feedbackDockClearance + RAIL_BOTTOM_GAP);
 
   $effect(() => {
     const roomId = feedbackRoomId;
@@ -240,12 +250,6 @@
     };
     window.addEventListener('storage', onStorage);
     return () => window.removeEventListener('storage', onStorage);
-  });
-
-  $effect(() => {
-    const eligible = new Set(markedFeedback.map((thread) => thread.id));
-    const next = new Set([...selectedFeedbackIds].filter((id) => eligible.has(id)));
-    if (next.size !== selectedFeedbackIds.size) selectedFeedbackIds = next;
   });
 
   // Rail mode (hidden/collapsed/expanded) is derived on the store so
@@ -502,19 +506,11 @@
    */
   function clampRailTop(y: number): number {
     const viewportY = y + lastContainerTop;
-    const clearance = projectMarkedFeedback.length > 0 ? 88 : COLLAPSED_RAIL_TOP_CLEARANCE;
-    return viewportY < 0 ? y : Math.max(y, clearance);
+    return viewportY < 0 ? y : Math.max(y, COLLAPSED_RAIL_TOP_CLEARANCE);
   }
 
   function isForAgent(thread: Thread): boolean {
     return feedbackRoutes[thread.id]?.marked === true;
-  }
-
-  function setFeedbackSelected(threadId: string, selected: boolean): void {
-    const next = new Set(selectedFeedbackIds);
-    if (selected) next.add(threadId);
-    else next.delete(threadId);
-    selectedFeedbackIds = next;
   }
 
   async function setForAgent(thread: Thread, marked: boolean): Promise<void> {
@@ -528,7 +524,6 @@
       } else {
         reviewSetFeedbackMark(roomId, thread.id, marked);
       }
-      setFeedbackSelected(thread.id, marked);
     } catch (error) {
       feedbackNotice = error instanceof Error ? error.message : 'Could not update For-agent mark';
     }
@@ -544,16 +539,24 @@
     });
   }
 
-  async function copyFeedback(targets: Thread[]): Promise<void> {
+  /**
+   * Writes the feedback packet for `targets` to the clipboard. Resolves
+   * `true` on success — the caller (a card's Copy button, the dock's
+   * copy-all) shows its own transient check. On failure the packet lands
+   * in a read-only textarea in the dock so it can still be copied by hand.
+   * Works for any comment, marked for the agent or not.
+   */
+  async function copyFeedback(targets: Thread[]): Promise<boolean> {
     const packet = feedbackPacket(targets);
     feedbackNotice = '';
     clipboardFallback = '';
     try {
       await navigator.clipboard.writeText(packet);
-      feedbackNotice = `Copied ${targets.length} feedback ${targets.length === 1 ? 'item' : 'items'}`;
+      return true;
     } catch {
       clipboardFallback = packet;
       feedbackNotice = 'Clipboard access was blocked. Copy the packet below.';
+      return false;
     }
   }
 
@@ -590,7 +593,12 @@
     const containerH = containerEl?.clientHeight ?? 0;
     if (containerH <= 0) return placed;
     const heights = new Map(inputs.map((i) => [i.id, i.height]));
-    return fitBottom(placed, heights, { containerHeight: containerH });
+    // The agent-comments dock is pinned to the rail's bottom edge; keep
+    // on-screen cards above it rather than under it.
+    return fitBottom(placed, heights, {
+      containerHeight: containerH,
+      bottomClearance: cardBottomClearance,
+    });
   });
 
   // Virtualization band. Only render placements that fall within
@@ -635,7 +643,10 @@
     let placed = layoutCards(inputs);
     const containerH = containerEl?.clientHeight ?? 0;
     if (containerH > 0) {
-      placed = fitBottom(placed, heights, { containerHeight: containerH });
+      placed = fitBottom(placed, heights, {
+        containerHeight: containerH,
+        bottomClearance: RAIL_BOTTOM_GAP,
+      });
     }
     if (placed.length <= maxRenderedCards) return placed;
     return visibleCards(placed, heights, { viewportTop, viewportHeight, bandPx: 800 });
@@ -1139,6 +1150,7 @@
   class="review-margin"
   data-slot="review-margin"
   data-rail-mode={collapsed ? 'collapsed' : 'expanded'}
+  style="--agent-feedback-dock-height: {feedbackDockClearance}px;"
 >
   {#if collapsed}
     <!-- Collapsed gutter (attn-42y): every thread shrinks to an icon chip
@@ -1177,41 +1189,6 @@
       {/if}
     {/each}
   {:else}
-  {#if projectMarkedFeedback.length > 0}
-    <section class="feedback-batch" aria-label="Agent feedback copy controls">
-      <div class="feedback-batch-row">
-        <strong>{markedFeedback.length} for agent</strong>
-        <select bind:value={feedbackScope} aria-label="Feedback copy scope">
-          <option value="file">This file</option>
-          <option value="project">Whole project</option>
-        </select>
-      </div>
-      <div class="feedback-batch-row">
-        <button
-          type="button"
-          disabled={selectedFeedback.length === 0}
-          onclick={() => { void copyFeedback(selectedFeedback); }}
-        >Copy selected</button>
-        <button
-          type="button"
-          disabled={markedFeedback.length === 0}
-          onclick={() => { void copyFeedback(markedFeedback); }}
-        >Copy all</button>
-      </div>
-      {#if feedbackNotice}
-        <p class="feedback-notice" role="status">{feedbackNotice}</p>
-      {/if}
-      {#if clipboardFallback}
-        <textarea
-          class="feedback-fallback"
-          readonly
-          value={clipboardFallback}
-          aria-label="Agent feedback packet"
-          onclick={(event) => event.currentTarget.select()}
-        ></textarea>
-      {/if}
-    </section>
-  {/if}
   <!-- Orphan tray: sticky-top per §2 -->
   {#if orphanThreads.length > 0}
     <section
@@ -1244,9 +1221,7 @@
               onReply={(body) => replyToThread(t, body)}
               pendingDismiss={locallyDismissed.has(t.id)}
               forAgent={isForAgent(t)}
-              selectedForAgent={selectedFeedbackIds.has(t.id)}
               onToggleForAgent={(marked) => setForAgent(t, marked)}
-              onToggleFeedbackSelection={(selected) => setFeedbackSelected(t.id, selected)}
               onCopyFeedback={() => copyFeedback([t])}
               onRequestReanchor={() => handleRequestReanchor(t.rootEvent.meta.eventId)}
               onDiscardStale={() => handleDiscardStale(t.rootEvent.meta.eventId)}
@@ -1286,9 +1261,7 @@
               onReply={(body) => replyToThread(t, body)}
               pendingDismiss={locallyDismissed.has(t.id)}
               forAgent={isForAgent(t)}
-              selectedForAgent={selectedFeedbackIds.has(t.id)}
               onToggleForAgent={(marked) => setForAgent(t, marked)}
-              onToggleFeedbackSelection={(selected) => setFeedbackSelected(t.id, selected)}
               onCopyFeedback={() => copyFeedback([t])}
             />
           {:else if t.id === expandedResolvedId}
@@ -1370,9 +1343,7 @@
           onReply={(body) => replyToThread(t, body)}
           pendingDismiss={locallyDismissed.has(t.id)}
           forAgent={isForAgent(t)}
-          selectedForAgent={selectedFeedbackIds.has(t.id)}
           onToggleForAgent={(marked) => setForAgent(t, marked)}
-          onToggleFeedbackSelection={(selected) => setFeedbackSelected(t.id, selected)}
           onCopyFeedback={() => copyFeedback([t])}
         />
       </div>
@@ -1436,6 +1407,28 @@
     >
       {resolvedThreads.length} resolved · show
     </button>
+  {/if}
+
+  <!-- Agent-comments dock: one row pinned to the rail's bottom edge while
+       the room has comments marked for the agent. Absolute in the anchored
+       rail (its container never scrolls — the document does), sticky in the
+       stacked bottom sheet (which does). -->
+  {#if showFeedbackDock}
+    <div
+      class="review-margin-feedback-dock"
+      class:stacked
+      bind:clientHeight={feedbackDockHeight}
+    >
+      <AgentFeedbackBar
+        scope={feedbackScope}
+        count={markedFeedback.length}
+        projectCount={projectMarkedFeedback.length}
+        notice={feedbackNotice}
+        fallback={clipboardFallback}
+        onScopeChange={(scope) => { feedbackScope = scope; }}
+        onCopyAll={() => copyFeedback(markedFeedback)}
+      />
+    </div>
   {/if}
   {/if}
 
@@ -1510,78 +1503,27 @@
     color: var(--foreground, inherit);
   }
 
-  .feedback-batch {
-    position: relative;
+  /* The agent-comments dock (AgentFeedbackBar). `.review-margin` fills a
+     non-scrolling, fixed-height rail container in every shell — native
+     (overflow-hidden flex child), hosted overlay (absolute top/bottom of
+     the sticky aside) and hosted docked (height: 100%) — so `absolute;
+     bottom: 0` is the rail's visual bottom in all three; `sticky` would
+     look for a scrolling ancestor and find the document instead. The
+     stacked bottom sheet is the one place the margin itself is in a
+     scroller, so there the dock rides the sheet's bottom edge. Above
+     cards (z 1) and the tray (z 2); the reanchor overlay is lifted above
+     it via --agent-feedback-dock-height. */
+  .review-margin-feedback-dock {
+    position: absolute;
+    bottom: 0;
+    left: 0;
+    right: 0;
     z-index: 4;
-    margin: 8px 12px;
-    padding: 8px;
-    border: 1px solid color-mix(in oklch, var(--primary) 32%, var(--border));
-    border-radius: 6px;
-    background: color-mix(in oklch, var(--primary) 5%, var(--review-card-surface, var(--background)));
-    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
   }
 
-  .feedback-batch-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 6px;
-  }
-
-  .feedback-batch-row + .feedback-batch-row {
-    margin-top: 6px;
-  }
-
-  .feedback-batch strong {
-    font-size: 0.72rem;
-    font-weight: 650;
-  }
-
-  .feedback-batch select,
-  .feedback-batch button {
-    min-height: 26px;
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    background: var(--background);
-    color: var(--foreground);
-    padding: 3px 7px;
-    font: inherit;
-    font-size: 0.68rem;
-  }
-
-  .feedback-batch button {
-    flex: 1;
-    cursor: pointer;
-  }
-
-  .feedback-batch button:hover:not(:disabled) {
-    background: var(--muted);
-  }
-
-  .feedback-batch button:disabled {
-    opacity: 0.45;
-    cursor: default;
-  }
-
-  .feedback-notice {
-    margin: 6px 0 0;
-    color: var(--muted-foreground);
-    font-size: 0.68rem;
-    line-height: 1.3;
-  }
-
-  .feedback-fallback {
-    box-sizing: border-box;
-    width: 100%;
-    min-height: 76px;
-    margin-top: 6px;
-    resize: vertical;
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    background: var(--background);
-    color: var(--foreground);
-    padding: 6px;
-    font: 0.66rem/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
+  .review-margin-feedback-dock.stacked {
+    position: sticky;
+    margin-top: 8px;
   }
 
   /* Orphan tray (§2), pinned at the rail top (below the rail header row,
@@ -1817,7 +1759,7 @@
   /* Absolute for the same non-scrolling-rail reason as the pill. */
   .review-margin-reanchor-overlay {
     position: absolute;
-    bottom: 8px;
+    bottom: calc(8px + var(--agent-feedback-dock-height, 0px));
     left: 12px;
     right: 12px;
     padding: 10px 12px;

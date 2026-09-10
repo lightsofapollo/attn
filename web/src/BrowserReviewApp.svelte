@@ -35,6 +35,8 @@
   import PanelRightOpen from '@lucide/svelte/icons/panel-right-open';
   import Editor from './lib/Editor.svelte';
   import HtmlViewer from './lib/HtmlViewer.svelte';
+  import HtmlAnnotateToggle from './lib/HtmlAnnotateToggle.svelte';
+  import { isHtmlAnnotateHotkey } from './lib/keyboard';
   import HtmlCommentComposer from './lib/HtmlCommentComposer.svelte';
   import type {
     HtmlAnnotationBridge,
@@ -294,11 +296,27 @@
       toggleRail();
       return;
     }
+    // ⌘⇧N enters / leaves annotate mode on an HTML document (attn-wrf3). Same
+    // chord as the native shell; a no-op on a document that cannot take a note.
+    if (isHtmlAnnotateHotkey(event)) {
+      if (!htmlAnnotatable) return;
+      event.preventDefault();
+      toggleHtmlAnnotateMode();
+      return;
+    }
     // Escape steps back from a click-opened thread — but never while a
     // composer, prompt, or text field owns the keyboard.
     if (event.key === 'Escape' && !commentComposer && !suggestionComposer && !namePromptOpen) {
       const target = event.target;
       if (target instanceof HTMLElement && target.closest('input, textarea, [role="dialog"]')) return;
+      // Annotate mode is the layer beneath every composer and dialog: with
+      // nothing above it, Escape leaves the mode (Topmost-Escape) before it
+      // touches thread focus.
+      if (htmlAnnotateMode && !htmlComposer && !mobileReviewOpen) {
+        event.preventDefault();
+        htmlAnnotateMode = false;
+        return;
+      }
       if (reviewStore.dismissFocusStep()) event.preventDefault();
     }
   }
@@ -1099,6 +1117,30 @@
     }
   });
 
+  /**
+   * Annotate mode (attn-wrf3): OFF by default for every HTML document, a
+   * shared one included. The page stays fully interactive until the person
+   * presses the pinned note toggle (or ⌘⇧N); the mode then stays on until
+   * they turn it off — submitting or cancelling a note does not exit it.
+   *
+   * Reset on a FILE switch, not on a republish of the same file: the frame is
+   * rebuilt either way, but a person annotating a dashboard should not be
+   * dropped back to reading because the owner saved. Parity with native.
+   */
+  let htmlAnnotateMode = $state(false);
+  let lastHtmlAnnotateFileId: string | null = null;
+  $effect(() => {
+    const fileId = displayedDocType === 'html' ? displayedSnapshot?.fileId ?? null : null;
+    if (fileId === lastHtmlAnnotateFileId) return;
+    lastHtmlAnnotateFileId = fileId;
+    htmlAnnotateMode = false;
+  });
+
+  function toggleHtmlAnnotateMode(): void {
+    if (!htmlAnnotatable) return;
+    htmlAnnotateMode = !htmlAnnotateMode;
+  }
+
   /** Threads become renderable anchors; the thread id doubles as the anchorId. */
   const htmlRenderableAnchors = $derived.by(() => {
     if (displayedDocType !== 'html') return [];
@@ -1141,11 +1183,12 @@
     bridge.setHoveredAnchor(thread?.id ?? null);
   });
 
-  // Hover chrome is always live in an annotating frame; taking the CLICK — so
-  // the page's own links stop firing — waits until the document is genuinely
-  // reviewable.
+  // The frame's element-annotation surface (hover outline, breadcrumb chip,
+  // click-to-comment) is live only while the document can take a comment AND
+  // the person has asked to annotate. Either half alone leaves the page's own
+  // clicks with the page.
   $effect(() => {
-    htmlBridge?.setInspect(htmlAnnotatable);
+    htmlBridge?.setInspect(htmlAnnotatable && htmlAnnotateMode);
   });
 
   function applyHtmlGeometry(results: { anchorId: string; rects: { y: number }[] }[]): void {
@@ -1765,6 +1808,10 @@
                      comment margin mounts alongside; otherwise this stays the
                      read-only, script-free viewer it has always been.
                      @see planning/collab/html-annotation.md §1, §4 -->
+                <!-- The toggle pins to the document's own viewport. On phones
+                     the Review dock is fixed bottom-CENTRE; this sits bottom-
+                     RIGHT at the same offset, so the two share a baseline and
+                     never a footprint. -->
                 <HtmlViewer
                   content={displayedContent ?? ''}
                   allowScripts={false}
@@ -1772,7 +1819,13 @@
                   annotate={htmlAnnotatable}
                   annotationEvents={htmlAnnotationEvents}
                   onBridge={(bridge) => (htmlBridge = bridge)}
-                />
+                >
+                  <HtmlAnnotateToggle
+                    active={htmlAnnotateMode}
+                    hidden={!htmlAnnotatable}
+                    onToggle={toggleHtmlAnnotateMode}
+                  />
+                </HtmlViewer>
               {:else}
                 <Editor
                   markdown={reviewerCollabSeed?.markdown ?? displayedContent ?? ''}

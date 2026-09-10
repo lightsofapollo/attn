@@ -707,6 +707,11 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
         })
         .with_custom_protocol("attn".to_string(), move |_webview_id, request| {
             let uri = request.uri().to_string();
+            let request_origin = request
+                .headers()
+                .get("origin")
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned);
             if uri == "attn://app"
                 || uri == "attn://app/"
                 || uri.starts_with("attn://app/index.html")
@@ -817,6 +822,20 @@ fn run_daemon(cli: Cli, path: PathBuf, resident_mode: bool) -> Result<()> {
                     // exfiltrate them. @see planning/complete-plan.md §5.
                     if matches!(ext.as_deref(), Some("md" | "markdown" | "txt")) {
                         builder = builder.header("Access-Control-Allow-Origin", "*");
+                    } else if let Some(origin) = request_origin
+                        .as_deref()
+                        .filter(|origin| is_app_document_origin(origin))
+                    {
+                        // Every other type (HTML included) is readable ONLY by
+                        // the app document itself — the header "Copy file
+                        // contents" button (attn-926b) fetches the raw bytes
+                        // back. The grant is scoped to the app origin, never
+                        // `*`, so the sandboxed HtmlViewer iframe (opaque
+                        // origin, sends `Origin: null`) still gets no
+                        // CORS-clean read of local files.
+                        builder = builder
+                            .header("Access-Control-Allow-Origin", origin)
+                            .header("Vary", "Origin");
                     }
 
                     // HTML is rendered inside a sandboxed iframe (HtmlViewer).
@@ -2052,6 +2071,17 @@ fn generate_ipc_token() -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// True for the origin of attn's own UI document: the embedded
+/// `attn://app` page, or (debug builds only) the Vite dev server that
+/// `task dev` serves it from. Used to scope CORS grants on the `attn://`
+/// file handler so only our shell — never a sandboxed document frame —
+/// can read arbitrary local files back.
+fn is_app_document_origin(origin: &str) -> bool {
+    origin == "attn://app"
+        || (cfg!(debug_assertions)
+            && (origin.starts_with("http://localhost:") || origin.starts_with("http://127.0.0.1:")))
+}
+
 fn mime_from_extension(path: &std::path::Path) -> &'static str {
     // Lowercase the extension so `.HTML`, `.PNG`, etc. match (mirrors
     // `files::detect_file_type`, which lowercases before matching).
@@ -2153,6 +2183,19 @@ fn build_page_html(init_payload_json: &str, theme: &str, typeset: &str) -> Strin
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn app_document_origin_grants_only_the_shell() {
+        assert!(super::is_app_document_origin("attn://app"));
+        // The sandboxed HtmlViewer iframe (opaque origin) must never qualify.
+        assert!(!super::is_app_document_origin("null"));
+        assert!(!super::is_app_document_origin("attn://localhost"));
+        assert!(!super::is_app_document_origin("https://evil.example"));
+        assert_eq!(
+            super::is_app_document_origin("http://localhost:5173"),
+            cfg!(debug_assertions)
+        );
+    }
+
     use super::*;
 
     #[test]

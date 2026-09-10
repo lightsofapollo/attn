@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onMount, type Snippet } from 'svelte';
   import { markdownSourceUrl } from './markdown-layer';
   import { htmlViewerSandbox } from './html-viewer-sandbox';
   import {
@@ -39,6 +39,13 @@
     annotationEvents?: AnnotationBridgeEvents;
     /** Handed the live bridge so the parent can push anchors and focus. */
     onBridge?: (bridge: HtmlAnnotationBridge | null) => void;
+    /**
+     * Shell chrome pinned INSIDE the document viewport — the annotate toggle
+     * (attn-wrf3). Rendered above the frame in the wrapper's own stacking
+     * context, so it tracks the visible document rather than the window and
+     * stays clear of the rail and header. Never part of the frame.
+     */
+    children?: Snippet;
   }
 
   let {
@@ -50,6 +57,7 @@
     annotate = false,
     annotationEvents,
     onBridge,
+    children,
   }: Props = $props();
 
   let loading = $state(true);
@@ -206,4 +214,5 @@
       onload={() => (loading = false)}
     ></iframe>
   {/if}
+  {@render children?.()}
 </div>

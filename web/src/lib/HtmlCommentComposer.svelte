@@ -20,6 +20,7 @@
 -->
 <script lang="ts">
   import { shouldSubmitOnEnter } from './review/composer-keys';
+  import AssignToAgentCheckbox from './AssignToAgentCheckbox.svelte';
   import type { AnchorProposal } from './review/doc-protocol';
   import type { Anchor, ContentHash, FileId, SnapshotId } from './types';
 
@@ -160,10 +161,7 @@
     placeholder="Add a comment&hellip;"
     onkeydown={handleBodyKeydown}
   ></textarea>
-  <label class="mt-2 flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
-    <input bind:checked={forAgent} type="checkbox" class="accent-primary" />
-    Mark for agent
-  </label>
+  <AssignToAgentCheckbox bind:checked={forAgent} />
   {#if submitError}
     <p class="mt-2 text-xs text-destructive" role="alert" data-slot="comment-composer-error">
       {submitError}

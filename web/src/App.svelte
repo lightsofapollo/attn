@@ -22,7 +22,7 @@
     SearchResultItem,
     UpdatePayload,
   } from './lib/types';
-  import { initKeyboard } from './lib/keyboard';
+  import { initKeyboard, isHtmlAnnotateHotkey } from './lib/keyboard';
   import { checkForUpdate, upgradeHint } from './lib/update-check';
   import { netRemovedPaths } from './lib/tree-ops';
   import {
@@ -64,6 +64,8 @@
   import PenLineIcon from '@lucide/svelte/icons/pen-line';
   import Share2Icon from '@lucide/svelte/icons/share-2';
   import ExternalLinkIcon from '@lucide/svelte/icons/external-link';
+  import CopyIcon from '@lucide/svelte/icons/copy';
+  import CheckIcon from '@lucide/svelte/icons/check';
   import PanelRightIcon from '@lucide/svelte/icons/panel-right';
   import SunMoonIcon from '@lucide/svelte/icons/sun-moon';
   import SettingsIcon from '@lucide/svelte/icons/settings';
@@ -75,6 +77,7 @@
   import ImageViewer from './lib/ImageViewer.svelte';
   import MediaPlayer from './lib/MediaPlayer.svelte';
   import HtmlViewer from './lib/HtmlViewer.svelte';
+  import HtmlAnnotateToggle from './lib/HtmlAnnotateToggle.svelte';
   import DirectoryOverview from './lib/DirectoryOverview.svelte';
   import { nativeFileIconResolver } from './lib/icon-resolver';
   import CommandPalette from './lib/CommandPalette.svelte';
@@ -124,6 +127,7 @@
   import {
     detectFileType,
     extractStructureFromMarkdown,
+    loadFileTextFromPath,
     loadMarkdownFromPath,
     markdownSourceUrl,
     resolveImageSrc,
@@ -134,6 +138,11 @@
   import ReviewMargin from './lib/ReviewMargin.svelte';
   import BrandMark from './lib/BrandMark.svelte';
   import SaveChip from './lib/SaveChip.svelte';
+  import {
+    copyFileTitle,
+    createCopyFileController,
+    type CopyFileState,
+  } from './lib/copy-file-contents';
   import { brandPlacement, reservesWindowControls } from './lib/shell';
   import {
     SAVE_STATE_AUTOSAVED,
@@ -517,12 +526,74 @@
     htmlAnnotationSnapshot?.annotation === 'html_selectors_v1',
   );
 
-  // Hover chrome is always live in an annotating frame; taking the CLICK is
-  // what has to wait for a real review, or an unshared page would stop
-  // following its own links the moment attn rendered it.
-  $effect(() => {
-    htmlBridge?.setInspect(htmlAnnotatable);
+  /**
+   * Annotate mode (attn-wrf3): OFF by default for every HTML document, a
+   * shared one included. The page stays fully interactive — its own links,
+   * buttons, tabs and inputs keep working — until the person presses the
+   * pinned note toggle (or ⌘⇧N). The mode then stays on until they turn it
+   * off; submitting or cancelling a note does not exit it.
+   */
+  let htmlAnnotateMode = $state(false);
+
+  /**
+   * Identity of the HTML document ON SCREEN, for resetting the mode.
+   *
+   * Keyed to the document, not the snapshot: a republish of the same file
+   * keeps the mode (the bridge re-sends it after the frame reloads), while
+   * switching to another file — or to a markdown one — starts the next
+   * document interactive, as every document starts.
+   */
+  let htmlAnnotateDocKey = $derived.by((): string | null => {
+    if (isReviewerViewingHtmlSnapshot) return `snapshot:${reviewSnapshot?.fileId ?? ''}`;
+    if (activeFileType === 'html') return `path:${activePath}`;
+    return null;
   });
+  let lastHtmlAnnotateDocKey: string | null = null;
+  $effect(() => {
+    const key = htmlAnnotateDocKey;
+    if (key === lastHtmlAnnotateDocKey) return;
+    lastHtmlAnnotateDocKey = key;
+    htmlAnnotateMode = false;
+  });
+
+  // The frame's element-annotation surface (hover outline, breadcrumb chip,
+  // click-to-comment) is live only while the document can take a comment AND
+  // the person has asked to annotate. Either half alone leaves the page's own
+  // clicks with the page.
+  $effect(() => {
+    htmlBridge?.setInspect(htmlAnnotatable && htmlAnnotateMode);
+  });
+
+  function toggleHtmlAnnotateMode(): void {
+    if (!htmlAnnotatable) return;
+    // Leaving the mode keeps an open composer — the person may be typing —
+    // and the frame takes its own chip down on `inspect: false`. Cancelling
+    // the composer still sends `dismissSelection`, exactly as before.
+    htmlAnnotateMode = !htmlAnnotateMode;
+  }
+
+  /** `⌘⇧N` toggles annotate mode; `Esc` leaves it when nothing sits above it. */
+  function handleGlobalHtmlAnnotateHotkeys(e: KeyboardEvent): void {
+    if (e.defaultPrevented) return;
+    if (isHtmlAnnotateHotkey(e)) {
+      // `initKeyboard` owns the chord; this only exists so a shell that runs
+      // without it (diagnostic modes) still answers. Guarded by
+      // `defaultPrevented` above so the two never double-fire.
+      if (!htmlAnnotatable) return;
+      e.preventDefault();
+      toggleHtmlAnnotateMode();
+      return;
+    }
+    if (e.key !== 'Escape' || !htmlAnnotateMode) return;
+    // Topmost-Escape: a composer or any dialog is the topmost layer and takes
+    // this press itself; the mode is the layer beneath them all.
+    if (htmlComposer || commandPaletteOpen || shortcutsOpen || settingsOpen
+      || shareDialogOpen || namePromptOpen) return;
+    if (document.querySelector('[role="dialog"]:not([data-state="closed"]), [role="alertdialog"]:not([data-state="closed"])')) return;
+    if (isEditableShortcutTarget(e.target)) return;
+    e.preventDefault();
+    htmlAnnotateMode = false;
+  }
 
   /**
    * Why this HTML document cannot take a comment right now.
@@ -628,6 +699,9 @@
       window as Window & { __attn_html_debug__?: Record<string, unknown> }
     ).__attn_html_debug__ = {
       annotatable: htmlAnnotatable,
+      // The person's switch, separate from annotatability: E2E has to tell
+      // "the toggle never showed" from "the toggle showed and did nothing".
+      annotateMode: htmlAnnotateMode,
       snapshotId: htmlAnnotationSnapshot?.snapshotId ?? null,
       composerOpen: htmlComposer !== null,
       // Geometry crosses a MessagePort from an origin the shell cannot inspect,
@@ -2611,6 +2685,46 @@
     editorDirty = dirty;
   }
 
+  // ————— "Copy file contents" (header) —————
+  // One glyph for every document the viewport can show. The source follows
+  // the viewport's own branch order (`isReviewerWaiting` → HTML snapshot →
+  // markdown snapshot → local file) so the clipboard always gets what is on
+  // screen, and it is read at click time — never cached — because the edit
+  // buffer moves under it.
+  let copyFileState = $state<CopyFileState>({ kind: 'idle' });
+  let copyFileTitleText = $derived(copyFileTitle(copyFileState));
+  // Text documents only: images, video and audio have no text to copy, so
+  // the button would only ever fail there.
+  const copyFileTextTypes: ReadonlySet<FileType> = new Set(['markdown', 'html', 'unsupported']);
+  let copyFileAvailable = $derived(
+    isReviewerInRoom
+      ? reviewSnapshotContent !== null
+      : Boolean(activePath) && copyFileTextTypes.has(activeFileType),
+  );
+
+  async function readActiveFileText(): Promise<string> {
+    if (isReviewerViewingHtmlSnapshot || isReviewerViewingSnapshot) {
+      return reviewSnapshotContent ?? '';
+    }
+    if (!activePath) throw new Error('No file is open');
+    if (activeFileType === 'markdown') {
+      // The live buffer while editing (unsaved keystrokes included); the
+      // file as loaded otherwise, so a view-mode copy is byte-faithful rather
+      // than a ProseMirror re-serialisation.
+      if (mode === 'edit' && editorRef) return editorRef.getMarkdown();
+      return rawMarkdown;
+    }
+    // HTML and every other local type: the bytes are not in memory (HtmlViewer
+    // streams them into a sandboxed iframe), so read them back from disk.
+    return loadFileTextFromPath(activePath);
+  }
+
+  const copyFileController = createCopyFileController({
+    source: readActiveFileText,
+    onChange: (state) => { copyFileState = state; },
+  });
+  $effect(() => () => copyFileController.dispose());
+
   function deferExternalReload(path: string, contentMtimeMs?: number): void {
     if (!path) return;
     deferredReloadMtimeByPath.set(path, typeof contentMtimeMs === 'number' ? contentMtimeMs : null);
@@ -3602,6 +3716,9 @@
       onSuggestionComposer: () => {
         openSuggestionComposer();
       },
+      onToggleHtmlAnnotate: () => {
+        toggleHtmlAnnotateMode();
+      },
       // Three-way apply hooks (attn-nnj.8.3). Read the verdict from the
       // store each time so we always operate on the currently-open card;
       // mirror the same accept/keep/edit-trigger/cancel semantics the
@@ -3676,7 +3793,13 @@
         annotate={htmlAnnotatable}
         annotationEvents={htmlAnnotationEvents}
         onBridge={(bridge) => (htmlBridge = bridge)}
-      />
+      >
+        <HtmlAnnotateToggle
+          active={htmlAnnotateMode}
+          hidden={!htmlAnnotatable}
+          onToggle={toggleHtmlAnnotateMode}
+        />
+      </HtmlViewer>
     {:else if isReviewerViewingSnapshot}
       <!-- Reviewer mode: render the owner's shared snapshot. Read-only
            normally; during a live session collab makes it editable so the
@@ -3760,7 +3883,16 @@
         annotate={true}
         annotationEvents={htmlAnnotationEvents}
         onBridge={(bridge) => (htmlBridge = bridge)}
-      />
+      >
+        <!-- Shown only once the document can take a note (shared, capability
+             declared). Before that the page is simply a page, and the
+             selection pill is the one that explains why. -->
+        <HtmlAnnotateToggle
+          active={htmlAnnotateMode}
+          hidden={!htmlAnnotatable}
+          onToggle={toggleHtmlAnnotateMode}
+        />
+      </HtmlViewer>
     {:else if activeFileType === 'directory'}
       <DirectoryOverview
         path={activePath}
@@ -3871,6 +4003,31 @@
       title={activePath}
     >{headerDocumentName}</span>
     <div class="ml-auto flex h-full min-w-0 shrink-0 items-center gap-1.5">
+      {#if copyFileAvailable}
+        <!-- Copy the document as text — every type the viewport renders,
+             shared snapshots included. The glyph changes per state (copy →
+             check), never just the colour, and "Copied" is real live-region
+             text so the swap is not silent. A failure keeps the copy glyph
+             and puts the reason on `title` for the same window; no dialog. -->
+        <button
+          type="button"
+          class="inline-flex size-7 shrink-0 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+          data-slot="native-copy-file"
+          data-state={copyFileState.kind}
+          aria-label={copyFileTitleText}
+          title={copyFileTitleText}
+          onclick={() => void copyFileController.copy()}
+        >
+          {#if copyFileState.kind === 'copied'}
+            <CheckIcon class="size-3.5" aria-hidden="true" />
+          {:else}
+            <CopyIcon class="size-3.5" aria-hidden="true" />
+          {/if}
+        </button>
+        <span class="sr-only" role="status" aria-live="polite">
+          {copyFileState.kind === 'copied' ? 'Copied' : ''}
+        </span>
+      {/if}
       {#if !isReviewerViewingSnapshot && mode === 'edit' && activeFileType === 'markdown'}
         <!-- Icon, not the sentence — the same move the mobile edit bar made in
              attn-n01r.5, now applied to the header. Two full sentences ("Saved
@@ -4086,7 +4243,7 @@
 {/if}
 
 <svelte:window
-  onkeydown={(e) => { handleGlobalShortcutsHelpHotkey(e); handleGlobalRightRailHotkey(e); }}
+  onkeydown={(e) => { handleGlobalShortcutsHelpHotkey(e); handleGlobalHtmlAnnotateHotkeys(e); handleGlobalRightRailHotkey(e); }}
   onfocus={() => { windowFocused = true; }}
   onblur={() => { windowFocused = false; }}
 />
@@ -4100,6 +4257,7 @@
   hasCommentComposer={true}
   hasSuggestionComposer={true}
   hasToggleReviewPanel={true}
+  hasHtmlAnnotate={true}
 />
 <ShareDialog
   bind:open={shareDialogOpen}

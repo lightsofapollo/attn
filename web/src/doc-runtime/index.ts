@@ -76,13 +76,15 @@ let lastMoveTarget: Element | null = null;
 let pendingRange: Range | null = null;
 let scopeSeq = 0;
 /**
- * Whether a click on the document body commits to a comment.
+ * Whether the element-annotation surface is live: hover outline, breadcrumb
+ * chip, and click-to-comment.
  *
- * Off until the shell says otherwise. Hover chrome is always live — the point
- * of the redesign is that the annotation model is *visible* — but swallowing
- * every click is only defensible once the document is genuinely under review.
- * An unshared page keeps its links, buttons and form fields working, and the
- * chip is the affordance that still offers to comment.
+ * Off until the shell says otherwise, and the shell says so only while the
+ * document can take a comment AND the person has turned annotate mode on
+ * (attn-wrf3). Off is the default even under review: swallowing every click
+ * breaks a dashboard's tabs, a prototype's buttons and a demo's links, so the
+ * page keeps them until someone asks to annotate. The text-selection pill is
+ * independent of this switch and works in both modes.
  */
 let inspectEnabled = false;
 
@@ -700,6 +702,13 @@ function outline(el: Element | undefined): void {
 }
 
 function pickScope(scopeId: string): void {
+  // Every caller — a page click, the chip, a breadcrumb segment, the shell
+  // replaying one — funnels through here, so this is the one gate that keeps
+  // a proposal from leaving the frame after the mode was turned off. The chip
+  // handlers bypass `onDocumentClick`, and a queued click can land after the
+  // `inspect: false` that hid the chip; without this a composer would open
+  // for a document the person had just handed back to its own scripts.
+  if (!inspectEnabled) return;
   const el = scopeElements.get(scopeId);
   if (!el) return;
   hideHover();
@@ -922,13 +931,23 @@ function handleShellMessage(message: ShellMessage): void {
     case 'inspect': {
       const enabled = message.enabled === true;
       // Turning inspection off has to take DOWN the chrome already on screen,
-      // not merely stop raising more. A stopped or revoked room leaves a
-      // visible chip whose own click handler bypasses `onDocumentClick` — so it
-      // would go on swallowing page clicks and emitting proposals for a
-      // document that is no longer reviewable.
-      if (inspectEnabled && !enabled) {
+      // not merely stop raising more: the person pressing "Done annotating"
+      // mid-hover, or a stopped / revoked room, leaves a visible chip whose own
+      // click handler bypasses `onDocumentClick` — so it would go on swallowing
+      // page clicks and emitting proposals for a document that is no longer
+      // being annotated. Unconditional rather than edge-triggered: the shell
+      // re-sends its current mode after every handshake, and a frame whose
+      // state has drifted must land on what the shell said, not on what it
+      // last remembered.
+      if (!enabled) {
+        // `hideHover` also cancels a pending grace-period timer, so no hide
+        // scheduled before the switch can fire into the new state.
         hideHover();
         currentScopeId = null;
+        // Forgetting the offered scopes closes the last route to a late
+        // proposal: a `pickScope` that slips past the gate above finds nothing
+        // to pick.
+        scopeElements.clear();
       }
       inspectEnabled = enabled;
       break;

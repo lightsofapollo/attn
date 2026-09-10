@@ -41,7 +41,7 @@
 -->
 
 <script lang="ts">
-  import { tick } from 'svelte';
+  import { tick, untrack } from 'svelte';
   import { Selection } from 'prosemirror-state';
   import type { EditorView } from 'prosemirror-view';
   import ReviewMarginCard from './ReviewMarginCard.svelte';
@@ -72,11 +72,22 @@
 
   import { isThreadActive } from './review/thread-visibility';
   import {
+    markedFeedbackThreads,
+    serializeFeedbackThreads,
+  } from './review/feedback-copy';
+  import {
+    feedbackRoutingUpdate,
+    loadBrowserFeedbackRouting,
+    routingFromStorageEvent,
+    setBrowserFeedbackMark,
+  } from './review/feedback-routing';
+  import {
     reviewAcceptSuggestion,
     reviewCreateComment,
     reviewRejectSuggestion,
     reviewReopenComment,
     reviewResolveComment,
+    reviewSetFeedbackMark,
   } from './ipc';
   import type {
     Anchor,
@@ -125,6 +136,8 @@
     /** Hosted reopen authority (attn-bb6t.5). Same shape/gating as resolve. */
     onReopenComment?: (threadId: string) => Promise<void> | void;
     onReplyComment?: (anchor: Anchor, body: string, threadId: string) => Promise<void> | void;
+    /** Native routing is CLI-visible; browser routing remains in this origin. */
+    feedbackRouting?: 'native' | 'browser';
   }
 
   // Default cap is 50 per the task spec / §6 performance rule.
@@ -139,6 +152,7 @@
     onResolveComment,
     onReopenComment,
     onReplyComment,
+    feedbackRouting = 'native',
   }: Props = $props();
 
   // ---------------------------------------------------------------------------
@@ -184,6 +198,55 @@
   const resolutions = $derived(reviewStore.anchorResolutions);
   const focusEventId = $derived(reviewStore.focusEventId);
   const hoveredEventId = $derived(reviewStore.hoveredEventId);
+  const feedbackRoomId = $derived(reviewStore.currentRoomId);
+  const feedbackRoutes = $derived(
+    feedbackRoomId === null ? {} : (reviewStore.feedbackRoutingByRoom[feedbackRoomId] ?? {}),
+  );
+  let feedbackScope = $state<'file' | 'project'>('file');
+  let selectedFeedbackIds = $state<Set<string>>(new Set());
+  let feedbackNotice = $state('');
+  let clipboardFallback = $state('');
+
+  const projectScopeThreads = $derived.by(() => {
+    const roomId = feedbackRoomId;
+    if (roomId === null) return [];
+    return reviewStore.threads.filter((thread) => thread.rootEvent.meta.roomId === roomId);
+  });
+  const scopeThreads = $derived(feedbackScope === 'file' ? threads : projectScopeThreads);
+  const projectMarkedFeedback = $derived(
+    markedFeedbackThreads(projectScopeThreads, feedbackRoutes),
+  );
+  const markedFeedback = $derived(markedFeedbackThreads(scopeThreads, feedbackRoutes));
+  const selectedFeedback = $derived(
+    markedFeedback.filter((thread) => selectedFeedbackIds.has(thread.id)),
+  );
+
+  $effect(() => {
+    const roomId = feedbackRoomId;
+    if (feedbackRouting !== 'browser' || roomId === null || typeof window === 'undefined') return;
+    try {
+      untrack(() => {
+        reviewStore.applyFeedbackRouting(
+          feedbackRoutingUpdate(roomId, loadBrowserFeedbackRouting(roomId)),
+        );
+      });
+      feedbackNotice = '';
+    } catch (error) {
+      feedbackNotice = error instanceof Error ? error.message : 'Could not load For-agent marks';
+    }
+    const onStorage = (event: StorageEvent): void => {
+      const routing = routingFromStorageEvent(roomId, event);
+      if (routing) reviewStore.applyFeedbackRouting(feedbackRoutingUpdate(roomId, routing));
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  });
+
+  $effect(() => {
+    const eligible = new Set(markedFeedback.map((thread) => thread.id));
+    const next = new Set([...selectedFeedbackIds].filter((id) => eligible.has(id)));
+    if (next.size !== selectedFeedbackIds.size) selectedFeedbackIds = next;
+  });
 
   // Rail mode (hidden/collapsed/expanded) is derived on the store so
   // App.svelte's aside width and our rendering agree. `collapsed` is the
@@ -439,7 +502,59 @@
    */
   function clampRailTop(y: number): number {
     const viewportY = y + lastContainerTop;
-    return viewportY < 0 ? y : Math.max(y, COLLAPSED_RAIL_TOP_CLEARANCE);
+    const clearance = projectMarkedFeedback.length > 0 ? 88 : COLLAPSED_RAIL_TOP_CLEARANCE;
+    return viewportY < 0 ? y : Math.max(y, clearance);
+  }
+
+  function isForAgent(thread: Thread): boolean {
+    return feedbackRoutes[thread.id]?.marked === true;
+  }
+
+  function setFeedbackSelected(threadId: string, selected: boolean): void {
+    const next = new Set(selectedFeedbackIds);
+    if (selected) next.add(threadId);
+    else next.delete(threadId);
+    selectedFeedbackIds = next;
+  }
+
+  async function setForAgent(thread: Thread, marked: boolean): Promise<void> {
+    const roomId = feedbackRoomId;
+    if (roomId === null) return;
+    feedbackNotice = '';
+    try {
+      if (feedbackRouting === 'browser') {
+        const routing = setBrowserFeedbackMark(roomId, thread.id, marked);
+        reviewStore.applyFeedbackRouting(feedbackRoutingUpdate(roomId, routing));
+      } else {
+        reviewSetFeedbackMark(roomId, thread.id, marked);
+      }
+      setFeedbackSelected(thread.id, marked);
+    } catch (error) {
+      feedbackNotice = error instanceof Error ? error.message : 'Could not update For-agent mark';
+    }
+  }
+
+  function feedbackPacket(targets: Thread[]): string {
+    return serializeFeedbackThreads(targets, {
+      routes: feedbackRoutes,
+      snapshots: reviewStore.snapshots,
+      events: reviewStore.events,
+      displayNameFor: (participantId) => reviewStore.displayNameFor(participantId),
+      kindFor: (participantId) => reviewStore.participantKindFor(participantId),
+    });
+  }
+
+  async function copyFeedback(targets: Thread[]): Promise<void> {
+    const packet = feedbackPacket(targets);
+    feedbackNotice = '';
+    clipboardFallback = '';
+    try {
+      await navigator.clipboard.writeText(packet);
+      feedbackNotice = `Copied ${targets.length} feedback ${targets.length === 1 ? 'item' : 'items'}`;
+    } catch {
+      clipboardFallback = packet;
+      feedbackNotice = 'Clipboard access was blocked. Copy the packet below.';
+    }
   }
 
   // Build the layout inputs from anchored threads AND layout-visible
@@ -1062,6 +1177,41 @@
       {/if}
     {/each}
   {:else}
+  {#if projectMarkedFeedback.length > 0}
+    <section class="feedback-batch" aria-label="Agent feedback copy controls">
+      <div class="feedback-batch-row">
+        <strong>{markedFeedback.length} for agent</strong>
+        <select bind:value={feedbackScope} aria-label="Feedback copy scope">
+          <option value="file">This file</option>
+          <option value="project">Whole project</option>
+        </select>
+      </div>
+      <div class="feedback-batch-row">
+        <button
+          type="button"
+          disabled={selectedFeedback.length === 0}
+          onclick={() => { void copyFeedback(selectedFeedback); }}
+        >Copy selected</button>
+        <button
+          type="button"
+          disabled={markedFeedback.length === 0}
+          onclick={() => { void copyFeedback(markedFeedback); }}
+        >Copy all</button>
+      </div>
+      {#if feedbackNotice}
+        <p class="feedback-notice" role="status">{feedbackNotice}</p>
+      {/if}
+      {#if clipboardFallback}
+        <textarea
+          class="feedback-fallback"
+          readonly
+          value={clipboardFallback}
+          aria-label="Agent feedback packet"
+          onclick={(event) => event.currentTarget.select()}
+        ></textarea>
+      {/if}
+    </section>
+  {/if}
   <!-- Orphan tray: sticky-top per §2 -->
   {#if orphanThreads.length > 0}
     <section
@@ -1093,6 +1243,11 @@
               onResolve={() => { void resolveThread(t.id); }}
               onReply={(body) => replyToThread(t, body)}
               pendingDismiss={locallyDismissed.has(t.id)}
+              forAgent={isForAgent(t)}
+              selectedForAgent={selectedFeedbackIds.has(t.id)}
+              onToggleForAgent={(marked) => setForAgent(t, marked)}
+              onToggleFeedbackSelection={(selected) => setFeedbackSelected(t.id, selected)}
+              onCopyFeedback={() => copyFeedback([t])}
               onRequestReanchor={() => handleRequestReanchor(t.rootEvent.meta.eventId)}
               onDiscardStale={() => handleDiscardStale(t.rootEvent.meta.eventId)}
               onCancelReanchor={handleCancelReanchor}
@@ -1130,6 +1285,11 @@
               onResolve={() => { void resolveThread(t.id); }}
               onReply={(body) => replyToThread(t, body)}
               pendingDismiss={locallyDismissed.has(t.id)}
+              forAgent={isForAgent(t)}
+              selectedForAgent={selectedFeedbackIds.has(t.id)}
+              onToggleForAgent={(marked) => setForAgent(t, marked)}
+              onToggleFeedbackSelection={(selected) => setFeedbackSelected(t.id, selected)}
+              onCopyFeedback={() => copyFeedback([t])}
             />
           {:else if t.id === expandedResolvedId}
             <ReviewMarginCard
@@ -1209,6 +1369,11 @@
           onResolve={() => { void resolveThread(t.id); }}
           onReply={(body) => replyToThread(t, body)}
           pendingDismiss={locallyDismissed.has(t.id)}
+          forAgent={isForAgent(t)}
+          selectedForAgent={selectedFeedbackIds.has(t.id)}
+          onToggleForAgent={(marked) => setForAgent(t, marked)}
+          onToggleFeedbackSelection={(selected) => setFeedbackSelected(t.id, selected)}
+          onCopyFeedback={() => copyFeedback([t])}
         />
       </div>
     {:else if t && t.id === expandedResolvedId}
@@ -1343,6 +1508,80 @@
     overflow: visible;
     pointer-events: auto;
     color: var(--foreground, inherit);
+  }
+
+  .feedback-batch {
+    position: relative;
+    z-index: 4;
+    margin: 8px 12px;
+    padding: 8px;
+    border: 1px solid color-mix(in oklch, var(--primary) 32%, var(--border));
+    border-radius: 6px;
+    background: color-mix(in oklch, var(--primary) 5%, var(--review-card-surface, var(--background)));
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.08);
+  }
+
+  .feedback-batch-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 6px;
+  }
+
+  .feedback-batch-row + .feedback-batch-row {
+    margin-top: 6px;
+  }
+
+  .feedback-batch strong {
+    font-size: 0.72rem;
+    font-weight: 650;
+  }
+
+  .feedback-batch select,
+  .feedback-batch button {
+    min-height: 26px;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--background);
+    color: var(--foreground);
+    padding: 3px 7px;
+    font: inherit;
+    font-size: 0.68rem;
+  }
+
+  .feedback-batch button {
+    flex: 1;
+    cursor: pointer;
+  }
+
+  .feedback-batch button:hover:not(:disabled) {
+    background: var(--muted);
+  }
+
+  .feedback-batch button:disabled {
+    opacity: 0.45;
+    cursor: default;
+  }
+
+  .feedback-notice {
+    margin: 6px 0 0;
+    color: var(--muted-foreground);
+    font-size: 0.68rem;
+    line-height: 1.3;
+  }
+
+  .feedback-fallback {
+    box-sizing: border-box;
+    width: 100%;
+    min-height: 76px;
+    margin-top: 6px;
+    resize: vertical;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    background: var(--background);
+    color: var(--foreground);
+    padding: 6px;
+    font: 0.66rem/1.35 ui-monospace, SFMono-Regular, Menlo, monospace;
   }
 
   /* Orphan tray (§2), pinned at the rail top (below the rail header row,

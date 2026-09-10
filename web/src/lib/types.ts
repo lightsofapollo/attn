@@ -284,6 +284,15 @@ export interface ReviewCreateCommentMessage {
   roomId: RoomId;
   anchor: Anchor;
   body: string;
+  parentThreadId?: string;
+  forAgent?: boolean;
+}
+
+export interface ReviewSetFeedbackMarkMessage {
+  type: 'review_set_feedback_mark';
+  roomId: RoomId;
+  threadId: string;
+  marked: boolean;
 }
 
 export interface ReviewCreateSuggestionMessage {
@@ -404,6 +413,7 @@ export type IpcMessage =
   | ReviewShareMessage
   | ReviewJoinMessage
   | ReviewCreateCommentMessage
+  | ReviewSetFeedbackMarkMessage
   | ReviewCreateSuggestionMessage
   | ReviewAcceptSuggestionMessage
   | ReviewRejectSuggestionMessage
@@ -1234,6 +1244,23 @@ export interface ReviewUnreadChanged {
 export interface ReviewNotificationMuteChanged {
   roomId: RoomId;
   muted: boolean;
+}
+
+export interface FeedbackRoute {
+  marked: boolean;
+  revision: number;
+  updatedAt: number;
+}
+
+export interface FeedbackRoutingState {
+  v: 1;
+  threads: Record<string, FeedbackRoute>;
+}
+
+/** Native callback carrying the complete private routing map for one room. */
+export interface ReviewFeedbackRoutingChanged {
+  roomId: RoomId;
+  routing: FeedbackRoutingState;
 }
 
 /**

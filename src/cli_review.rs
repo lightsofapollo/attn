@@ -420,7 +420,7 @@ fn verdicts_json(report: &crate::review::store::VerdictsReport) -> Result<String
     serde_json::to_string(report).context("serialize verdict report")
 }
 
-fn set_attn_home_for_review(home: &Path) -> Result<()> {
+pub(crate) fn set_attn_home_for_review(home: &Path) -> Result<()> {
     let home = normalize_attn_home(home)?;
     // SAFETY: `attn review ...` handles this option before starting any local
     // worker threads. The value is then read synchronously by the daemon/store

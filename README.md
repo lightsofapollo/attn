@@ -111,6 +111,27 @@ For headless reviewers or agents:
 attn review join 'attn://review/<room-id>#key=<secret>' --as-agent reviewer
 ```
 
+### Feedback for coding agents
+
+Mark any unresolved margin comment **For agent**, then let a coding agent read
+the comment together with its file and anchor context:
+
+```bash
+attn feedback                    # readable snapshot for the current project
+attn feedback --json docs/       # versioned structured snapshot
+attn feedback --watch docs/      # initial snapshot, then flushed NDJSON changes
+```
+
+The one-shot command reads persisted local review state and works while the
+attn daemon is stopped. Watch mode uses the local daemon socket and exits with
+an actionable error if that daemon disconnects. Agents edit the original files
+with their normal tools; attn's file watcher refreshes the open document.
+
+Margin actions also support **Copy**, **Copy selected**, and **Copy all** with
+file or project scope. These actions keep threads open. Native For-agent marks
+are visible to the local CLI; hosted-browser marks remain private to that
+browser and can be copied there.
+
 ## Install
 
 ### Homebrew
@@ -156,6 +177,8 @@ attn review join 'attn://review/...'            # open/join through the app
 attn review join 'attn://review/...' --as-agent reviewer
 attn review list-agents
 attn review whoami
+attn feedback [path]
+attn feedback --watch [path]
 ```
 
 ### Keyboard shortcuts

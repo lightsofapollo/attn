@@ -17,6 +17,7 @@ pub mod compression;
 pub mod crypto;
 pub mod diff_suggestions;
 pub mod envelope;
+pub mod feedback;
 pub mod ids;
 pub mod ipc;
 pub mod manager;

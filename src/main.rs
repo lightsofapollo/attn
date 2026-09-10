@@ -1,5 +1,6 @@
 #[cfg(target_os = "macos")]
 mod cli_alias;
+mod cli_feedback;
 mod cli_review;
 mod cli_share;
 mod daemon;
@@ -116,6 +117,8 @@ struct Cli {
 /// `path` flow so `attn some/file.md` still works without a subcommand.
 #[derive(Subcommand, Debug)]
 enum TopLevelSubcommand {
+    /// Read feedback marked for coding agents, or wait for changes.
+    Feedback(cli_feedback::FeedbackArgs),
     /// Manage review rooms and agent identities. Spec:
     /// `planning/collab/amendments.md` §Agent CLI key handling.
     Review(cli_review::ReviewArgs),
@@ -157,6 +160,7 @@ fn run() -> Result<()> {
     // fail with "cannot open '.'" when none was passed.
     if let Some(command) = cli.command.take() {
         match command {
+            TopLevelSubcommand::Feedback(args) => return cli_feedback::run(args),
             TopLevelSubcommand::Review(args) => return cli_review::run(args),
             TopLevelSubcommand::Share(args) => return cli_share::run(args),
             TopLevelSubcommand::Daemon(args) => {
@@ -1880,6 +1884,7 @@ if (!window.__attn__) {
         reviewCollab: __attnQueueReview('reviewCollab'),
         reviewUnread: __attnQueueReview('reviewUnread'),
         reviewNotificationMute: __attnQueueReview('reviewNotificationMute'),
+        reviewFeedbackRouting: __attnQueueReview('reviewFeedbackRouting'),
         increaseFontScale: () => {},
         decreaseFontScale: () => {},
         resetFontScale: () => {},
@@ -2178,6 +2183,29 @@ mod tests {
             cli.command,
             Some(TopLevelSubcommand::Daemon(DaemonArgs {
                 resident: true,
+                ..
+            }))
+        ));
+    }
+
+    #[test]
+    fn feedback_subcommand_accepts_snapshot_and_watch_shapes() {
+        let snapshot = Cli::try_parse_from(["attn", "feedback", "docs/plan.md", "--json"])
+            .expect("feedback snapshot args");
+        assert!(matches!(
+            snapshot.command,
+            Some(TopLevelSubcommand::Feedback(cli_feedback::FeedbackArgs {
+                json: true,
+                watch: false,
+                ..
+            }))
+        ));
+        let watch =
+            Cli::try_parse_from(["attn", "feedback", "--watch"]).expect("feedback watch args");
+        assert!(matches!(
+            watch.command,
+            Some(TopLevelSubcommand::Feedback(cli_feedback::FeedbackArgs {
+                watch: true,
                 ..
             }))
         ));
@@ -2615,6 +2643,13 @@ mod tests {
                 },
                 "reviewUnread",
             ),
+            (
+                ReviewUpdate::FeedbackRoutingChanged {
+                    room_id: room.clone(),
+                    routing: crate::review::store::FeedbackRoutingState::default(),
+                },
+                "reviewFeedbackRouting",
+            ),
         ];
 
         for (update, expected_callback) in cases {
@@ -2644,6 +2679,7 @@ mod tests {
             "reviewEvent",
             "reviewUnread",
             "reviewConnection",
+            "reviewFeedbackRouting",
         ] {
             assert!(
                 init.contains(&format!("{callback}: __attnQueueReview('{callback}')")),

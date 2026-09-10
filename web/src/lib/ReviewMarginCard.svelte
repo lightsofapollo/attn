@@ -148,6 +148,13 @@
     /** Cancel the in-flight reanchor for this card. */
     onCancelReanchor?: () => void;
     /** Hosted receiver mode: render content/navigation but no mutations. */
+    /** This private thread is exposed by `attn feedback`. */
+    forAgent?: boolean;
+    /** Included in the current Copy selected batch. */
+    selectedForAgent?: boolean;
+    onToggleForAgent?: (marked: boolean) => void | Promise<void>;
+    onToggleFeedbackSelection?: (selected: boolean) => void;
+    onCopyFeedback?: () => void | Promise<void>;
     readOnly?: boolean;
     /** Hosted reviewer may reply/resolve comments, but never apply/re-anchor. */
     reviewerAuthoring?: boolean;
@@ -175,6 +182,11 @@
     onDiscardStale,
     awaitingReanchor = false,
     onCancelReanchor,
+    forAgent = false,
+    selectedForAgent = false,
+    onToggleForAgent,
+    onToggleFeedbackSelection,
+    onCopyFeedback,
     readOnly = false,
     reviewerAuthoring = false,
   }: Props = $props();
@@ -342,6 +354,16 @@
     e.stopPropagation();
     if (readOnly && !reviewerAuthoring) return;
     if (onResolve) onResolve();
+  }
+
+  function toggleForAgent(e: MouseEvent): void {
+    e.stopPropagation();
+    void onToggleForAgent?.(!forAgent);
+  }
+
+  function copyForAgent(e: MouseEvent): void {
+    e.stopPropagation();
+    void onCopyFeedback?.();
   }
 
   function handleUnresolve(e: MouseEvent): void {
@@ -718,6 +740,41 @@
   </footer>
   {/if}
 
+  {#if kind === 'comment' && cardState !== 'resolved'}
+    <div class="rmc-feedback-actions" data-slot="feedback-actions">
+      {#if forAgent}
+        <label class="rmc-feedback-select" title="Include in Copy selected">
+          <input
+            type="checkbox"
+            checked={selectedForAgent}
+            aria-label={`Select feedback from ${authorName}`}
+            onchange={(e) => onToggleFeedbackSelection?.(e.currentTarget.checked)}
+            onclick={(e) => e.stopPropagation()}
+          />
+        </label>
+      {/if}
+      <button
+        type="button"
+        class="rmc-btn rmc-feedback-mark"
+        class:active={forAgent}
+        aria-pressed={forAgent}
+        data-action="for-agent"
+        onclick={toggleForAgent}
+      >
+        {forAgent ? 'For agent' : 'Mark for agent'}
+      </button>
+      <button
+        type="button"
+        class="rmc-btn"
+        data-action="copy-feedback"
+        disabled={!forAgent}
+        onclick={copyForAgent}
+      >
+        Copy
+      </button>
+    </div>
+  {/if}
+
   {#if suggestionFeedback.status === 'error'}
     <p class="rmc-action-feedback rmc-action-error" role="alert">
       {suggestionFeedback.message}
@@ -832,6 +889,32 @@
   .review-margin-card[data-pending-dismiss='true'] {
     opacity: 0.35;
     pointer-events: none;
+  }
+
+  .rmc-feedback-actions {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    margin-top: 8px;
+    padding-top: 7px;
+    border-top: 1px solid color-mix(in oklch, var(--border) 72%, transparent);
+  }
+
+  .rmc-feedback-select {
+    display: inline-flex;
+    align-items: center;
+    padding: 3px 2px;
+    cursor: pointer;
+  }
+
+  .rmc-feedback-select input {
+    accent-color: var(--primary);
+  }
+
+  .rmc-feedback-mark.active {
+    background: color-mix(in oklch, var(--primary) 14%, var(--background));
+    border-color: color-mix(in oklch, var(--primary) 48%, var(--border));
+    color: var(--foreground);
   }
 
   /* Kind accents — fallbacks when no inline author color is set. */

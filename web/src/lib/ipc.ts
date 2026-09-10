@@ -167,6 +167,7 @@ export function reviewCreateComment(
   anchor: Anchor,
   body: string,
   parentThreadId?: string,
+  forAgent = false,
 ): Promise<void> {
   // `parentThreadId` joins an existing thread as a reply (attn-1rm); omit it to
   // open a new thread. The reply reuses the root comment's anchor.
@@ -176,8 +177,18 @@ export function reviewCreateComment(
     anchor,
     body,
     ...(parentThreadId !== undefined ? { parentThreadId } : {}),
+    ...(forAgent ? { forAgent: true } : {}),
   });
   return Promise.resolve();
+}
+
+/** Change one private native For-agent mark. */
+export function reviewSetFeedbackMark(
+  roomId: RoomId,
+  threadId: string,
+  marked: boolean,
+): void {
+  send({ type: 'review_set_feedback_mark', roomId, threadId, marked });
 }
 
 export function reviewCreateSuggestion(

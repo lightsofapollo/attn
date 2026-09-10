@@ -183,6 +183,7 @@ pub fn run(share: Option<&str>, mode: &str, relay_url: Option<&str>) -> Result<(
                         anchor: placeholder_anchor(),
                         body: body.to_string(),
                         parent_thread_id: None,
+                        for_agent: false,
                     }),
                     None => emit(&stdout_lock, "error comment: no active room"),
                 }

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tao::event_loop::EventLoopProxy;
@@ -117,6 +117,10 @@ pub enum SocketMessage {
         #[serde(default)]
         ttl: Option<String>,
     },
+
+    /// Stream provider-neutral marked feedback as flushed NDJSON.
+    #[serde(rename = "feedback_watch")]
+    FeedbackWatch { path: String },
 
     #[serde(rename = "durable_share_create", rename_all = "camelCase")]
     DurableShareCreate { path: String },
@@ -640,6 +644,61 @@ pub fn send_review_suggestions(
         }
         Some(other) => bail!("unexpected response: {other:?}"),
         None => bail!("no daemon running"),
+    }
+}
+
+/// Connect to the resident daemon and copy its validated feedback NDJSON to
+/// stdout. A clean EOF is still an error: watches are unbounded, so EOF means
+/// the daemon disappeared and the caller should reconnect explicitly.
+pub fn watch_feedback(path: &Path) -> Result<()> {
+    let absolute = path
+        .canonicalize()
+        .with_context(|| format!("could not resolve feedback scope {}", path.display()))?;
+    let sock = socket_path()?;
+    let mut stream = UnixStream::connect(&sock).with_context(|| {
+        format!(
+            "feedback --watch requires a running attn daemon at {}",
+            sock.display()
+        )
+    })?;
+    let message = SocketMessage::FeedbackWatch {
+        path: absolute.to_string_lossy().into_owned(),
+    };
+    writeln!(stream, "{}", serde_json::to_string(&message)?).context("start feedback watch")?;
+    stream
+        .shutdown(std::net::Shutdown::Write)
+        .context("finish feedback watch request")?;
+
+    let mut reader = BufReader::new(stream);
+    let stdout = std::io::stdout();
+    let mut output = stdout.lock();
+    let mut line = String::new();
+    loop {
+        line.clear();
+        let read = reader.read_line(&mut line).context("read feedback watch")?;
+        if read == 0 {
+            bail!("feedback watch ended because the attn daemon disconnected");
+        }
+        let trimmed = line.trim_end();
+        if let Ok(response) = serde_json::from_str::<SocketResponse>(trimmed)
+            && let SocketResponse::Error { message } = response
+        {
+            bail!("feedback watch failed: {message}");
+        }
+        let _: crate::review::feedback::FeedbackStreamRecord = serde_json::from_str(trimmed)
+            .context("daemon returned an invalid feedback stream record")?;
+        if let Err(error) = writeln!(output, "{trimmed}") {
+            if error.kind() == std::io::ErrorKind::BrokenPipe {
+                return Ok(());
+            }
+            return Err(error).context("write feedback stream");
+        }
+        if let Err(error) = output.flush() {
+            if error.kind() == std::io::ErrorKind::BrokenPipe {
+                return Ok(());
+            }
+            return Err(error).context("flush feedback stream");
+        }
     }
 }
 
@@ -1218,6 +1277,25 @@ fn handle_client(
                     serde_json::to_string(&resp).unwrap_or_default()
                 );
             }
+            Ok(SocketMessage::FeedbackWatch { path }) => {
+                let result = match review_manager {
+                    Some(manager) => stream_feedback(&mut stream, manager, Path::new(&path)),
+                    None => Err(anyhow::anyhow!("review manager is unavailable")),
+                };
+                if let Err(error) = result {
+                    tracing::warn!("feedback watch ended: {error:#}");
+                    let response = SocketResponse::Error {
+                        message: error.to_string(),
+                    };
+                    let _ = writeln!(
+                        stream,
+                        "{}",
+                        serde_json::to_string(&response).unwrap_or_default()
+                    );
+                    let _ = stream.flush();
+                }
+                return;
+            }
             Ok(SocketMessage::DurableShareCreate { path }) => {
                 let response = execute_durable_command(
                     review_manager,
@@ -1340,6 +1418,101 @@ fn handle_client(
                 );
             }
         }
+    }
+}
+
+fn write_feedback_record(
+    stream: &mut UnixStream,
+    record: &crate::review::feedback::FeedbackStreamRecord,
+) -> Result<()> {
+    serde_json::to_writer(&mut *stream, record).context("serialize feedback stream record")?;
+    stream
+        .write_all(b"\n")
+        .context("write feedback stream record")?;
+    stream.flush().context("flush feedback stream record")
+}
+
+/// A watch owns one socket worker. Projection is intentionally recomputed
+/// from the persisted log and current source bytes: review writes never block
+/// on a slow agent consumer, and source-only edits are observable even before
+/// attn publishes a new collaboration snapshot.
+fn stream_feedback(stream: &mut UnixStream, manager: &ReviewManager, path: &Path) -> Result<()> {
+    use crate::review::feedback::{
+        FEEDBACK_SCHEMA, FeedbackFreshness, FeedbackStreamRecord, diff_feedback,
+    };
+
+    let mut current = manager.feedback_snapshot(path, FeedbackFreshness::LiveLocal)?;
+    let mut cursor = 0_u64;
+    write_feedback_record(
+        stream,
+        &FeedbackStreamRecord::Snapshot {
+            schema: FEEDBACK_SCHEMA.to_owned(),
+            cursor,
+            complete: true,
+            snapshot: current.clone(),
+        },
+    )?;
+
+    loop {
+        std::thread::sleep(Duration::from_millis(200));
+        let next = manager.feedback_snapshot(path, FeedbackFreshness::LiveLocal)?;
+        if next == current {
+            continue;
+        }
+        let (upserts, removals) = diff_feedback(&current, &next);
+        if upserts.len().saturating_add(removals.len()) > 256 {
+            cursor = cursor.wrapping_add(1);
+            write_feedback_record(
+                stream,
+                &FeedbackStreamRecord::Reset {
+                    schema: FEEDBACK_SCHEMA.to_owned(),
+                    cursor,
+                    reason: "change_set_too_large".to_owned(),
+                    snapshot: next.clone(),
+                },
+            )?;
+        } else {
+            for feedback in upserts {
+                let previous = current
+                    .feedback
+                    .iter()
+                    .find(|record| record.id == feedback.id);
+                let reason = match previous {
+                    Some(record) if record.feedback_revision != feedback.feedback_revision => {
+                        "feedback_changed"
+                    }
+                    Some(record) if record.source_revision != feedback.source_revision => {
+                        "source_changed"
+                    }
+                    Some(_) => "context_changed",
+                    None => "became_actionable",
+                };
+                cursor = cursor.wrapping_add(1);
+                write_feedback_record(
+                    stream,
+                    &FeedbackStreamRecord::Upsert {
+                        schema: FEEDBACK_SCHEMA.to_owned(),
+                        cursor,
+                        reason: reason.to_owned(),
+                        feedback: Box::new(feedback),
+                    },
+                )?;
+            }
+            for (id, feedback_revision, reason) in removals {
+                cursor = cursor.wrapping_add(1);
+                write_feedback_record(
+                    stream,
+                    &FeedbackStreamRecord::Remove {
+                        schema: FEEDBACK_SCHEMA.to_owned(),
+                        cursor,
+                        reason,
+                        id,
+                        feedback_revision,
+                    },
+                )?;
+            }
+        }
+        current = next;
     }
 }
 
@@ -1695,6 +1868,153 @@ mod tests {
             .expect("revoke"),
             r#"{"type":"durable_share_revoke","target":"share-id"}"#
         );
+    }
+
+    #[test]
+    fn feedback_watch_socket_wire_shape_is_stable() {
+        let json = serde_json::to_string(&SocketMessage::FeedbackWatch {
+            path: "/tmp/project".to_owned(),
+        })
+        .expect("feedback watch message");
+        assert_eq!(json, r#"{"type":"feedback_watch","path":"/tmp/project"}"#);
+        assert!(matches!(
+            serde_json::from_str::<SocketMessage>(&json).expect("round trip"),
+            SocketMessage::FeedbackWatch { path } if path == "/tmp/project"
+        ));
+    }
+
+    #[test]
+    fn feedback_watch_streams_initial_source_and_removal_records() {
+        use crate::review::crypto::ids::content_hash;
+        use crate::review::feedback::FeedbackStreamRecord;
+        use crate::review::ids::{DeviceId, EventId, FileId, ParticipantId, RoomId, SnapshotId};
+        use crate::review::model::{
+            Anchor, EventAuth, EventMeta, LocalFileBinding, PositionAnchor, ReviewEvent,
+            ReviewEventBody,
+        };
+        use std::collections::HashMap;
+
+        fn id<T: serde::de::DeserializeOwned>(value: &str) -> T {
+            serde_json::from_value(serde_json::Value::String(value.to_owned())).expect("string id")
+        }
+
+        let tmp = TempDir::new().expect("tempdir");
+        let project = tmp.path().join("project");
+        std::fs::create_dir(&project).expect("project");
+        let path = project.join("brief.md");
+        let source = b"# Brief\n\nOriginal copy.\n";
+        std::fs::write(&path, source).expect("source");
+
+        let store = Arc::new(
+            ReviewStore::open_at(tmp.path().join("reviews")).expect("open feedback store"),
+        );
+        let room_id: RoomId = id("room-watch");
+        let file_id: FileId = id("file-watch");
+        let mut bindings = HashMap::new();
+        bindings.insert(
+            file_id.clone(),
+            LocalFileBinding {
+                file_id: file_id.clone(),
+                absolute_path: path.to_string_lossy().into_owned(),
+                project_root: project.to_string_lossy().into_owned(),
+            },
+        );
+        store.save_bindings(&room_id, &bindings).expect("bindings");
+        store
+            .append_event(
+                &room_id,
+                &ReviewEvent {
+                    meta: EventMeta {
+                        v: 2,
+                        event_id: id::<EventId>("event-watch"),
+                        room_id: room_id.clone(),
+                        author_id: id::<ParticipantId>("participant-watch"),
+                        device_id: id::<DeviceId>("device-watch"),
+                        created_at: 1,
+                        parent_event_ids: Vec::new(),
+                        snapshot_id: None,
+                    },
+                    body: ReviewEventBody::CommentCreated {
+                        thread_id: "thread-watch".to_owned(),
+                        anchor: Anchor {
+                            v: 2,
+                            file_id,
+                            snapshot_id: id::<SnapshotId>("snapshot-watch"),
+                            base_hash: content_hash(source),
+                            position: PositionAnchor {
+                                byte_range: [9, 22],
+                                line_range: [3, 3],
+                                pm_range: None,
+                            },
+                            quote: None,
+                            block: None,
+                            context: None,
+                            structure: None,
+                            html: None,
+                        },
+                        body: "Make this concrete".to_owned(),
+                    },
+                    auth: EventAuth {
+                        signature: "sig".to_owned(),
+                        signing_key_id: "key".to_owned(),
+                    },
+                },
+            )
+            .expect("event");
+        store
+            .set_feedback_mark(&room_id, "thread-watch", true, 2)
+            .expect("mark");
+
+        let working_copy = Arc::new(WorkingCopyService::new());
+        let sink: UpdateSink = Arc::new(|_| {});
+        let manager = Arc::new(ReviewManager::new(Arc::clone(&store), working_copy, sink));
+        let (mut server, client) = UnixStream::pair().expect("socket pair");
+        client
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .expect("read timeout");
+        let watched_path = path.clone();
+        let watch =
+            std::thread::spawn(move || stream_feedback(&mut server, &manager, &watched_path));
+        let mut reader = BufReader::new(client);
+
+        let mut line = String::new();
+        reader.read_line(&mut line).expect("initial record");
+        assert!(matches!(
+            serde_json::from_str::<FeedbackStreamRecord>(line.trim()).expect("initial JSON"),
+            FeedbackStreamRecord::Snapshot {
+                cursor: 0,
+                complete: true,
+                ..
+            }
+        ));
+
+        std::fs::write(&path, b"# Brief\n\nRevised concrete copy.\n").expect("edit source");
+        line.clear();
+        reader.read_line(&mut line).expect("source upsert");
+        assert!(matches!(
+            serde_json::from_str::<FeedbackStreamRecord>(line.trim()).expect("upsert JSON"),
+            FeedbackStreamRecord::Upsert {
+                cursor: 1,
+                ref reason,
+                ..
+            } if reason == "source_changed"
+        ));
+
+        store
+            .set_feedback_mark(&room_id, "thread-watch", false, 3)
+            .expect("unmark");
+        line.clear();
+        reader.read_line(&mut line).expect("remove record");
+        assert!(matches!(
+            serde_json::from_str::<FeedbackStreamRecord>(line.trim()).expect("remove JSON"),
+            FeedbackStreamRecord::Remove { cursor: 2, .. }
+        ));
+
+        drop(reader);
+        store
+            .set_feedback_mark(&room_id, "thread-watch", true, 4)
+            .expect("remark");
+        assert!(watch.join().expect("watch thread").is_err());
     }
 
     #[test]

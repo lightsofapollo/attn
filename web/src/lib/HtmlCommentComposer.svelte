@@ -31,7 +31,7 @@
     fileId: FileId;
     snapshotId: SnapshotId;
     baseHash: ContentHash;
-    onCreateComment: (anchor: Anchor, body: string) => Promise<void> | void;
+    onCreateComment: (anchor: Anchor, body: string, forAgent: boolean) => Promise<void> | void;
     onClose: () => void;
     onSubmitted?: () => void;
   }
@@ -51,6 +51,7 @@
   let submitting = $state(false);
   let submitError = $state<string | null>(null);
   let textareaEl: HTMLTextAreaElement | undefined = $state(undefined);
+  let forAgent = $state(false);
 
   $effect(() => {
     textareaEl?.focus();
@@ -99,7 +100,7 @@
     submitting = true;
     submitError = null;
     try {
-      await onCreateComment(buildAnchor(), body.trim());
+      await onCreateComment(buildAnchor(), body.trim(), forAgent);
       onSubmitted?.();
       onClose();
     } catch (err) {
@@ -159,6 +160,10 @@
     placeholder="Add a comment&hellip;"
     onkeydown={handleBodyKeydown}
   ></textarea>
+  <label class="mt-2 flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+    <input bind:checked={forAgent} type="checkbox" class="accent-primary" />
+    Mark for agent
+  </label>
   {#if submitError}
     <p class="mt-2 text-xs text-destructive" role="alert" data-slot="comment-composer-error">
       {submitError}

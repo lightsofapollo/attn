@@ -57,6 +57,63 @@ register-agent  -->  invite URL  -->  join  -->  submit findings  -->  exit
 `register-agent` is a one-time setup step that mints the keypair. The
 keypair persists across `join`s; the invite URL is the per-room piece.
 
+## Read feedback before joining a room
+
+An editing agent does not need an attn identity, invite, or provider-specific
+integration to act on feedback that a user has marked **For agent**. It only
+needs filesystem access to the document or project and the local attn data:
+
+```bash
+# Read a complete, point-in-time packet from persisted local state.
+attn feedback path/to/document.md
+
+# Consume the stable JSON contract instead of the readable packet.
+attn feedback path/to/document.md --json
+
+# Keep listening while the attn daemon is running. Each stdout line is one
+# flushed JSON record: snapshot, upsert, remove, or reset.
+attn feedback path/to/document.md --watch
+```
+
+The path may name one file or a project directory. Every actionable record
+contains the room and thread IDs, the bound file, the request and replies,
+anchor evidence, a feedback revision, and a separate current-source revision.
+The agent verifies the quoted text against the current file, edits that file
+directly with its normal tools, and reports completed work by feedback ID in
+its own dialogue. `--watch` is a blocking event stream; it replaces a
+poll-and-wait loop without coupling attn to an agent provider or model.
+
+[`examples/feedback-watch.mjs`](../../examples/feedback-watch.mjs) is a small
+host adapter that demonstrates the consumer rules. It replaces state on
+`snapshot` or `reset`, removes cancelled/resolved work on `remove`, schedules a
+new request only when `feedbackRevision` advances, and treats a
+`sourceRevision` change as refreshed context. It prints scheduling records and
+does not choose a model or edit a file.
+
+Identity and room membership are required only when an agent wants to publish
+signed comments or suggestions back into a review room. The lifecycle below
+covers that separate write path.
+
+### Output and failure cases
+
+The first watch line is always a complete state replacement:
+
+```json
+{"type":"snapshot","schema":"attn.feedback.v1","cursor":0,"complete":true,"snapshot":{"freshness":"live_local","feedback":[]}}
+```
+
+Later lines use `upsert`, `remove`, or `reset`. Treat the excerpt as a shape,
+not a complete schema example; records include the IDs, source, conversation,
+anchor and revisions described above. An empty mapped scope succeeds with an
+empty `feedback` array. An unmapped path, an ambiguous project ancestor, a
+corrupt/future routing file, or a source outside its bound project fails
+explicitly. Watch mode without a daemon exits non-zero with
+`feedback --watch requires a running attn daemon`; an unexpected daemon EOF is
+also non-zero so the host can restart and consume a new snapshot.
+
+See [agent-feedback-implementation-evidence.md](agent-feedback-implementation-evidence.md)
+for the two-host live exercise, measured delivery, and full gate results.
+
 ### 1. Register
 
 ```bash

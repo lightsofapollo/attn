@@ -52,6 +52,36 @@ pub struct ReviewStore {
     /// Serializes read/modify/write of `unread.json`. Imports arrive on
     /// transport tasks while focus clears arrive on the IPC thread.
     unread_mutation: std::sync::Mutex<()>,
+    /// Serializes read/modify/write of owner-private feedback routing. The
+    /// file is local UI/CLI state, never a review event and never relayed.
+    feedback_routing_mutation: std::sync::Mutex<()>,
+}
+
+/// One local user's decision to route a review thread to their coding agent.
+/// Tombstones (`marked=false`) keep every transition revisioned for watchers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackRoute {
+    pub marked: bool,
+    pub revision: u64,
+    pub updated_at: u64,
+}
+
+/// Versioned owner-private routing state for one room.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FeedbackRoutingState {
+    pub v: u32,
+    pub threads: BTreeMap<String, FeedbackRoute>,
+}
+
+impl Default for FeedbackRoutingState {
+    fn default() -> Self {
+        Self {
+            v: 1,
+            threads: BTreeMap::new(),
+        }
+    }
 }
 
 /// Durable per-room unread cursor. `latest_event_id` is the furthest accounted
@@ -114,6 +144,26 @@ impl ReviewStore {
         Ok(Self {
             root,
             unread_mutation: std::sync::Mutex::new(()),
+            feedback_routing_mutation: std::sync::Mutex::new(()),
+        })
+    }
+
+    /// Open an existing store without creating the runtime or review
+    /// directories. `attn feedback` uses this read-only entrypoint.
+    pub fn open_existing() -> Result<Self> {
+        Self::open_existing_at(runtime_dir()?.join("reviews"))
+    }
+
+    pub fn open_existing_at(root: PathBuf) -> Result<Self> {
+        let meta = std::fs::metadata(&root)
+            .with_context(|| format!("no persisted attn review store at {}", root.display()))?;
+        if !meta.is_dir() {
+            anyhow::bail!("attn review store is not a directory: {}", root.display());
+        }
+        Ok(Self {
+            root,
+            unread_mutation: std::sync::Mutex::new(()),
+            feedback_routing_mutation: std::sync::Mutex::new(()),
         })
     }
 
@@ -144,6 +194,10 @@ impl ReviewStore {
 
     fn bindings_file(&self, room_id: &RoomId) -> PathBuf {
         self.room_dir(room_id).join("bindings.json")
+    }
+
+    fn feedback_routing_file(&self, room_id: &RoomId) -> PathBuf {
+        self.room_dir(room_id).join("feedback-routing.json")
     }
 
     fn cursor_file(&self, room_id: &RoomId) -> PathBuf {
@@ -784,6 +838,65 @@ impl ReviewStore {
     ) -> Result<()> {
         let dir = self.room_dir(room_id);
         write_json_atomic(&dir, &self.bindings_file(room_id), bindings)
+    }
+
+    // ---------------------------------------------------------------------
+    // Personal agent-feedback routing
+    // ---------------------------------------------------------------------
+
+    /// Load this runtime profile's private For-agent marks. Missing data is
+    /// an unmarked room; malformed or forward-version data fails closed so a
+    /// CLI query cannot misreport corruption as "no feedback".
+    pub fn load_feedback_routing(&self, room_id: &RoomId) -> Result<FeedbackRoutingState> {
+        let state = read_json::<FeedbackRoutingState>(&self.feedback_routing_file(room_id))?
+            .unwrap_or_default();
+        if state.v != 1 {
+            anyhow::bail!(
+                "unsupported feedback routing version {} for room {}",
+                state.v,
+                room_id.as_str()
+            );
+        }
+        Ok(state)
+    }
+
+    /// Atomically change one thread's local routing state. Repeating the same
+    /// value is idempotent; an actual transition increments its durable
+    /// revision. The mutex covers the whole read/modify/write transaction.
+    pub fn set_feedback_mark(
+        &self,
+        room_id: &RoomId,
+        thread_id: &str,
+        marked: bool,
+        updated_at: u64,
+    ) -> Result<FeedbackRoute> {
+        let thread_id = thread_id.trim();
+        if thread_id.is_empty() || thread_id.len() > 512 {
+            anyhow::bail!("feedback thread id must contain 1..=512 bytes");
+        }
+        let _guard = self
+            .feedback_routing_mutation
+            .lock()
+            .map_err(|_| anyhow::anyhow!("feedback routing lock poisoned"))?;
+        let mut state = self.load_feedback_routing(room_id)?;
+        if let Some(existing) = state.threads.get(thread_id)
+            && existing.marked == marked
+        {
+            return Ok(existing.clone());
+        }
+        let revision = state
+            .threads
+            .get(thread_id)
+            .map_or(1, |route| route.revision.saturating_add(1));
+        let route = FeedbackRoute {
+            marked,
+            revision,
+            updated_at,
+        };
+        state.threads.insert(thread_id.to_owned(), route.clone());
+        let dir = self.room_dir(room_id);
+        write_json_atomic(&dir, &self.feedback_routing_file(room_id), &state)?;
+        Ok(route)
     }
 
     // ---------------------------------------------------------------------
@@ -1862,6 +1975,82 @@ mod tests {
         store.save_bindings(&room_id, &bindings).expect("save");
         let loaded = store.load_bindings(&room_id).expect("load");
         assert_eq!(loaded, bindings);
+    }
+
+    #[test]
+    fn feedback_routing_is_revisioned_idempotent_and_private() {
+        let (_tmp, store) = fresh_store();
+        let room_id: RoomId = id("room-feedback");
+
+        assert_eq!(
+            store
+                .load_feedback_routing(&room_id)
+                .expect("empty routing"),
+            FeedbackRoutingState::default()
+        );
+        let marked = store
+            .set_feedback_mark(&room_id, "thread-1", true, 10)
+            .expect("mark");
+        assert_eq!(marked.revision, 1);
+        let repeated = store
+            .set_feedback_mark(&room_id, "thread-1", true, 11)
+            .expect("repeat");
+        assert_eq!(repeated, marked, "same value must not mint a revision");
+        let removed = store
+            .set_feedback_mark(&room_id, "thread-1", false, 12)
+            .expect("remove");
+        assert_eq!(removed.revision, 2);
+        assert!(!removed.marked);
+
+        assert!(store.feedback_routing_file(&room_id).exists());
+        assert!(
+            !store.events_file(&room_id).exists(),
+            "private routing must not create a shared review event"
+        );
+
+        store.delete_room(&room_id).expect("delete routed room");
+        assert_eq!(
+            store
+                .load_feedback_routing(&room_id)
+                .expect("routing removed with room"),
+            FeedbackRoutingState::default()
+        );
+    }
+
+    #[test]
+    fn malformed_or_future_feedback_routing_fails_closed() {
+        let (_tmp, store) = fresh_store();
+        let room_id: RoomId = id("room-feedback-corrupt");
+        let room_dir = store.room_dir(&room_id);
+        std::fs::create_dir_all(&room_dir).expect("room dir");
+        std::fs::write(store.feedback_routing_file(&room_id), b"{broken").expect("corrupt routing");
+        assert!(store.load_feedback_routing(&room_id).is_err());
+
+        std::fs::write(
+            store.feedback_routing_file(&room_id),
+            br#"{"v":2,"threads":{}}"#,
+        )
+        .expect("future routing");
+        let error = store
+            .load_feedback_routing(&room_id)
+            .expect_err("future routing must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported feedback routing version")
+        );
+    }
+
+    #[test]
+    fn open_existing_does_not_create_a_store() {
+        let tmp = TempDir::new().expect("tempdir");
+        let absent = tmp.path().join("missing");
+        let error = match ReviewStore::open_existing_at(absent.clone()) {
+            Ok(_) => panic!("missing store unexpectedly opened"),
+            Err(error) => error,
+        };
+        assert!(error.to_string().contains("no persisted attn review store"));
+        assert!(!absent.exists());
     }
 
     #[test]

@@ -279,6 +279,7 @@ fn run_scenario(relay_url: &str, mode: &str) -> (bool, bool) {
         anchor: placeholder_anchor(),
         body: marker.to_string(),
         parent_thread_id: None,
+        for_agent: false,
     });
     assert!(
         rvb.saw_comment(marker),
@@ -463,6 +464,7 @@ fn v3_tiers_enforce_comment_and_suggestion_end_to_end() {
         anchor: placeholder_anchor(),
         body: marker.into(),
         parent_thread_id: None,
+        for_agent: false,
     });
     assert!(poll_until(Duration::from_secs(20), || owner.saw_comment(marker)));
     commenter.mgr.submit(ReviewCommand::CreateSuggestion {
@@ -533,6 +535,7 @@ fn v3_tiers_enforce_comment_and_suggestion_end_to_end() {
         anchor: placeholder_anchor(),
         body: barrier.into(),
         parent_thread_id: None,
+        for_agent: false,
     });
     assert!(poll_until(Duration::from_secs(20), || owner.saw_comment(barrier)));
     assert!(!owner.saw_suggestion("hostile-wire"));

@@ -99,6 +99,7 @@ type ReviewPresenceFn = (payload: import('../lib/types').ReviewPresenceChanged) 
 type ReviewConnectionFn = (payload: import('../lib/types').ReviewConnectionChanged) => void;
 type ReviewUnreadFn = (payload: import('../lib/types').ReviewUnreadChanged) => void;
 type ReviewNotificationMuteFn = (payload: import('../lib/types').ReviewNotificationMuteChanged) => void;
+type ReviewFeedbackRoutingFn = (payload: import('../lib/types').ReviewFeedbackRoutingChanged) => void;
 type ReviewCollabFn = (payload: import('../lib/types').ReviewCollabSignal) => void;
 
 interface AttnBridge {
@@ -152,6 +153,7 @@ interface AttnBridge {
   reviewUnread?: ReviewUnreadFn;
   /** Push the persisted per-room native notification preference. */
   reviewNotificationMute?: ReviewNotificationMuteFn;
+  reviewFeedbackRouting?: ReviewFeedbackRoutingFn;
   /**
    * Push inbound live co-typing traffic (prosemirror-collab steps) to the
    * webview's collab controller. Optional: only the daemon emits it.
@@ -363,6 +365,7 @@ function mockBrowserInvite(tier: InviteTierV3): string {
 }
 
 let mockEventCounter = 0;
+const mockFeedbackRouting: Record<string, import('../lib/types').FeedbackRoutingState> = {};
 function mockEventId(prefix: string): EventId {
   mockEventCounter += 1;
   return `mock-${prefix}-${Date.now()}-${mockEventCounter}`;
@@ -667,7 +670,30 @@ function handleReviewCreateComment(
     eventId,
     msg.anchor.snapshotId,
   );
-  setTimeout(() => emitEvent(event), 50);
+  setTimeout(() => {
+    emitEvent(event);
+    if (msg.forAgent && event.body.type === 'comment_created') {
+      emitMockFeedbackMark(event.meta.roomId, event.body.threadId, true);
+    }
+  }, 50);
+}
+
+function emitMockFeedbackMark(roomId: string, threadId: string, marked: boolean): void {
+  const current = mockFeedbackRouting[roomId] ?? { v: 1, threads: {} };
+  const previous = current.threads[threadId];
+  const routing: import('../lib/types').FeedbackRoutingState = {
+    v: 1,
+    threads: {
+      ...current.threads,
+      [threadId]: {
+        marked,
+        revision: previous?.marked === marked ? previous.revision : (previous?.revision ?? 0) + 1,
+        updatedAt: Date.now(),
+      },
+    },
+  };
+  mockFeedbackRouting[roomId] = routing;
+  window.__attn__?.reviewFeedbackRouting?.({ roomId, routing });
 }
 
 function handleReviewCreateSuggestion(
@@ -731,6 +757,9 @@ function dispatchReviewCommand(msg: IpcMessage): void {
       return;
     case 'review_create_comment':
       handleReviewCreateComment(msg);
+      return;
+    case 'review_set_feedback_mark':
+      emitMockFeedbackMark(msg.roomId, msg.threadId, msg.marked);
       return;
     case 'review_create_suggestion':
       handleReviewCreateSuggestion(msg);
